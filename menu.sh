@@ -65,8 +65,31 @@ screen_lang() {
 }
 
 # ── Статус на главном экране ──────────────────────────────────────────
+# Все значения читаются одним вызовом python: экран перерисовывается часто,
+# плодить по семь процессов на кадр незачем. Разделитель — вертикальная черта.
+read_state() {
+    python3 - <<'PY' 2>/dev/null || echo "0|?|0|80|5|1|60"
+import json
+try:
+    c = json.load(open("/etc/shaper/config.json"))
+except Exception:
+    c = {}
+g = {"enabled": False, "trigger_percent": 80, "sustain_min": 5,
+     "penalty_mbps": 1, "penalty_min": 60}
+g.update(c.get("guard", {}))
+ports = c.get("ports", [])
+print("|".join([
+    f"{float(c.get('speed_mbps', 0)):g}",
+    ", ".join(map(str, ports)) if ports and ports != [0] else "*",
+    "1" if g["enabled"] else "0",
+    f"{g['trigger_percent']:g}", f"{g['sustain_min']:g}",
+    f"{g['penalty_mbps']:g}", f"{g['penalty_min']:g}",
+]))
+PY
+}
+
 status_line() {
-    local ifc speed ports auto_on=0 run_on=0
+    local ifc speed ports g_on thr sus pen dur trig auto_on=0 run_on=0
 
     "$ENGINE" state >/dev/null 2>&1 && run_on=1
     systemctl is-enabled shaper >/dev/null 2>&1 && auto_on=1
@@ -74,12 +97,9 @@ status_line() {
     ifc="$(sed -n 's/^IFACE="\(.*\)"$/\1/p' "$ETC_DIR/.active_iface" 2>/dev/null)"
     [[ -z "$ifc" ]] && ifc="$(ip route get 1.1.1.1 2>/dev/null |
                               sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
-    speed="$(cfg speed_mbps 0)"
-    ports="$(python3 -c "
-import json
-try: p = json.load(open('$ETC_DIR/config.json'))['ports']
-except Exception: p = []
-print(', '.join(map(str, p)) if p != [0] else '${T[st_all]}')" 2>/dev/null || echo '?')"
+
+    IFS='|' read -r speed ports g_on thr sus pen dur <<< "$(read_state)"
+    [[ "$ports" == "*" ]] && ports="${T[st_all]}"
 
     if (( run_on )); then
         echo -e "  🟢  ${T[st_shaper]} ${G}${T[st_running]}${N}   ${D}${T[st_iface]} ${ifc:-?}${N}"
@@ -93,12 +113,24 @@ print(', '.join(map(str, p)) if p != [0] else '${T[st_all]}')" 2>/dev/null || ec
         echo -e "  ⚠️   ${T[st_auto]} ${Y}${T[st_auto_off]}${N}   ${D}${T[st_auto_warn]}${N}"
     fi
 
-    if [[ "$speed" == "0" || -z "$speed" ]]; then
+    if [[ "$speed" == "0" ]]; then
         echo -e "  ⚪  ${T[st_speed]} ${Y}${T[st_unlimited]}${N}"
-        echo -e "  🔌  ${T[st_port]} ${D}${ports}${N}"
     else
         echo -e "  🚀  ${T[st_speed]} ${B}${speed} Mbit/s${N} ${D}${T[st_peruser]}${N}"
-        echo -e "  🔌  ${T[st_port]} ${B}${ports}${N}"
+    fi
+    echo -e "  🔌  ${T[st_port]} ${B}${ports}${N}"
+
+    if [[ "$g_on" == "1" ]]; then
+        if [[ "$speed" == "0" ]]; then
+            echo -e "  🚦  ${T[st_guard]} ${G}${T[st_g_on]}${N}    ${Y}${T[st_g_nolimit]}${N}"
+        else
+            trig="$(awk "BEGIN{printf \"%g\", $speed*$thr/100}")"
+            echo -e "  🚦  ${T[st_guard]} ${G}${T[st_g_on]}${N}" \
+                    "${D}${T[st_g_above]} ${trig} Mbit/s ${sus} ${T[min]}" \
+                    "→ ${pen} Mbit/s ${T[g_for]} ${dur} ${T[min]}${N}"
+        fi
+    else
+        echo -e "  🚦  ${T[st_guard]} ${D}${T[st_g_off]}${N}   ${D}${T[st_g_none]}${N}"
     fi
 }
 
@@ -456,6 +488,8 @@ while :; do
     echo -e "  [7] 🤍 ${T[m7]}"
     echo -e "  [8] 🔧 ${T[m8]} ${D}${T[m8d]}${N}"
     echo -e "  [0] 🚪 ${T[m0]}"
+    hr
+    echo -e "  ☕ ${D}${T[credit]}${N}"
     echo
     case "$(ask "${T[choice]}")" in
         1) screen_limit ;;
