@@ -1,0 +1,14 @@
+[Unit]
+Description=Shape — eBPF traffic shaper (per-IP speed limits in Mbit/s)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/shaper/engine.sh load
+ExecStop=/opt/shaper/engine.sh unload
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
