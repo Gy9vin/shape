@@ -420,7 +420,9 @@ screen_service() {
                fi
                sleep 2 ;;
             5) title "${T[sv_logs]}"
-               journalctl -u shaper -n 40 --no-pager | sed 's/^/  /'; pause ;;
+               # оба юнита: движок и сторож — штрафы пишет именно сторож
+               journalctl -u shaper -u shaper-watch -n 40 --no-pager |
+                   sed 's/^/  /'; pause ;;
             6) title "${T[dr_title]}"; doctor; pause ;;
             7) screen_update ;;
             8) screen_lang ;;
