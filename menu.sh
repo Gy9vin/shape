@@ -171,6 +171,98 @@ print(','.join(map(str, p)))" 2>/dev/null || echo 443)"
     pause
 }
 
+# ── Автоограничение ───────────────────────────────────────────────────
+guard_get() { python3 -c "
+import json
+try: g = json.load(open('$ETC_DIR/config.json')).get('guard', {})
+except Exception: g = {}
+d = {'enabled': False, 'trigger_percent': 80, 'sustain_min': 5,
+     'penalty_mbps': 1, 'penalty_min': 60}
+d.update(g); print(d['$1'])" 2>/dev/null; }
+
+screen_guard() {
+    local on thr sus pen dur speed v
+    while :; do
+        speed="$(cfg speed_mbps 0)"
+        on="$(guard_get enabled)"; thr="$(guard_get trigger_percent)"
+        sus="$(guard_get sustain_min)"; pen="$(guard_get penalty_mbps)"
+        dur="$(guard_get penalty_min)"
+
+        title "${T[g_title]}"
+        echo -e "  ${D}${T[g_h1]}${N}"
+        echo -e "  ${D}${T[g_h2]}${N}"
+        echo -e "  ${D}${T[g_h3]}${N}"
+        echo
+        if [[ "$on" == "True" ]]; then
+            echo -e "  ${T[g_state]} : ${G}${T[g_on]}${N}"
+        else
+            echo -e "  ${T[g_state]} : ${D}${T[g_off]}${N}"
+        fi
+        if [[ "$speed" != "0" && -n "$speed" ]]; then
+            echo -e "  ${T[g_thr]}      : ${B}$(awk "BEGIN{printf \"%g\", $speed*$thr/100}") Mbit/s${N}" \
+                    "${D}(${thr}% ${T[g_of_limit]})${N} ${T[g_sustain]} ${B}${sus}${N} ${T[min]}"
+        else
+            echo -e "  ${Y}${T[g_need_limit]}${N}"
+        fi
+        echo -e "  ${T[g_pen]} : ${B}${pen} Mbit/s${N} ${T[g_for]} ${B}${dur}${N} ${T[min]}"
+        hr
+        echo -e "  ${D}${T[g_note_yt]}${N}"
+        echo -e "  ${D}${T[g_note_4k]}${N}"
+        echo -e "  ${D}${T[g_note_big]}${N}"
+        hr
+        echo "  [1] ${T[g_toggle]}"
+        echo "  [2] ${T[g_set_sustain]}"
+        echo "  [3] ${T[g_set_pen]}"
+        echo "  [4] ${T[g_set_dur]}"
+        echo "  [5] ${T[g_set_thr]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) if [[ "$on" == "True" ]]; then "$CTL" guard --disable --quiet
+               else "$CTL" guard --enable --quiet; fi ;;
+            2) v="$(ask "${T[g_set_sustain]}" "$sus")"
+               [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --sustain "$v" --quiet ;;
+            3) v="$(ask "${T[g_set_pen]}" "$pen")"
+               [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --penalty-mbps "$v" --quiet ;;
+            4) v="$(ask "${T[g_set_dur]}" "$dur")"
+               [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --penalty-min "$v" --quiet ;;
+            5) v="$(ask "${T[g_set_thr]}" "$thr")"
+               [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --percent "$v" --quiet ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# ── Ограниченные пользователи ─────────────────────────────────────────
+limited_count() {
+    python3 -c "
+import json, time
+try: p = json.load(open('$ETC_DIR/penalties.json'))
+except Exception: p = {}
+now = time.time()
+print(sum(1 for v in p.values() if isinstance(v, dict) and v.get('until', 0) > now))
+" 2>/dev/null || echo 0
+}
+
+screen_limited() {
+    local ip
+    while :; do
+        title "${T[lm_title]}"
+        "$CTL" limited
+        hr
+        echo "  [1] ${T[lm_release]}"
+        echo "  [2] ${T[lm_release_all]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) ip="$(ask "${T[lm_ask]}")"
+               [[ -n "$ip" ]] && { "$CTL" release "$ip"; sleep 1; } ;;
+            2) "$CTL" release --all; sleep 1 ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 # ── Статистика ────────────────────────────────────────────────────────
 screen_stats() {
     while :; do
@@ -340,6 +432,7 @@ screen_service() {
 # ── Главное меню ──────────────────────────────────────────────────────
 [[ -z "$UI_LANG" ]] && screen_lang     # первый запуск — спросить язык
 
+nlim=0
 while :; do
     clear
     echo
@@ -348,19 +441,28 @@ while :; do
     status_line
     hr
     echo
+    nlim="$(limited_count)"
     echo -e "  [1] 🎚  ${T[m1]} ${D}${T[m1d]}${N}"
-    echo -e "  [2] 📡 ${T[m2]} ${D}${T[m2d]}${N}"
-    echo -e "  [3] 📊 ${T[m3]} ${D}${T[m3d]}${N}"
-    echo -e "  [4] 🤍 ${T[m4]}"
-    echo -e "  [5] 🔧 ${T[m5]} ${D}${T[m5d]}${N}"
+    echo -e "  [2] 🚦 ${T[m2]} ${D}${T[m2d]}${N}"
+    echo -e "  [3] 📡 ${T[m3]} ${D}${T[m3d]}${N}"
+    echo -e "  [4] 📊 ${T[m4]} ${D}${T[m4d]}${N}"
+    if [[ "$nlim" != "0" ]]; then
+        echo -e "  [6] 🚫 ${T[m6]} ${R}($nlim)${N}"
+    else
+        echo -e "  [6] 🚫 ${T[m6]} ${D}(0)${N}"
+    fi
+    echo -e "  [7] 🤍 ${T[m7]}"
+    echo -e "  [8] 🔧 ${T[m8]} ${D}${T[m8d]}${N}"
     echo -e "  [0] 🚪 ${T[m0]}"
     echo
     case "$(ask "${T[choice]}")" in
         1) screen_limit ;;
-        2) "$CTL" monitor ;;
-        3) screen_stats ;;
-        4) screen_whitelist ;;
-        5) screen_service ;;
+        2) screen_guard ;;
+        3) "$CTL" monitor ;;
+        4) screen_stats ;;
+        6) screen_limited ;;
+        7) screen_whitelist ;;
+        8) screen_service ;;
         0|"") clear; exit 0 ;;
     esac
 done

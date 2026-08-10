@@ -1,0 +1,13 @@
+[Unit]
+Description=Shape watchdog — auto-limits heavy users
+After=shaper.service
+Requires=shaper.service
+
+[Service]
+Type=simple
+ExecStart=/opt/shaper/shaperctl.py watch
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

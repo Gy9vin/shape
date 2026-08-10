@@ -16,6 +16,7 @@
  *   config_map     : 0 -> struct config     (bytes_per_sec, 0 = выключено)
  *   port_map       : port (u32) -> u8       (порт 0 = все порты)
  *   whitelist_map  : ip (4x u32) -> u8      (эти IP минуют шейпер)
+ *   penalty_map    : ip -> struct penalty   (штраф нарушителю на время)
  *   user_state_map_down/up : ip -> struct user_state
  *
  * Карты состояний — LRU: упёрлись в потолок, ядро само вытесняет давно
@@ -51,6 +52,14 @@ struct ip_key {
     __u32 addr[4];
 };
 
+/* 16 байт: персональный штраф для нарушителя.
+ * Записи создаёт сторож из userspace, здесь только читаем.
+ * until_ns — в шкале bpf_ktime_get_ns (CLOCK_MONOTONIC). */
+struct penalty {
+    __u64 rate_bytes_per_sec;
+    __u64 until_ns;
+};
+
 /* 24 байта: last_departure_ns, total_bytes, last_seen_ns */
 struct user_state {
     __u64 last_departure_ns;
@@ -78,6 +87,13 @@ struct {
     __type(key,   struct ip_key);
     __type(value, __u8);
 } whitelist_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key,   struct ip_key);
+    __type(value, struct penalty);
+} penalty_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -199,7 +215,14 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     __sync_fetch_and_add(&st->total_bytes, len);
     st->last_seen_ns = now;
 
-    __u64 delay_ns  = ((__u64)len * 1000000000ULL) / conf->bytes_per_sec;
+    /* Персональный штраф важнее общего лимита. Просроченные записи вычищает
+     * сторож; здесь просто игнорируем их по времени. */
+    __u64 rate = conf->bytes_per_sec;
+    struct penalty *pen = bpf_map_lookup_elem(&penalty_map, &key);
+    if (pen && pen->rate_bytes_per_sec > 0 && now < pen->until_ns)
+        rate = pen->rate_bytes_per_sec;
+
+    __u64 delay_ns  = ((__u64)len * 1000000000ULL) / rate;
     __u64 departure = st->last_departure_ns;
     if (now > departure)
         departure = now;

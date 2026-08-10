@@ -22,6 +22,7 @@ PIN_DIR     = os.environ.get("SHAPER_PIN_DIR", "/sys/fs/bpf/shaper/maps")
 ETC_DIR     = "/etc/shaper"
 CONFIG_FILE = os.path.join(ETC_DIR, "config.json")
 WL_FILE     = os.path.join(ETC_DIR, "whitelist.txt")
+PEN_FILE    = os.path.join(ETC_DIR, "penalties.json")
 
 NS = 1_000_000_000
 # Мбит/с -> байт/с. Мегабит десятичный: 1 Мбит = 1 000 000 бит = 125 000 байт.
@@ -30,6 +31,7 @@ MAX_MBPS = 100_000          # 100 Гбит/с — заведомо выше лю
 MAX_PORTS = 64              # должно совпадать с max_entries port_map в shaper.bpf.c
 
 CONFIG_FMT = "<Q"           # struct config, 8 байт
+PEN_FMT = "<2Q"             # struct penalty: rate_bytes_per_sec, until_ns
 USER_FMT, USER_SIZE = "<3Q", 24   # struct user_state
 
 C = {
@@ -44,6 +46,28 @@ C = {
 MSG = {
     "ru": {
         "root": "нужны права root",
+        "h_guard": "автоограничение нарушителей",
+        "h_percent": "порог, % от лимита",
+        "h_sustain": "сколько минут держать нагрузку до штрафа",
+        "h_pen_mbps": "скорость нарушителя, Мбит/с",
+        "h_pen_min": "на сколько минут ограничивать",
+        "h_watch": "демон слежения (запускается сервисом)",
+        "h_limited": "кто сейчас ограничен",
+        "h_release": "снять ограничение с IP",
+        "guard_state": "Автоограничение",
+        "guard_on": "включено", "guard_off": "выключено",
+        "guard_trigger": "Порог", "guard_of_limit": "от лимита",
+        "guard_during": "непрерывно", "guard_penalty": "Штраф",
+        "guard_for": "на", "guard_range": "{k}: допустимо от {lo} до {hi}",
+        "lim_title": "Ограниченные пользователи",
+        "lim_none": "ограниченных нет",
+        "lim_left": "осталось",
+        "rel_one": "ограничение с {ip} снято",
+        "rel_all": "снято ограничений: {n}",
+        "rel_need_ip": "укажи IP или --all",
+        "restored_pen": "восстановлено штрафов: {n}",
+        "watch_start": "сторож запущен",
+        "watch_hit": "{ip} ограничен до {mbps:g} Мбит/с на {m} мин",
         "units": ["Б", "КБ", "МБ", "ГБ", "ТБ", "ПБ"],
         "sec": "с", "min": "мин", "hour": "ч",
         "measuring": "замер скорости {i} с…",
@@ -93,6 +117,28 @@ MSG = {
     },
     "en": {
         "root": "root privileges required",
+        "h_guard": "automatic limiting of heavy users",
+        "h_percent": "threshold, % of the limit",
+        "h_sustain": "minutes of sustained load before the penalty",
+        "h_pen_mbps": "offender speed, Mbit/s",
+        "h_pen_min": "penalty duration, minutes",
+        "h_watch": "watchdog daemon (started by the service)",
+        "h_limited": "who is currently limited",
+        "h_release": "release an IP",
+        "guard_state": "Auto-limit",
+        "guard_on": "enabled", "guard_off": "disabled",
+        "guard_trigger": "Threshold", "guard_of_limit": "of the limit",
+        "guard_during": "sustained for", "guard_penalty": "Penalty",
+        "guard_for": "for", "guard_range": "{k}: allowed from {lo} to {hi}",
+        "lim_title": "Limited users",
+        "lim_none": "nobody is limited",
+        "lim_left": "left",
+        "rel_one": "{ip} released",
+        "rel_all": "released: {n}",
+        "rel_need_ip": "specify an IP or --all",
+        "restored_pen": "penalties restored: {n}",
+        "watch_start": "watchdog started",
+        "watch_hit": "{ip} limited to {mbps:g} Mbit/s for {m} min",
         "units": ["B", "KB", "MB", "GB", "TB", "PB"],
         "sec": "s", "min": "min", "hour": "h",
         "measuring": "measuring speed for {i} s…",
@@ -291,14 +337,28 @@ def mono_ns():
 # config.json:  {"ports": [443], "speed_mbps": 15}
 # speed_mbps = 0 означает «ограничение выключено», трафик проходит свободно.
 
+# Настройки сторожа. Порог в процентах от лимита: YouTube 1080p выдаёт
+# в среднем 30-40% от канала в 10 Мбит/с, торрент и закачка — все 100%.
+GUARD_DEFAULT = {
+    "enabled": False,
+    "trigger_percent": 80,   # % от лимита, выше которого нагрузка считается тяжёлой
+    "sustain_min": 5,        # столько минут подряд — и это уже не стриминг
+    "penalty_mbps": 1,       # хватает на переписку и звонок в мессенджере
+    "penalty_min": 60,
+}
+
+
 def load_config():
     try:
         with open(CONFIG_FILE) as f:
             cfg = json.load(f)
-        return {"ports": cfg.get("ports", [443]),
-                "speed_mbps": float(cfg.get("speed_mbps", 0))}
     except Exception:
-        return {"ports": [443], "speed_mbps": 0}
+        cfg = {}
+    guard = dict(GUARD_DEFAULT)
+    guard.update(cfg.get("guard", {}))
+    return {"ports": cfg.get("ports", [443]),
+            "speed_mbps": float(cfg.get("speed_mbps", 0)),
+            "guard": guard}
 
 
 def save_config(cfg):
@@ -370,14 +430,17 @@ def cmd_show(a):
     else:
         print(f"  {t('speed'):<9}: {C['yel']}{t('unlimited')}{C['r']}")
     print(f"  {t('ports'):<9}: {ports}")
-    print()
+    cmd_guard_show(cfg["speed_mbps"], cfg["guard"])
 
 
 def cmd_restore(a):
     """Вызывается сервисом при старте: заливает config.json в свежие карты."""
     cfg = load_config()
     write_to_kernel(cfg)
+    n = restore_penalties()
     print(t("restored", s=cfg["speed_mbps"], p=",".join(map(str, cfg["ports"]))))
+    if n:
+        print(t("restored_pen", n=n))
 
 
 # ───────────────────────────── статистика ─────────────────────────────
@@ -559,6 +622,205 @@ def cmd_monitor(a):
         print()
 
 
+# ─────────────────────── штрафы и сторож ───────────────────────
+# Сторож раз в WATCH_INTERVAL секунд смотрит скорость каждого IP. Если она
+# держится выше порога дольше заданного времени — это не стриминг, а закачка,
+# и адрес получает персональный лимит на время.
+#
+# Счётчик с допуском: замер выше порога прибавляет очко, ниже — отнимает.
+# Короткие провалы (буферизация, смена сегмента) штраф не отменяют, а вот
+# нормальный сёрфинг с паузами очков не накопит.
+
+WATCH_INTERVAL = 10
+
+
+def load_penalties():
+    """{ip: {"until": epoch, "mbps": float}} — только живые записи."""
+    try:
+        with open(PEN_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    now = time.time()
+    return {ip: p for ip, p in data.items()
+            if isinstance(p, dict) and p.get("until", 0) > now}
+
+
+def save_penalties(pens):
+    tmp = PEN_FILE + ".tmp"
+    os.makedirs(ETC_DIR, exist_ok=True)
+    with open(tmp, "w") as f:
+        json.dump(pens, f, indent=2)
+    os.replace(tmp, PEN_FILE)
+
+
+def penalty_apply(ip, mbps, until_epoch):
+    """Пишет штраф в BPF-карту. until пересчитывается в шкалу ядра."""
+    left = max(1.0, until_epoch - time.time())
+    until_ns = mono_ns() + int(left * NS)
+    map_update("penalty_map", ip_key(ip),
+               struct.pack(PEN_FMT, int(mbps * BYTES_PER_MBPS), until_ns))
+
+
+def penalty_clear(ip):
+    map_delete("penalty_map", ip_key(ip))
+
+
+def restore_penalties():
+    """Перезаливает живые штрафы в карту — после рестарта движка."""
+    pens = load_penalties()
+    for ip, p in pens.items():
+        try:
+            penalty_apply(ip, p["mbps"], p["until"])
+        except Exception:
+            pass
+    save_penalties(pens)
+    return len(pens)
+
+
+def cmd_limited(a):
+    pens = load_penalties()
+    if a.json:
+        print(json.dumps([{"ip": ip, "mbps": p["mbps"],
+                           "seconds_left": round(p["until"] - time.time())}
+                          for ip, p in pens.items()], indent=2))
+        return
+    if not pens:
+        print(f"\n  {C['gry']}{t('lim_none')}{C['r']}\n")
+        return
+    print(f"\n  {C['b']}{t('lim_title')}{C['r']}")
+    print("  " + "─" * 60)
+    for ip, p in sorted(pens.items(), key=lambda x: x[1]["until"]):
+        left = p["until"] - time.time()
+        print(f"  {C['red']}{ip:<28}{C['r']}{p['mbps']:g} Mbit/s"
+              f"   {t('lim_left')} {fmt_hold(left)}")
+    print()
+
+
+def cmd_release(a):
+    pens = load_penalties()
+    if a.all:
+        for ip in list(pens):
+            penalty_clear(ip)
+        save_penalties({})
+        print(f"{C['grn']}✓ {t('rel_all', n=len(pens))}{C['r']}")
+        return
+    if not a.ip:
+        die(t("rel_need_ip"))
+    penalty_clear(a.ip)
+    pens.pop(a.ip, None)
+    save_penalties(pens)
+    print(f"{C['grn']}✓ {t('rel_one', ip=a.ip)}{C['r']}")
+
+
+def cmd_guard(a):
+    cfg = load_config()
+    g = cfg["guard"]
+    if a.enable:
+        g["enabled"] = True
+    if a.disable:
+        g["enabled"] = False
+    for src_val, key, lo, hi in ((a.percent, "trigger_percent", 10, 100),
+                                 (a.sustain, "sustain_min", 1, 1440),
+                                 (a.penalty_mbps, "penalty_mbps", 0.1, 1000),
+                                 (a.penalty_min, "penalty_min", 1, 10080)):
+        if src_val is not None:
+            if not lo <= src_val <= hi:
+                die(t("guard_range", k=key, lo=lo, hi=hi))
+            g[key] = src_val
+
+    full = {"ports": cfg["ports"], "speed_mbps": cfg["speed_mbps"], "guard": g}
+    save_config(full)
+    if not a.quiet:
+        cmd_guard_show(cfg["speed_mbps"], g)
+
+
+def cmd_guard_show(speed, g):
+    print()
+    state = f"{C['grn']}{t('guard_on')}{C['r']}" if g["enabled"] \
+        else f"{C['gry']}{t('guard_off')}{C['r']}"
+    print(f"  {t('guard_state')}: {state}")
+    if speed > 0:
+        trig = speed * g["trigger_percent"] / 100
+        print(f"  {t('guard_trigger')}: {trig:g} Mbit/s "
+              f"({g['trigger_percent']}% {t('guard_of_limit')}) "
+              f"{t('guard_during')} {g['sustain_min']} {t('min')}")
+    print(f"  {t('guard_penalty')}: {g['penalty_mbps']:g} Mbit/s "
+          f"{t('guard_for')} {g['penalty_min']} {t('min')}")
+    print()
+
+
+def cmd_watch(a):
+    """Демон: следит за нагрузкой и выдаёт штрафы. Запускается сервисом."""
+    require_engine()
+    print(t("watch_start"), flush=True)
+    restore_penalties()
+
+    score = {}                       # ip -> накопленные очки нагрузки
+    prev, prev_t = read_users(), time.monotonic()
+
+    while True:
+        time.sleep(WATCH_INTERVAL)
+        try:
+            cfg = load_config()
+            g = cfg["guard"]
+            pens = load_penalties()
+
+            cur = read_users()
+            now_t = time.monotonic()
+            dt = max(1.0, now_t - prev_t)
+            rt = rates(prev, cur, dt)
+            prev, prev_t = cur, now_t
+
+            # снимаем истёкшие
+            for ip in [i for i in list(score) if i not in cur]:
+                score.pop(ip, None)
+            live = load_penalties()
+            for ip in set(pens) - set(live):
+                penalty_clear(ip)
+            if len(live) != len(pens):
+                save_penalties(live)
+                pens = live
+
+            if not g["enabled"] or cfg["speed_mbps"] <= 0:
+                score.clear()
+                continue
+
+            trigger = cfg["speed_mbps"] * g["trigger_percent"] / 100
+            need = max(1, int(g["sustain_min"] * 60 / WATCH_INTERVAL))
+            wl = whitelist_ips()
+
+            for ip, (dl, ul) in rt.items():
+                if ip in pens or ip in wl:
+                    continue
+                heavy = max(dl, ul) >= trigger
+                score[ip] = min(need, score.get(ip, 0) + 1) if heavy \
+                    else max(0, score.get(ip, 0) - 1)
+
+                if score[ip] >= need:
+                    until = time.time() + g["penalty_min"] * 60
+                    penalty_apply(ip, g["penalty_mbps"], until)
+                    pens[ip] = {"until": until, "mbps": g["penalty_mbps"]}
+                    save_penalties(pens)
+                    score[ip] = 0
+                    print(t("watch_hit", ip=ip, mbps=g["penalty_mbps"],
+                            m=g["penalty_min"]), flush=True)
+        except Exception as e:
+            print(f"watch: {e}", flush=True)
+
+
+def whitelist_ips():
+    out = set()
+    try:
+        for line in open(WL_FILE):
+            s = line.split("#")[0].strip()
+            if s:
+                out.add(s)
+    except Exception:
+        pass
+    return out
+
+
 # ────────────────────────────── whitelist ──────────────────────────────
 
 def ip_key(ip_str):
@@ -642,6 +904,27 @@ def build_parser():
     st.add_argument("--full", action="store_true", help=t("h_full"))
     st.add_argument("--json", action="store_true", help=t("h_json"))
     st.set_defaults(func=cmd_status)
+
+    g = sub.add_parser("guard", help=t("h_guard"))
+    g.add_argument("--enable", action="store_true")
+    g.add_argument("--disable", action="store_true")
+    g.add_argument("--percent", type=float, default=None, help=t("h_percent"))
+    g.add_argument("--sustain", type=int, default=None, help=t("h_sustain"))
+    g.add_argument("--penalty-mbps", type=float, default=None, help=t("h_pen_mbps"))
+    g.add_argument("--penalty-min", type=int, default=None, help=t("h_pen_min"))
+    g.add_argument("--quiet", action="store_true")
+    g.set_defaults(func=cmd_guard)
+
+    sub.add_parser("watch", help=t("h_watch")).set_defaults(func=cmd_watch)
+
+    li = sub.add_parser("limited", help=t("h_limited"))
+    li.add_argument("--json", action="store_true", help=t("h_json"))
+    li.set_defaults(func=cmd_limited)
+
+    rl = sub.add_parser("release", help=t("h_release"))
+    rl.add_argument("ip", nargs="?", default="")
+    rl.add_argument("--all", action="store_true")
+    rl.set_defaults(func=cmd_release)
 
     w = sub.add_parser("whitelist", help=t("h_whitelist"))
     w.add_argument("action", choices=["add", "del", "sync", "list"])

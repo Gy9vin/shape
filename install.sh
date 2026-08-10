@@ -15,9 +15,10 @@ die()  { echo -e "  ${R}✗ $*${N}" >&2; exit 1; }
 
 if [[ "${1:-}" == "--uninstall" ]]; then
     step "Удаление"
-    systemctl disable --now shaper 2>/dev/null || true
+    systemctl disable --now shaper shaper-watch 2>/dev/null || true
     "$APP_DIR/engine.sh" unload 2>/dev/null || true
-    rm -f /etc/systemd/system/shaper.service /usr/local/bin/shaper
+    rm -f /etc/systemd/system/shaper.service \
+          /etc/systemd/system/shaper-watch.service /usr/local/bin/shaper
     rm -rf "$APP_DIR"
     systemctl daemon-reload
     ok "удалено (конфиг $ETC_DIR оставлен — удали вручную, если не нужен)"
@@ -74,6 +75,7 @@ install -m 644 "$SRC/VERSION"          "$APP_DIR/VERSION"
 install -m 644 "$SRC/bpf/shaper.bpf.c" "$APP_DIR/bpf/shaper.bpf.c"
 
 [[ -f "$ETC_DIR/config.json" ]] || echo '{"ports": [443], "speed_mbps": 0}' > "$ETC_DIR/config.json"
+[[ -f "$ETC_DIR/penalties.json" ]] || echo '{}' > "$ETC_DIR/penalties.json"
 [[ -f "$ETC_DIR/shaper.conf" ]] || cat > "$ETC_DIR/shaper.conf" <<'EOF'
 # Сетевой интерфейс. Пусто = определить автоматически по маршруту в интернет.
 IFACE=""
@@ -104,12 +106,14 @@ if ! "$APP_DIR/engine.sh" build; then
 fi
 
 step "Регистрация сервиса"
-install -m 644 "$SRC/systemd/shaper.service" /etc/systemd/system/
+install -m 644 "$SRC/systemd/shaper.service"       /etc/systemd/system/
+install -m 644 "$SRC/systemd/shaper-watch.service" /etc/systemd/system/
 systemctl daemon-reload
 
 # Автостарт обязателен: без него после перезагрузки сервера лимит не применится,
 # а клиенты молча получат безлимит. Проверяем результат, а не надеемся на него.
 systemctl enable shaper >/dev/null 2>&1 || true
+systemctl enable shaper-watch >/dev/null 2>&1 || true
 if systemctl is-enabled shaper >/dev/null 2>&1; then
     ok "автостарт включён — переживёт перезагрузку сервера"
 else
@@ -131,6 +135,7 @@ step "Запуск"
 # в ядре осталась бы eBPF-программа прошлой версии.
 if systemctl restart shaper; then
     ok "движок запущен"
+    systemctl restart shaper-watch 2>/dev/null || true
     rm -rf "$APP_DIR.bak"
     "$APP_DIR/shaperctl.py" show
 else
