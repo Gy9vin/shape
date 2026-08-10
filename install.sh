@@ -51,11 +51,26 @@ for b in clang bpftool tc python3; do
 done
 ok "clang, bpftool, tc, python3 на месте"
 
+step "Очистка от прошлых версий"
+# Демон Telegram-уведомлений и файлы правил из старой модели с правилами 0-7.
+if [[ -f /etc/systemd/system/shaper-notify.service ]]; then
+    systemctl disable --now shaper-notify >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/shaper-notify.service
+    ok "убран shaper-notify.service"
+fi
+rm -f /var/lib/shaper/notify.state "$ETC_DIR/rules.json" "$ETC_DIR/rules.json.mib.bak"
+rmdir /var/lib/shaper 2>/dev/null || true
+# Объект пересобираем всегда: структуры карт могли поменяться между версиями.
+rm -f "$APP_DIR/bpf/shaper.bpf.o"
+ok "старые файлы убраны"
+
 step "Копирование файлов"
 mkdir -p "$APP_DIR/bpf" "$ETC_DIR"
 install -m 755 "$SRC/shaperctl.py"     "$APP_DIR/shaperctl.py"
 install -m 755 "$SRC/engine.sh"        "$APP_DIR/engine.sh"
 install -m 755 "$SRC/menu.sh"          "$APP_DIR/menu.sh"
+install -m 644 "$SRC/lang.sh"          "$APP_DIR/lang.sh"
+install -m 644 "$SRC/VERSION"          "$APP_DIR/VERSION"
 install -m 644 "$SRC/bpf/shaper.bpf.c" "$APP_DIR/bpf/shaper.bpf.c"
 
 [[ -f "$ETC_DIR/config.json" ]] || echo '{"ports": [443], "speed_mbps": 0}' > "$ETC_DIR/config.json"
@@ -69,14 +84,39 @@ EOF
 EOF
 ok "файлы в $APP_DIR, конфиг в $ETC_DIR"
 
+# Хеш коммита, из которого ставим: по нему пункт «Обновить» понимает,
+# есть ли в репозитории что-то новее. Номер версии лежит в файле VERSION.
+if [[ -d "$SRC/.git" ]] && command -v git >/dev/null; then
+    git -C "$SRC" rev-parse --short HEAD > "$APP_DIR/.commit" 2>/dev/null || true
+fi
+rm -f "$APP_DIR/.version"   # имя из версий до 1.3
+
 step "Сборка eBPF"
-"$APP_DIR/engine.sh" build
+if ! "$APP_DIR/engine.sh" build; then
+    if [[ -d "$APP_DIR.bak" ]]; then
+        echo -e "  ${Y}⚠ откатываюсь на прошлую версию${N}"
+        rm -rf "$APP_DIR"
+        mv "$APP_DIR.bak" "$APP_DIR"
+        systemctl restart shaper 2>/dev/null || true
+        die "новая версия не собралась, вернул прежнюю — она работает"
+    fi
+    die "eBPF не собрался"
+fi
 
 step "Регистрация сервиса"
 install -m 644 "$SRC/systemd/shaper.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable shaper >/dev/null 2>&1
-ok "shaper.service включён в автозагрузку"
+
+# Автостарт обязателен: без него после перезагрузки сервера лимит не применится,
+# а клиенты молча получат безлимит. Проверяем результат, а не надеемся на него.
+systemctl enable shaper >/dev/null 2>&1 || true
+if systemctl is-enabled shaper >/dev/null 2>&1; then
+    ok "автостарт включён — переживёт перезагрузку сервера"
+else
+    echo -e "  ${R}✗ автостарт включить не удалось${N}"
+    echo -e "  ${Y}  после ребута шейпер не поднимется, включи вручную:${N}"
+    echo -e "  ${Y}  systemctl enable shaper${N}"
+fi
 
 cat > /usr/local/bin/shaper <<'EOF'
 #!/usr/bin/env bash
@@ -87,14 +127,22 @@ chmod +x /usr/local/bin/shaper
 ok "команда shaper создана"
 
 step "Запуск"
-if systemctl start shaper; then
+# Именно restart: при обновлении сервис уже запущен, и `start` был бы пустышкой —
+# в ядре осталась бы eBPF-программа прошлой версии.
+if systemctl restart shaper; then
     ok "движок запущен"
+    rm -rf "$APP_DIR.bak"
+    "$APP_DIR/shaperctl.py" show
 else
     echo -e "  ${Y}⚠ не стартанул — смотри: journalctl -u shaper -n 40${N}"
+    [[ -d "$APP_DIR.bak" ]] && echo -e "  ${D}прошлая версия лежит в $APP_DIR.bak${N}"
 fi
 
 echo
-echo -e "${B}Готово.${N}"
-echo -e "  Запусти ${B}shaper${N} → «Настроить лимит»."
-echo -e "  ${D}Лимит пока не задан — трафик не ограничивается.${N}"
+echo -e "${B}Готово.${N} Shape v$(cat "$APP_DIR/VERSION" 2>/dev/null || echo '?')$(
+    [[ -f "$APP_DIR/.commit" ]] && echo " · $(cat "$APP_DIR/.commit")")"
+echo -e "  Запусти ${B}shaper${N}$([[ "$(python3 -c "
+import json
+try: print(json.load(open('$ETC_DIR/config.json'))['speed_mbps'])
+except Exception: print(0)" 2>/dev/null)" == "0" ]] && echo " → «Настроить лимит»" || echo "")"
 echo

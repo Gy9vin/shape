@@ -4,17 +4,28 @@ set -uo pipefail
 
 APP_DIR="/opt/shaper"
 ETC_DIR="/etc/shaper"
+CONF="$ETC_DIR/shaper.conf"
 CTL="$APP_DIR/shaperctl.py"
 ENGINE="$APP_DIR/engine.sh"
+REPO_URL="https://github.com/SkunkBG/shape.git"
+VERSION="$(cat "$APP_DIR/VERSION" 2>/dev/null || echo '?')"
 
 B='\033[1m'; N='\033[0m'; D='\033[90m'
 G='\033[32m'; R='\033[31m'; Y='\033[33m'; C='\033[36m'
 
-[[ $EUID -eq 0 ]] || { echo -e "${R}Нужны права root: sudo shaper${N}"; exit 1; }
+# shellcheck disable=SC1090
+[[ -f "$CONF" ]] && source "$CONF"
+UI_LANG="${UI_LANG:-}"
+
+# shellcheck disable=SC1090
+source "$APP_DIR/lang.sh"
+ui_lang_load "${UI_LANG:-ru}"
+
+[[ $EUID -eq 0 ]] || { echo -e "${R}${T[need_root]}${N}"; exit 1; }
 
 hr()    { echo -e "${D}  ────────────────────────────────────────────────────────────${N}"; }
 title() { clear; echo; echo -e "  ${B}$1${N}"; hr; }
-pause() { echo; read -rsp "  Enter — назад " _; }
+pause() { echo; read -rsp "  ${T[back]} " _; }
 ask()   { local p="$1" d="${2:-}" v; read -rp "  $p${d:+ [$d]}: " v; echo "${v:-$d}"; }
 cfg()   { python3 -c "
 import json
@@ -22,10 +33,43 @@ try: c = json.load(open('$ETC_DIR/config.json'))
 except Exception: c = {}
 print(c.get('$1', '$2'))" 2>/dev/null || echo "$2"; }
 
+conf_set() {
+    touch "$CONF"
+    if grep -q "^$1=" "$CONF"; then
+        sed -i "s|^$1=.*|$1=\"$2\"|" "$CONF"
+    else
+        echo "$1=\"$2\"" >> "$CONF"
+    fi
+}
+
+# ── Выбор языка ───────────────────────────────────────────────────────
+screen_lang() {
+    clear; echo
+    echo -e "  ${B}⚡ Shape${N} ${D}v$VERSION${N}"
+    hr
+    echo -e "  ${B}Выбери язык / Choose language${N}"
+    echo
+    echo "  [1] 🇷🇺  Русский"
+    echo "  [2] 🇬🇧  English"
+    echo
+    local a
+    read -rp "  1-2 [1]: " a
+    case "${a:-1}" in
+        2) UI_LANG="en" ;;
+        *) UI_LANG="ru" ;;
+    esac
+    conf_set UI_LANG "$UI_LANG"
+    ui_lang_load "$UI_LANG"
+    echo -e "  ${G}✓ ${T[lang_saved]}${N}"
+    sleep 1
+}
+
+# ── Статус на главном экране ──────────────────────────────────────────
 status_line() {
-    local st ifc speed ports
-    if "$ENGINE" state >/dev/null 2>&1; then st="${G}● работает${N}"
-    else st="${R}● остановлен${N}"; fi
+    local ifc speed ports auto_on=0 run_on=0
+
+    "$ENGINE" state >/dev/null 2>&1 && run_on=1
+    systemctl is-enabled shaper >/dev/null 2>&1 && auto_on=1
 
     ifc="$(sed -n 's/^IFACE="\(.*\)"$/\1/p' "$ETC_DIR/.active_iface" 2>/dev/null)"
     [[ -z "$ifc" ]] && ifc="$(ip route get 1.1.1.1 2>/dev/null |
@@ -35,72 +79,32 @@ status_line() {
 import json
 try: p = json.load(open('$ETC_DIR/config.json'))['ports']
 except Exception: p = []
-print(', '.join(map(str, p)) if p != [0] else 'все')" 2>/dev/null || echo '?')"
+print(', '.join(map(str, p)) if p != [0] else '${T[st_all]}')" 2>/dev/null || echo '?')"
 
-    echo -e "  Статус: $st    интерфейс: ${B}${ifc:-?}${N}"
-    if [[ "$speed" == "0" || -z "$speed" ]]; then
-        echo -e "  Лимит : ${Y}не задан${N} ${D}— трафик не ограничивается${N}"
+    if (( run_on )); then
+        echo -e "  🟢  ${T[st_shaper]} ${G}${T[st_running]}${N}   ${D}${T[st_iface]} ${ifc:-?}${N}"
     else
-        echo -e "  Лимит : ${B}${speed} Мбит/с${N} на пользователя, порты ${B}${ports}${N}"
+        echo -e "  🔴  ${T[st_shaper]} ${R}${T[st_stopped]}${N}  ${D}${T[st_nolimit]}${N}"
+    fi
+
+    if (( auto_on )); then
+        echo -e "  🔁  ${T[st_auto]} ${G}${T[st_auto_on]}${N}    ${D}${T[st_auto_ok]}${N}"
+    else
+        echo -e "  ⚠️   ${T[st_auto]} ${Y}${T[st_auto_off]}${N}   ${D}${T[st_auto_warn]}${N}"
+    fi
+
+    if [[ "$speed" == "0" || -z "$speed" ]]; then
+        echo -e "  ⚪  ${T[st_speed]} ${Y}${T[st_unlimited]}${N}"
+        echo -e "  🔌  ${T[st_port]} ${D}${ports}${N}"
+    else
+        echo -e "  🚀  ${T[st_speed]} ${B}${speed} Mbit/s${N} ${D}${T[st_peruser]}${N}"
+        echo -e "  🔌  ${T[st_port]} ${B}${ports}${N}"
     fi
 }
 
 # ── Настройка лимита ──────────────────────────────────────────────────
-screen_limit() {
-    local speed port cur_port
-    cur_port="$(python3 -c "
-import json
-try: p = json.load(open('$ETC_DIR/config.json'))['ports']
-except Exception: p = [443]
-print(','.join(map(str, p)))" 2>/dev/null || echo 443)"
-
-    title "Скорость на одного пользователя"
-    echo -e "  ${D}Лимит действует на каждый IP отдельно и в обе стороны.${N}"
-    echo -e "  ${D}Пятьдесят человек по 15 Мбит/с — это до 750 Мбит/с на канал.${N}"
-    echo
-    echo -e "  ${B}[1]${N}  10 Мбит/с   ${D}видео 1080p, экономия канала${N}"
-    echo -e "  ${B}[2]${N}  15 Мбит/с   ${D}комфорт для большинства${N}"
-    echo -e "  ${B}[3]${N}  20 Мбит/с   ${D}с запасом, 4K не тормозит${N}"
-    echo -e "  ${B}[4]${N}  Ввести своё значение"
-    echo -e "  ${B}[5]${N}  Снять ограничение"
-    echo -e "  ${B}[0]${N}  Отмена"
-    echo
-
-    case "$(ask 'Выбор' 2)" in
-        1) speed=10 ;;
-        2) speed=15 ;;
-        3) speed=20 ;;
-        4) speed="$(ask 'Скорость, Мбит/с' 15)"
-           [[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
-               echo -e "  ${R}Нужно число${N}"; pause; return; } ;;
-        5) speed=0 ;;
-        *) return ;;
-    esac
-
-    echo
-    echo -e "  ${D}Порт, на который подключаются клиенты. В Remnawave-ноде${N}"
-    echo -e "  ${D}это почти всегда 443. Несколько — через запятую, 0 = все.${N}"
-    echo
-    show_listening
-    echo
-    port="$(ask 'Порт' "$cur_port")"
-
-    echo
-    if [[ "$speed" == "0" ]]; then
-        echo -e "  Ограничение будет ${Y}снято${N}, трафик пойдёт свободно."
-    else
-        echo -e "  Лимит ${B}${speed} Мбит/с${N} на каждого пользователя, порт ${B}${port}${N}."
-    fi
-    echo
-    read -rp "  Применить? [Y/n]: " ans
-    [[ "$ans" =~ ^[NnНн] ]] && { echo "  Отменено."; pause; return; }
-
-    "$CTL" apply --ports "$port" --speed "$speed"
-    pause
-}
-
 show_listening() {
-    echo -e "  ${D}Порты, которые сейчас слушают процессы:${N}"
+    echo -e "  ${D}${T[listening]}${N}"
     ss -tulnpH 2>/dev/null | awk '
         {
             split($5, a, ":"); port = a[length(a)]
@@ -114,20 +118,73 @@ show_listening() {
     ' | sort -n | head -12
 }
 
+screen_limit() {
+    local speed port cur_port ans
+    cur_port="$(python3 -c "
+import json
+try: p = json.load(open('$ETC_DIR/config.json'))['ports']
+except Exception: p = [443]
+print(','.join(map(str, p)))" 2>/dev/null || echo 443)"
+
+    title "${T[lim_title]}"
+    echo -e "  ${D}${T[lim_h1]}${N}"
+    echo -e "  ${D}${T[lim_h2]}${N}"
+    echo
+    echo -e "  ${B}[1]${N}  10 Mbit/s   ${D}${T[lim_d10]}${N}"
+    echo -e "  ${B}[2]${N}  15 Mbit/s   ${D}${T[lim_d15]}${N}"
+    echo -e "  ${B}[3]${N}  20 Mbit/s   ${D}${T[lim_d20]}${N}"
+    echo -e "  ${B}[4]${N}  ${T[lim_own]}"
+    echo -e "  ${B}[5]${N}  ${T[lim_off]}"
+    echo -e "  ${B}[0]${N}  ${T[cancel]}"
+    echo
+
+    case "$(ask "${T[choice]}" 2)" in
+        1) speed=10 ;;
+        2) speed=15 ;;
+        3) speed=20 ;;
+        4) speed="$(ask "${T[lim_ask]}" 15)"
+           [[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+               echo -e "  ${R}${T[need_num]}${N}"; pause; return; } ;;
+        5) speed=0 ;;
+        *) return ;;
+    esac
+
+    echo
+    echo -e "  ${D}${T[port_h1]}${N}"
+    echo -e "  ${D}${T[port_h2]}${N}"
+    echo
+    show_listening
+    echo
+    port="$(ask "${T[port_ask]}" "$cur_port")"
+
+    echo
+    if [[ "$speed" == "0" ]]; then
+        echo -e "  ${Y}${T[conf_off]}${N}"
+    else
+        echo -e "  ${T[conf_on1]} ${B}${speed} Mbit/s${N} ${T[conf_on2]} ${B}${port}${N}."
+    fi
+    echo
+    read -rp "  ${T[apply_q]}: " ans
+    [[ "$ans" =~ ^[NnНн] ]] && { echo "  ${T[cancelled]}"; pause; return; }
+
+    "$CTL" apply --ports "$port" --speed "$speed"
+    pause
+}
+
 # ── Статистика ────────────────────────────────────────────────────────
 screen_stats() {
     while :; do
-        title "Статистика"
-        echo -e "  ${D}Сколько каждый IP прокачал за всё время работы шейпера.${N}"
-        echo -e "  ${D}Кто грузит канал прямо сейчас — смотри «Монитор».${N}"
+        title "${T[stats_title]}"
+        echo -e "  ${D}${T[stats_d1]}${N}"
+        echo -e "  ${D}${T[stats_d2]}${N}"
         echo
-        echo "  [1] Показать (топ-20)"
-        echo "  [2] Полный список IP"
-        echo "  [0] Назад"
+        echo "  [1] ${T[stats_top]}"
+        echo "  [2] ${T[stats_full]}"
+        echo "  [0] ← ${T[m0]}"
         echo
-        case "$(ask 'Выбор')" in
-            1) title "Статистика"; "$CTL" status; pause ;;
-            2) title "Статистика"; "$CTL" status --full; pause ;;
+        case "$(ask "${T[choice]}")" in
+            1) title "${T[stats_title]}"; "$CTL" status; pause ;;
+            2) title "${T[stats_title]}"; "$CTL" status --full; pause ;;
             0|"") return ;;
         esac
     done
@@ -135,83 +192,170 @@ screen_stats() {
 
 # ── Белый список ──────────────────────────────────────────────────────
 screen_whitelist() {
+    local ip
     while :; do
-        title "Белый список"
-        echo -e "  ${D}Эти IP полностью минуют шейпер: свой адрес, мониторинг, панель.${N}"
+        title "${T[wl_title]}"
+        echo -e "  ${D}${T[wl_d]}${N}"
         echo
         "$CTL" whitelist list
         hr
-        echo "  [1] Добавить IP"
-        echo "  [2] Убрать IP"
-        echo "  [0] Назад"
+        echo "  [1] ${T[wl_add]}"
+        echo "  [2] ${T[wl_del]}"
+        echo "  [0] ← ${T[m0]}"
         echo
-        case "$(ask 'Выбор')" in
-            1) local ip; ip="$(ask 'IP-адрес')"
+        case "$(ask "${T[choice]}")" in
+            1) ip="$(ask "${T[wl_ask]}")"
                [[ -n "$ip" ]] && { "$CTL" whitelist add "$ip"; sleep 1; } ;;
-            2) local ip; ip="$(ask 'IP-адрес')"
+            2) ip="$(ask "${T[wl_ask]}")"
                [[ -n "$ip" ]] && { "$CTL" whitelist del "$ip"; sleep 1; } ;;
             0|"") return ;;
         esac
     done
 }
 
+# ── Обновление из GitHub ──────────────────────────────────────────────
+installed_version() {
+    local v h
+    v="$(cat "$APP_DIR/VERSION" 2>/dev/null || echo '?')"
+    h="$(cat "$APP_DIR/.commit" 2>/dev/null)"
+    echo "v$v${h:+ · $h}"
+}
+
+screen_update() {
+    local tmp new_ver cur_hash ans
+    title "${T[up_title]}"
+    echo -e "  ${D}${T[up_src]} $REPO_URL${N}"
+    echo -e "  ${D}${T[up_installed]} $(installed_version)${N}"
+    echo
+
+    if ! command -v git >/dev/null; then
+        echo -e "  ${D}${T[up_git]}${N}"
+        apt-get install -y -qq git >/dev/null 2>&1 ||
+            dnf install -y -q git >/dev/null 2>&1 ||
+            yum install -y -q git >/dev/null 2>&1 || {
+                echo -e "  ${R}✗ ${T[up_nogit]}${N}"; pause; return; }
+    fi
+
+    tmp="$(mktemp -d)"
+    echo -e "  ${D}${T[up_dl]}${N}"
+    if ! git clone --depth 20 --quiet "$REPO_URL" "$tmp" 2>/dev/null; then
+        echo -e "  ${R}✗ ${T[up_fail]}${N}"
+        rm -rf "$tmp"; pause; return
+    fi
+
+    new_ver="$(git -C "$tmp" rev-parse --short HEAD)"
+    cur_hash="$(cat "$APP_DIR/.commit" 2>/dev/null)"
+    if [[ "$new_ver" == "$cur_hash" ]]; then
+        echo -e "  ${G}✓ ${T[up_latest]} ($new_ver)${N}"
+        rm -rf "$tmp"; pause; return
+    fi
+
+    echo
+    echo -e "  ${B}${T[up_new]} $(cat "$tmp/VERSION" 2>/dev/null || echo '?') · $new_ver${N}"
+    echo -e "  ${D}${T[up_changes]}${N}"
+    git -C "$tmp" log --oneline -5 | sed 's/^/    /'
+    echo
+    echo -e "  ${D}${T[up_k1]}${N}"
+    echo -e "  ${D}${T[up_k2]}${N}"
+    echo -e "  ${D}${T[up_k3]}${N}"
+    echo
+    read -rp "  ${T[up_q]}: " ans
+    if [[ ! "$ans" =~ ^[YyДд] ]]; then
+        echo "  ${T[cancelled]}"; rm -rf "$tmp"; pause; return
+    fi
+
+    rm -rf "$APP_DIR.bak"
+    cp -a "$APP_DIR" "$APP_DIR.bak" 2>/dev/null || true
+    echo -e "  ${D}${T[up_backup]} $APP_DIR.bak${N}"
+    echo
+
+    # exec, а не вызов: bash не должен дочитывать menu.sh после того,
+    # как установщик перезапишет этот файл.
+    exec bash "$tmp/install.sh"
+}
+
 # ── Сервис ────────────────────────────────────────────────────────────
+doctor() {
+    local k ifc
+    k="$(uname -r)"
+    echo -e "  ${T[dr_kernel]}: $k $(awk -v v="${k%%-*}" -v msg="${T[dr_need]}" \
+        'BEGIN{split(v,a,".");print (a[1]>5||(a[1]==5&&a[2]>=4))?"\033[32m✓\033[0m":"\033[31m✗ "msg"\033[0m"}')"
+    for b in clang bpftool tc python3; do
+        printf "  %-17s: %s\n" "$b" "$(command -v "$b" >/dev/null &&
+            echo -e "${G}✓${N} $(command -v "$b")" || echo -e "${R}✗ ${T[dr_notinst]}${N}")"
+    done
+    echo -e "  ${T[dr_bpffs]}: $(mountpoint -q /sys/fs/bpf &&
+        echo -e "${G}✓ ${T[dr_mounted]}${N}" || echo -e "${R}✗ ${T[dr_notmounted]}${N}")"
+    ifc="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
+    echo -e "  ${T[dr_iface]}: ${B}${ifc:-${T[dr_undetected]}}${N}"
+    [[ -n "$ifc" ]] && echo -e "  ${T[dr_qdisc]}: $(tc qdisc show dev "$ifc" root 2>/dev/null | awk '{print $2}')"
+    echo -e "  ${T[dr_maps]}: $([[ -d /sys/fs/bpf/shaper/maps ]] &&
+        echo -e "${G}✓${N}" || echo -e "${D}${T[dr_nosvc]}${N}")"
+}
+
 screen_service() {
+    local auto_lbl
     while :; do
-        title "Сервис"
-        systemctl status shaper --no-pager 2>/dev/null | head -5 | sed 's/^/  /'
+        if systemctl is-enabled shaper >/dev/null 2>&1; then
+            auto_lbl="🔁 ${T[sv_auto]} ${G}${T[st_auto_on]}${N} ${D}${T[sv_to_off]}${N}"
+        else
+            auto_lbl="⚠️  ${T[sv_auto]} ${Y}${T[st_auto_off]}${N} ${D}${T[sv_to_on]}${N}"
+        fi
+
+        title "${T[sv_title]}"
+        systemctl status shaper --no-pager 2>/dev/null | head -4 | sed 's/^/  /'
         hr
-        echo "  [1] Запустить"
-        echo "  [2] Остановить"
-        echo "  [3] Перезапустить (пересобрать eBPF)"
-        echo "  [4] Автозапуск при загрузке сервера"
-        echo "  [5] Логи"
-        echo "  [6] Проверить окружение"
-        echo "  [0] Назад"
+        echo -e "  [1] ▶️  ${T[sv_start]}"
+        echo -e "  [2] ⏹  ${T[sv_stop]}"
+        echo -e "  [3] 🔄 ${T[sv_restart]} ${D}${T[sv_restart_d]}${N}"
+        echo -e "  [4] $auto_lbl"
+        echo -e "  [5] 📜 ${T[sv_logs]}"
+        echo -e "  [6] 🩺 ${T[sv_doctor]}"
+        echo -e "  [7] ⬆️  ${T[sv_update]} ${D}(${T[sv_version]} $(installed_version))${N}"
+        echo -e "  [8] 🌐 ${T[sv_lang]}"
+        echo -e "  [0] ← ${T[m0]}"
         echo
-        case "$(ask 'Выбор')" in
+        case "$(ask "${T[choice]}")" in
             1) systemctl start shaper; sleep 1 ;;
             2) systemctl stop shaper; sleep 1 ;;
             3) rm -f "$APP_DIR/bpf/shaper.bpf.o"; systemctl restart shaper; sleep 2 ;;
-            4) systemctl enable shaper && echo -e "  ${G}✓ включён${N}"; sleep 1 ;;
-            5) title "Логи"; journalctl -u shaper -n 40 --no-pager | sed 's/^/  /'; pause ;;
-            6) title "Проверка окружения"; doctor; pause ;;
+            4) if systemctl is-enabled shaper >/dev/null 2>&1; then
+                   systemctl disable shaper >/dev/null 2>&1
+                   echo -e "  ${Y}⚠ ${T[sv_auto_no]}${N}"
+               else
+                   systemctl enable shaper >/dev/null 2>&1
+                   echo -e "  ${G}✓ ${T[sv_auto_yes]}${N}"
+               fi
+               sleep 2 ;;
+            5) title "${T[sv_logs]}"
+               journalctl -u shaper -n 40 --no-pager | sed 's/^/  /'; pause ;;
+            6) title "${T[dr_title]}"; doctor; pause ;;
+            7) screen_update ;;
+            8) screen_lang ;;
             0|"") return ;;
         esac
     done
 }
 
-doctor() {
-    local k ifc
-    k="$(uname -r)"
-    echo -e "  Ядро Linux        : $k $(awk -v v="${k%%-*}" 'BEGIN{split(v,a,".");print (a[1]>5||(a[1]==5&&a[2]>=4))?"\033[32m✓\033[0m":"\033[31m✗ нужно 5.4+\033[0m"}')"
-    for b in clang bpftool tc python3; do
-        printf "  %-18s: %s\n" "$b" "$(command -v $b >/dev/null && echo -e "${G}✓${N} $(command -v $b)" || echo -e "${R}✗ не установлен${N}")"
-    done
-    echo -e "  bpffs             : $(mountpoint -q /sys/fs/bpf && echo -e "${G}✓ примонтирована${N}" || echo -e "${R}✗ не примонтирована${N}")"
-    ifc="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
-    echo -e "  Интерфейс наружу  : ${B}${ifc:-не определён}${N}"
-    [[ -n "$ifc" ]] && echo -e "  Корневой qdisc    : $(tc qdisc show dev "$ifc" root 2>/dev/null | awk '{print $2}')"
-    echo -e "  Карты закреплены  : $([[ -d /sys/fs/bpf/shaper/maps ]] && echo -e "${G}✓${N}" || echo -e "${D}нет (сервис не запущен)${N}")"
-}
-
 # ── Главное меню ──────────────────────────────────────────────────────
+[[ -z "$UI_LANG" ]] && screen_lang     # первый запуск — спросить язык
+
 while :; do
     clear
     echo
-    echo -e "  ${B}${C}Shape${N} ${D}· ограничитель скорости на пользователя${N}"
+    echo -e "  ⚡ ${B}${C}Shape${N} ${D}v$VERSION ${T[subtitle]}${N}"
     hr
     status_line
     hr
     echo
-    echo "  [1] Настроить лимит — скорость и порт"
-    echo -e "  [2] Монитор ${D}— кто грузит канал прямо сейчас${N}"
-    echo -e "  [3] Статистика ${D}— сколько прокачали всего${N}"
-    echo "  [4] Белый список IP"
-    echo "  [5] Сервис: запуск, логи, диагностика"
-    echo "  [0] Выход"
+    echo -e "  [1] 🎚  ${T[m1]} ${D}${T[m1d]}${N}"
+    echo -e "  [2] 📡 ${T[m2]} ${D}${T[m2d]}${N}"
+    echo -e "  [3] 📊 ${T[m3]} ${D}${T[m3d]}${N}"
+    echo -e "  [4] 🤍 ${T[m4]}"
+    echo -e "  [5] 🔧 ${T[m5]} ${D}${T[m5d]}${N}"
+    echo -e "  [0] 🚪 ${T[m0]}"
     echo
-    case "$(ask 'Выбор')" in
+    case "$(ask "${T[choice]}")" in
         1) screen_limit ;;
         2) "$CTL" monitor ;;
         3) screen_stats ;;
