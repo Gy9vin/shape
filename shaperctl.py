@@ -336,6 +336,108 @@ def cmd_status(a):
     print(f"  {C['gry']}· — нет трафика больше 5 минут{C['r']}\n")
 
 
+# ────────────────────────────── монитор ──────────────────────────────
+
+def rates(prev, cur, dt):
+    """Скорости по каждому IP за прошедший интервал, Мбит/с."""
+    out = {}
+    for ip, c in cur.items():
+        p = prev.get(ip, {"down": 0, "up": 0})
+        out[ip] = (max(0, c["down"] - p["down"]) * 8 / 1e6 / dt,
+                   max(0, c["up"] - p["up"]) * 8 / 1e6 / dt)
+    return out
+
+
+def fmt_hold(sec):
+    """Сколько времени подряд IP держит нагрузку."""
+    if sec < 1:
+        return "—"
+    if sec < 60:
+        return f"{int(sec)} с"
+    if sec < 3600:
+        return f"{int(sec // 60)} мин"
+    return f"{sec / 3600:.1f} ч"
+
+
+def bar(value, scale, width=14):
+    if scale <= 0:
+        return ""
+    filled = min(width, int(round(value / scale * width)))
+    return "█" * filled + "·" * (width - filled)
+
+
+def cmd_monitor(a):
+    require_engine()
+    cfg = load_config()
+    limit = cfg["speed_mbps"]
+    # «Держит нагрузку» — выше половины лимита. Без лимита берём 5 Мбит/с.
+    busy_at = max(1.0, limit * 0.5) if limit > 0 else 5.0
+    keep = max(3, int(60 / a.interval))     # усреднение примерно за минуту
+
+    history, since = {}, {}
+    prev, prev_t = read_users(), time.monotonic()
+
+    print("\033[?25l", end="", flush=True)   # спрятать курсор
+    try:
+        while True:
+            time.sleep(a.interval)
+            cur = read_users()
+            now_t = time.monotonic()
+            dt = max(0.1, now_t - prev_t)
+            rt = rates(prev, cur, dt)
+            prev, prev_t = cur, now_t
+
+            rows = []
+            for ip, (dl, ul) in rt.items():
+                h = history.setdefault(ip, [])
+                h.append(dl)
+                del h[:-keep]
+                if dl >= busy_at:
+                    since.setdefault(ip, now_t)
+                else:
+                    since.pop(ip, None)
+                rows.append((ip, dl, ul, sum(h) / len(h),
+                             now_t - since[ip] if ip in since else 0))
+
+            active = [r for r in rows if r[1] + r[2] > 0.05]
+            active.sort(key=lambda r: r[1] + r[2], reverse=True)
+            total_dl = sum(r[1] for r in rows)
+            total_ul = sum(r[2] for r in rows)
+            scale = limit if limit > 0 else max([r[1] for r in active] + [10])
+
+            head = (f"Лимит {limit:g} Мбит/с на пользователя" if limit > 0
+                    else "Лимит не задан")
+            print("\033[H\033[2J", end="")
+            print(f"\n  {C['b']}Монитор{C['r']} {C['gry']}· обновление каждые "
+                  f"{a.interval} с · Ctrl+C — выход{C['r']}\n")
+            print(f"  Канал сейчас : {C['b']}↓ {total_dl:.1f}{C['r']} · "
+                  f"↑ {total_ul:.1f} Мбит/с")
+            print(f"  {head} · нагружают канал: {C['b']}{len(active)}{C['r']} "
+                  f"из {len(rows)}\n")
+            print(f"{C['gry']}  {'IP':<24}{'сейчас':>9}{'отдача':>9}"
+                  f"{'мин.средн':>11}{'держит':>9}   загрузка{C['r']}")
+            print("  " + "─" * 76)
+
+            if not active:
+                print(f"  {C['gry']}сейчас никто не качает{C['r']}")
+            for ip, dl, ul, avg, hold in active[:a.top]:
+                # красным — те, кто уткнулся в лимит и держит его долго
+                hot = limit > 0 and dl >= limit * 0.9 and hold >= 30
+                color = C["red"] if hot else (C["yel"] if hold >= 30 else "")
+                print(f"  {color}{ip:<24}{dl:>9.1f}{ul:>9.1f}{avg:>11.1f}"
+                      f"{fmt_hold(hold):>9}{C['r']}   {bar(dl, scale)}")
+
+            if len(active) > a.top:
+                print(f"  {C['gry']}… ещё {len(active) - a.top} активных{C['r']}")
+            print(f"\n  {C['gry']}жёлтым — держит нагрузку больше 30 с, "
+                  f"красным — упёрся в лимит{C['r']}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("\033[?25h", end="", flush=True)   # вернуть курсор
+        print()
+
+
 # ────────────────────────────── whitelist ──────────────────────────────
 
 def ip_key(ip_str):
@@ -406,6 +508,11 @@ def build_parser():
 
     sub.add_parser("show", help="показать текущие настройки").set_defaults(func=cmd_show)
     sub.add_parser("restore", help="залить настройки в карты").set_defaults(func=cmd_restore)
+
+    m = sub.add_parser("monitor", help="кто грузит канал прямо сейчас")
+    m.add_argument("--interval", type=int, default=2, help="период обновления, сек")
+    m.add_argument("--top", type=int, default=20)
+    m.set_defaults(func=cmd_monitor)
 
     st = sub.add_parser("status", help="статистика по IP")
     st.add_argument("--live", action="store_true", help="замерить текущую скорость")

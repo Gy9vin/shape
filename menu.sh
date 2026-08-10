@@ -118,19 +118,16 @@ show_listening() {
 screen_stats() {
     while :; do
         title "Статистика"
-        echo -e "  ${D}Кто сколько прокачал через шейпер.${N}"
+        echo -e "  ${D}Сколько каждый IP прокачал за всё время работы шейпера.${N}"
+        echo -e "  ${D}Кто грузит канал прямо сейчас — смотри «Монитор».${N}"
         echo
-        echo "  [1] Показать сейчас"
-        echo "  [2] Замерить реальную скорость (3 секунды)"
-        echo "  [3] Полный список IP"
-        echo "  [4] Обновлять непрерывно (Ctrl+C — выход)"
+        echo "  [1] Показать (топ-20)"
+        echo "  [2] Полный список IP"
         echo "  [0] Назад"
         echo
         case "$(ask 'Выбор')" in
             1) title "Статистика"; "$CTL" status; pause ;;
-            2) title "Статистика"; "$CTL" status --live; pause ;;
-            3) title "Статистика"; "$CTL" status --full | ${PAGER:-less -R} ;;
-            4) trap ' ' INT; while :; do clear; "$CTL" status --live || break; sleep 2; done; trap - INT ;;
+            2) title "Статистика"; "$CTL" status --full; pause ;;
             0|"") return ;;
         esac
     done
@@ -177,7 +174,7 @@ screen_service() {
             2) systemctl stop shaper; sleep 1 ;;
             3) rm -f "$APP_DIR/bpf/shaper.bpf.o"; systemctl restart shaper; sleep 2 ;;
             4) systemctl enable shaper && echo -e "  ${G}✓ включён${N}"; sleep 1 ;;
-            5) journalctl -u shaper -n 60 --no-pager | sed 's/^/  /' | ${PAGER:-less -R} ;;
+            5) title "Логи"; journalctl -u shaper -n 40 --no-pager | sed 's/^/  /'; pause ;;
             6) title "Проверка окружения"; doctor; pause ;;
             0|"") return ;;
         esac
@@ -208,16 +205,18 @@ while :; do
     hr
     echo
     echo "  [1] Настроить лимит — скорость и порт"
-    echo "  [2] Статистика"
-    echo "  [3] Белый список IP"
-    echo "  [4] Сервис: запуск, логи, диагностика"
+    echo -e "  [2] Монитор ${D}— кто грузит канал прямо сейчас${N}"
+    echo -e "  [3] Статистика ${D}— сколько прокачали всего${N}"
+    echo "  [4] Белый список IP"
+    echo "  [5] Сервис: запуск, логи, диагностика"
     echo "  [0] Выход"
     echo
     case "$(ask 'Выбор')" in
         1) screen_limit ;;
-        2) screen_stats ;;
-        3) screen_whitelist ;;
-        4) screen_service ;;
+        2) "$CTL" monitor ;;
+        3) screen_stats ;;
+        4) screen_whitelist ;;
+        5) screen_service ;;
         0|"") clear; exit 0 ;;
     esac
 done
