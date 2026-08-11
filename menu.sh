@@ -68,28 +68,29 @@ screen_lang() {
 # Все значения читаются одним вызовом python: экран перерисовывается часто,
 # плодить по семь процессов на кадр незачем. Разделитель — вертикальная черта.
 read_state() {
-    python3 - <<'PY' 2>/dev/null || echo "0|?|0|80|5|1|60"
+    python3 - <<'PY' 2>/dev/null || echo "0|?|0|15|10|1|60|3"
 import json
 try:
     c = json.load(open("/etc/shaper/config.json"))
 except Exception:
     c = {}
-g = {"enabled": False, "trigger_percent": 80, "sustain_min": 5,
-     "penalty_mbps": 1, "penalty_min": 60}
+g = {"enabled": False, "both_dl_percent": 50, "both_ul_percent": 15,
+     "both_ways_min": 10, "penalty_mbps": 1, "penalty_min": 60,
+     "score_needed": 3}
 g.update(c.get("guard", {}))
 ports = c.get("ports", [])
 print("|".join([
     f"{float(c.get('speed_mbps', 0)):g}",
     ", ".join(map(str, ports)) if ports and ports != [0] else "*",
     "1" if g["enabled"] else "0",
-    f"{g['trigger_percent']:g}", f"{g['sustain_min']:g}",
-    f"{g['penalty_mbps']:g}", f"{g['penalty_min']:g}",
+    f"{g['both_dl_percent']:g}", f"{g['both_ways_min']:g}",
+    f"{g['penalty_mbps']:g}", f"{g['penalty_min']:g}", f"{g['score_needed']:g}",
 ]))
 PY
 }
 
 status_line() {
-    local ifc speed ports g_on thr sus pen dur trig auto_on=0 run_on=0
+    local ifc speed ports g_on bpct bmin pen dur score both auto_on=0 run_on=0
 
     "$ENGINE" state >/dev/null 2>&1 && run_on=1
     systemctl is-enabled shaper >/dev/null 2>&1 && auto_on=1
@@ -98,7 +99,7 @@ status_line() {
     [[ -z "$ifc" ]] && ifc="$(ip route get 1.1.1.1 2>/dev/null |
                               sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
 
-    IFS='|' read -r speed ports g_on thr sus pen dur <<< "$(read_state)"
+    IFS='|' read -r speed ports g_on bpct bmin pen dur score <<< "$(read_state)"
     [[ "$ports" == "*" ]] && ports="${T[st_all]}"
 
     if (( run_on )); then
@@ -124,10 +125,10 @@ status_line() {
         if [[ "$speed" == "0" ]]; then
             echo -e "  🚦  ${T[st_guard]} ${G}${T[st_g_on]}${N}    ${Y}${T[st_g_nolimit]}${N}"
         else
-            trig="$(awk "BEGIN{printf \"%g\", $speed*$thr/100}")"
+            both="$(awk "BEGIN{printf \"%g\", $speed*$bpct/100}")"
             echo -e "  🚦  ${T[st_guard]} ${G}${T[st_g_on]}${N}" \
-                    "${D}${T[st_g_above]} ${trig} Mbit/s ${sus} ${T[min]}" \
-                    "→ ${pen} Mbit/s ${T[g_for]} ${dur} ${T[min]}${N}"
+                    "${D}${T[st_g_both]} ${both} Mbit/s ${bmin} ${T[min]}," \
+                    "${score} ${T[st_g_pts]} → ${pen} Mbit/s ${T[g_for]} ${dur} ${T[min]}${N}"
         fi
     else
         echo -e "  🚦  ${T[st_guard]} ${D}${T[st_g_off]}${N}   ${D}${T[st_g_none]}${N}"
@@ -208,17 +209,22 @@ guard_get() { python3 -c "
 import json
 try: g = json.load(open('$ETC_DIR/config.json')).get('guard', {})
 except Exception: g = {}
-d = {'enabled': False, 'trigger_percent': 80, 'sustain_min': 5,
-     'penalty_mbps': 1, 'penalty_min': 60}
+d = {'enabled': False, 'score_needed': 3, 'both_dl_percent': 50,
+     'both_ul_percent': 15, 'both_ways_min': 10,
+     'penalty_mbps': 1, 'penalty_min': 60,
+     'hours_per_day': 4, 'upload_gb_per_day': 2, 'packet_bytes': 600,
+     'trigger_percent': 80, 'sustain_min': 5}
 d.update(g); print(d['$1'])" 2>/dev/null; }
 
 screen_guard() {
-    local on thr sus pen dur speed v
+    local on score both_min bdl bul pen dur hours gb speed v
     while :; do
         speed="$(cfg speed_mbps 0)"
-        on="$(guard_get enabled)"; thr="$(guard_get trigger_percent)"
-        sus="$(guard_get sustain_min)"; pen="$(guard_get penalty_mbps)"
-        dur="$(guard_get penalty_min)"
+        on="$(guard_get enabled)";        score="$(guard_get score_needed)"
+        both_min="$(guard_get both_ways_min)"; bdl="$(guard_get both_dl_percent)"
+        bul="$(guard_get both_ul_percent)"
+        pen="$(guard_get penalty_mbps)";  dur="$(guard_get penalty_min)"
+        hours="$(guard_get hours_per_day)"; gb="$(guard_get upload_gb_per_day)"
 
         title "${T[g_title]}"
         echo -e "  ${D}${T[g_h1]}${N}"
@@ -231,65 +237,44 @@ screen_guard() {
             echo -e "  ${T[g_state]} : ${D}${T[g_off]}${N}"
         fi
         if [[ "$speed" != "0" && -n "$speed" ]]; then
-            echo -e "  ${T[g_thr]}      : ${B}$(awk "BEGIN{printf \"%g\", $speed*$thr/100}") Mbit/s${N}" \
-                    "${D}(${thr}% ${T[g_of_limit]})${N} ${T[g_sustain]} ${B}${sus}${N} ${T[min]}"
+            echo -e "  ${T[g_req]} : ${B}↓$(awk "BEGIN{printf \"%g\", $speed*$bdl/100}")" \
+                    "↑$(awk "BEGIN{printf \"%g\", $speed*$bul/100}") Mbit/s${N}" \
+                    "${D}${T[g_bothways]}${N} ${B}${both_min}${N} ${T[min]}"
         else
             echo -e "  ${Y}${T[g_need_limit]}${N}"
         fi
         echo -e "  ${T[g_pen]} : ${B}${pen} Mbit/s${N} ${T[g_for]} ${B}${dur}${N} ${T[min]}"
         hr
-        echo -e "  ${D}${T[g_note_yt]}${N}"
-        echo -e "  ${D}${T[g_note_4k]}${N}"
-        echo -e "  ${D}${T[g_note_big]}${N}"
+        echo -e "  ${D}${T[g_signals]}  ${T[g_score_now]} ${score}${N}"
+        echo -e "  ${D}  +2  ${T[why_packet]}${N}"
+        echo -e "  ${D}  +1  ${T[why_peak]}${N}"
+        echo -e "  ${D}  +2  ${T[why_hours]} (>${hours} ${T[hour]})${N}"
+        echo -e "  ${D}  +1  ${T[why_upload]} (>${gb} GB)${N}"
         hr
         echo "  [1] ${T[g_toggle]}"
-        echo "  [2] ${T[g_set_sustain]}"
-        echo "  [3] ${T[g_set_pen]}"
-        echo "  [4] ${T[g_set_dur]}"
-        echo "  [5] ${T[g_set_thr]}"
+        echo "  [2] ${T[g_set_score]}"
+        echo "  [3] ${T[g_set_both]}"
+        echo "  [4] ${T[g_set_pen]}"
+        echo "  [5] ${T[g_set_dur]}"
+        echo "  [6] ${T[g_set_hours]}"
+        echo "  [7] ${T[g_set_gb]}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
             1) if [[ "$on" == "True" ]]; then "$CTL" guard --disable --quiet
                else "$CTL" guard --enable --quiet; fi ;;
-            2) v="$(ask "${T[g_set_sustain]}" "$sus")"
-               [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --sustain "$v" --quiet ;;
-            3) v="$(ask "${T[g_set_pen]}" "$pen")"
+            2) v="$(ask "${T[g_set_score]}" "$score")"
+               [[ "$v" =~ ^[1-6]$ ]] && "$CTL" guard --score "$v" --quiet ;;
+            3) v="$(ask "${T[g_set_both]}" "$both_min")"
+               [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --both-min "$v" --quiet ;;
+            4) v="$(ask "${T[g_set_pen]}" "$pen")"
                [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --penalty-mbps "$v" --quiet ;;
-            4) v="$(ask "${T[g_set_dur]}" "$dur")"
+            5) v="$(ask "${T[g_set_dur]}" "$dur")"
                [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --penalty-min "$v" --quiet ;;
-            5) v="$(ask "${T[g_set_thr]}" "$thr")"
-               [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --percent "$v" --quiet ;;
-            0|"") return ;;
-        esac
-    done
-}
-
-# ── Ограниченные пользователи ─────────────────────────────────────────
-limited_count() {
-    python3 -c "
-import json, time
-try: p = json.load(open('$ETC_DIR/penalties.json'))
-except Exception: p = {}
-now = time.time()
-print(sum(1 for v in p.values() if isinstance(v, dict) and v.get('until', 0) > now))
-" 2>/dev/null || echo 0
-}
-
-screen_limited() {
-    local ip
-    while :; do
-        title "${T[lm_title]}"
-        "$CTL" limited
-        hr
-        echo "  [1] ${T[lm_release]}"
-        echo "  [2] ${T[lm_release_all]}"
-        echo "  [0] ← ${T[m0]}"
-        echo
-        case "$(ask "${T[choice]}")" in
-            1) ip="$(ask "${T[lm_ask]}")"
-               [[ -n "$ip" ]] && { "$CTL" release "$ip"; sleep 1; } ;;
-            2) "$CTL" release --all; sleep 1 ;;
+            6) v="$(ask "${T[g_set_hours]}" "$hours")"
+               [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --hours "$v" --quiet ;;
+            7) v="$(ask "${T[g_set_gb]}" "$gb")"
+               [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --upload-gb "$v" --quiet ;;
             0|"") return ;;
         esac
     done

@@ -23,6 +23,7 @@ ETC_DIR     = "/etc/shaper"
 CONFIG_FILE = os.path.join(ETC_DIR, "config.json")
 WL_FILE     = os.path.join(ETC_DIR, "whitelist.txt")
 PEN_FILE    = os.path.join(ETC_DIR, "penalties.json")
+DAILY_FILE  = os.path.join(ETC_DIR, "daily.json")
 
 NS = 1_000_000_000
 # Мбит/с -> байт/с. Мегабит десятичный: 1 Мбит = 1 000 000 бит = 125 000 байт.
@@ -32,7 +33,7 @@ MAX_PORTS = 64              # должно совпадать с max_entries por
 
 CONFIG_FMT = "<Q"           # struct config, 8 байт
 PEN_FMT = "<2Q"             # struct penalty: rate_bytes_per_sec, until_ns
-USER_FMT, USER_SIZE = "<3Q", 24   # struct user_state
+USER_FMT, USER_SIZE = "<4Q", 32   # struct user_state
 
 C = {
     "r": "\033[0m", "b": "\033[1m",
@@ -46,6 +47,20 @@ C = {
 MSG = {
     "ru": {
         "root": "нужны права root",
+        "lim_why": "за что",
+        "h_score": "баллов для штрафа (1-6)",
+        "h_both_min": "минут одновременной нагрузки в обе стороны",
+        "h_both_dl": "порог скачивания для двусторонней нагрузки, %",
+        "h_both_ul": "порог отдачи для двусторонней нагрузки, %",
+        "h_hours": "часов активности за сутки",
+        "h_upload_gb": "гигабайт отдачи за сутки",
+        "h_packet": "средний размер пакета в отдаче, байт",
+        "guard_both": "Обе стороны сразу",
+        "guard_score": "Баллов для штрафа",
+        "why_packet": "отдаёт данные, а не подтверждения",
+        "why_peak": "держит потолок скачивания",
+        "why_hours": "часами не отпускает канал",
+        "why_upload": "много отдал за сутки",
         "h_guard": "автоограничение нарушителей",
         "h_percent": "порог, % от лимита",
         "h_sustain": "сколько минут держать нагрузку до штрафа",
@@ -117,6 +132,20 @@ MSG = {
     },
     "en": {
         "root": "root privileges required",
+        "lim_why": "why",
+        "h_score": "score needed for a penalty (1-6)",
+        "h_both_min": "minutes of simultaneous two-way load",
+        "h_both_dl": "download floor for two-way load, %",
+        "h_both_ul": "upload floor for two-way load, %",
+        "h_hours": "hours of activity per day",
+        "h_upload_gb": "gigabytes uploaded per day",
+        "h_packet": "average upload packet size, bytes",
+        "guard_both": "Both ways at once",
+        "guard_score": "Score needed",
+        "why_packet": "sends real data, not just ACKs",
+        "why_peak": "holds the download ceiling",
+        "why_upload": "uploaded a lot in 24h",
+        "why_hours": "keeps the channel busy for hours",
         "h_guard": "automatic limiting of heavy users",
         "h_percent": "threshold, % of the limit",
         "h_sustain": "minutes of sustained load before the penalty",
@@ -311,12 +340,13 @@ def parse_ip_key(k):
 def parse_user_state(v):
     b = _raw(v)
     if b is not None and len(b) >= USER_SIZE:
-        _dep, total, seen = struct.unpack(USER_FMT, b[:USER_SIZE])
-        return {"total": total, "seen": seen}
+        _dep, total, seen, pkts = struct.unpack(USER_FMT, b[:USER_SIZE])
+        return {"total": total, "seen": seen, "pkts": pkts}
     if isinstance(v, dict):
         return {"total": _int(v.get("total_bytes", 0)),
-                "seen":  _int(v.get("last_seen_ns", 0))}
-    return {"total": 0, "seen": 0}
+                "seen":  _int(v.get("last_seen_ns", 0)),
+                "pkts":  _int(v.get("packets", 0))}
+    return {"total": 0, "seen": 0, "pkts": 0}
 
 
 def fmt_bytes(n):
@@ -341,11 +371,37 @@ def mono_ns():
 # в среднем 30-40% от канала в 10 Мбит/с, торрент и закачка — все 100%.
 GUARD_DEFAULT = {
     "enabled": False,
-    "trigger_percent": 80,   # % от лимита, выше которого нагрузка считается тяжёлой
-    "sustain_min": 5,        # столько минут подряд — и это уже не стриминг
-    "penalty_mbps": 1,       # хватает на переписку и звонок в мессенджере
+    "score_needed": 3,        # баллов для штрафа
+    "penalty_mbps": 1,        # хватает на переписку и звонок в мессенджере
     "penalty_min": 60,
+
+    # Обязательное условие. Торрент — почти единственное бытовое занятие,
+    # которое часами тянет данные ВНИЗ И ВВЕРХ одновременно. Стриминг молчит
+    # вверх, облачный бэкап молчит вниз — оба не проходят это условие вообще.
+    # Пороги разные: торрент забирает ВСЁ скачивание, а видеозвонок держит
+    # скромный битрейт. Верхний порог низкий — у мобильных операторов отдача
+    # всего 3-20 Мбит, и при лимите 10 сидирование даёт лишь треть канала.
+    "both_dl_percent": 50,    # % от лимита вниз
+    "both_ul_percent": 15,    # % от лимита вверх
+    "both_ways_min": 10,      # минут одновременной нагрузки
+
+    # Признаки, за которые начисляются баллы
+    "packet_bytes": 600,      # +2 средний размер пакета в отдаче
+    "trigger_percent": 80,    # +1 держит потолок скачивания
+    "sustain_min": 5,
+    "hours_per_day": 4,       # +2 часов активности за сутки
+    "upload_gb_per_day": 2,   # +1 гигабайт отдачи за сутки
 }
+
+# Веса признаков. Размер пакета — самый надёжный: он не зависит от скорости
+# канала, а у мобильных операторов отдача гуляет от 3 до 20 Мбит.
+SIGNAL_WEIGHTS = {"packet": 2, "peak": 1, "hours": 2, "upload": 1}
+
+# Веса признаков. Одной нагрузки (3) не хватает — нужен второй признак.
+# Так разовая большая закачка проходит мимо, а торрент набирает 7 из 7.
+SCORE_LOAD, SCORE_RATIO, SCORE_PACKETS = 3, 2, 2
+# Окно усреднения для соотношения и размера пакета.
+SCORE_WINDOW_SEC = 60
 
 
 def load_config():
@@ -446,7 +502,7 @@ def cmd_restore(a):
 # ───────────────────────────── статистика ─────────────────────────────
 
 def read_users():
-    """{ip: {"down": байт, "up": байт, "seen": нс}}"""
+    """{ip: {"down": байт, "up": байт, "up_pkts": шт, "seen": нс}}"""
     users = {}
     for map_name, direction in (("user_state_map_down", "down"),
                                 ("user_state_map_up", "up")):
@@ -455,8 +511,10 @@ def read_users():
             if ip is None:
                 continue
             st = parse_user_state(v)
-            e = users.setdefault(ip, {"down": 0, "up": 0, "seen": 0})
+            e = users.setdefault(ip, {"down": 0, "up": 0, "up_pkts": 0, "seen": 0})
             e[direction] = st["total"]
+            if direction == "up":
+                e["up_pkts"] = st["pkts"]
             e["seen"] = max(e["seen"], st["seen"])
     return users
 
@@ -682,18 +740,25 @@ def cmd_limited(a):
     pens = load_penalties()
     if a.json:
         print(json.dumps([{"ip": ip, "mbps": p["mbps"],
-                           "seconds_left": round(p["until"] - time.time())}
+                           "seconds_left": round(p["until"] - time.time()),
+                           "score": p.get("score"),
+                           "reasons": p.get("reasons", [])}
                           for ip, p in pens.items()], indent=2))
         return
     if not pens:
         print(f"\n  {C['gry']}{t('lim_none')}{C['r']}\n")
         return
     print(f"\n  {C['b']}{t('lim_title')}{C['r']}")
-    print("  " + "─" * 60)
+    print("  " + "─" * 68)
     for ip, p in sorted(pens.items(), key=lambda x: x[1]["until"]):
         left = p["until"] - time.time()
-        print(f"  {C['red']}{ip:<28}{C['r']}{p['mbps']:g} Mbit/s"
+        print(f"  {C['red']}{ip:<26}{C['r']}{p['mbps']:g} Mbit/s"
               f"   {t('lim_left')} {fmt_hold(left)}")
+        reasons = p.get("reasons") or []
+        if reasons:
+            why = ", ".join(t("why_" + r) for r in reasons)
+            print(f"  {C['gry']}{'':<26}{t('lim_why')}: {why}"
+                  f" [{p.get('score', '?')}]{C['r']}")
     print()
 
 
@@ -720,17 +785,27 @@ def cmd_guard(a):
         g["enabled"] = True
     if a.disable:
         g["enabled"] = False
-    for src_val, key, lo, hi in ((a.percent, "trigger_percent", 10, 100),
-                                 (a.sustain, "sustain_min", 1, 1440),
-                                 (a.penalty_mbps, "penalty_mbps", 0.1, 1000),
-                                 (a.penalty_min, "penalty_min", 1, 10080)):
-        if src_val is not None:
-            if not lo <= src_val <= hi:
-                die(t("guard_range", k=key, lo=lo, hi=hi))
-            g[key] = src_val
 
-    full = {"ports": cfg["ports"], "speed_mbps": cfg["speed_mbps"], "guard": g}
-    save_config(full)
+    limits = (
+        (a.score,      "score_needed",      1, 6),
+        (a.both_min,   "both_ways_min",     1, 120),
+        (a.both_dl,    "both_dl_percent",   10, 100),
+        (a.both_ul,    "both_ul_percent",   5, 100),
+        (a.percent,    "trigger_percent",   10, 100),
+        (a.sustain,    "sustain_min",       1, 1440),
+        (a.penalty_mbps, "penalty_mbps",    0.1, 1000),
+        (a.penalty_min,  "penalty_min",     1, 10080),
+        (a.hours,      "hours_per_day",     1, 24),
+        (a.upload_gb,  "upload_gb_per_day", 0.1, 1000),
+        (a.packet,     "packet_bytes",      100, 1500),
+    )
+    for val, key, lo, hi in limits:
+        if val is not None:
+            if not lo <= val <= hi:
+                die(t("guard_range", k=key, lo=lo, hi=hi))
+            g[key] = val
+
+    save_config({"ports": cfg["ports"], "speed_mbps": cfg["speed_mbps"], "guard": g})
     if not a.quiet:
         cmd_guard_show(cfg["speed_mbps"], g)
 
@@ -741,13 +816,84 @@ def cmd_guard_show(speed, g):
         else f"{C['gry']}{t('guard_off')}{C['r']}"
     print(f"  {t('guard_state')}: {state}")
     if speed > 0:
-        trig = speed * g["trigger_percent"] / 100
-        print(f"  {t('guard_trigger')}: {trig:g} Mbit/s "
-              f"({g['trigger_percent']}% {t('guard_of_limit')}) "
-              f"{t('guard_during')} {g['sustain_min']} {t('min')}")
+        print(f"  {t('guard_both')}: ↓{speed * g['both_dl_percent'] / 100:g} "
+              f"↑{speed * g['both_ul_percent'] / 100:g} Mbit/s "
+              f"{t('guard_during')} {g['both_ways_min']} {t('min')}")
+        print(f"  {t('guard_score')}: {g['score_needed']}")
     print(f"  {t('guard_penalty')}: {g['penalty_mbps']:g} Mbit/s "
           f"{t('guard_for')} {g['penalty_min']} {t('min')}")
     print()
+
+
+def traffic_sample(prev, cur, dt):
+    """
+    Замер за интервал по каждому IP:
+      dl, ul   — Мбит/с
+      up_pkt   — средний размер пакета в отдаче, байт
+      up_bytes — сколько отдано за интервал
+    """
+    out = {}
+    for ip, c in cur.items():
+        p = prev.get(ip, {"down": 0, "up": 0, "up_pkts": 0})
+        d_bytes = max(0, c["down"] - p["down"])
+        u_bytes = max(0, c["up"] - p["up"])
+        u_pkts = max(0, c["up_pkts"] - p["up_pkts"])
+        out[ip] = {
+            "dl": d_bytes * 8 / 1e6 / dt,
+            "ul": u_bytes * 8 / 1e6 / dt,
+            "up_pkt": (u_bytes / u_pkts) if u_pkts else 0,
+            "up_bytes": u_bytes,
+        }
+    return out
+
+
+def load_daily():
+    """Суточные счётчики: секунды активности и объём отдачи. Сброс в полночь."""
+    try:
+        with open(DAILY_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    if data.get("day") != time.strftime("%Y-%m-%d"):
+        return {}
+    return data.get("ips", {})
+
+
+def save_daily(ips):
+    tmp = DAILY_FILE + ".tmp"
+    os.makedirs(ETC_DIR, exist_ok=True)
+    with open(tmp, "w") as f:
+        json.dump({"day": time.strftime("%Y-%m-%d"), "ips": ips}, f)
+    os.replace(tmp, DAILY_FILE)
+
+
+def evaluate(ip, s, g, cap, both_streak, peak_streak, daily):
+    """
+    Решает, нарушитель ли это. Возвращает (баллы, сработавшие признаки).
+
+    Обязательное условие — трафик в обе стороны одновременно. Без него ноль
+    баллов, каким бы тяжёлым трафик ни был: так из-под удара выходят стриминг
+    (молчит вверх) и облачный бэкап (молчит вниз).
+    """
+    if both_streak < max(1, int(g["both_ways_min"] * 60 / WATCH_INTERVAL)):
+        return 0, []
+
+    reasons = []
+    day = daily.get(ip, {"active": 0, "up": 0})
+
+    # Крупные пакеты вверх = клиент отдаёт данные, а не подтверждения.
+    # Нижний порог по отдаче нужен, чтобы редкие пакеты не давали случайных
+    # средних. Признак не зависит от скорости канала — это его главная ценность.
+    if s["up_pkt"] >= g["packet_bytes"] and s["ul"] >= 0.3:
+        reasons.append("packet")
+    if peak_streak >= max(1, int(g["sustain_min"] * 60 / WATCH_INTERVAL)):
+        reasons.append("peak")
+    if day["active"] >= g["hours_per_day"] * 3600:
+        reasons.append("hours")
+    if day["up"] >= g["upload_gb_per_day"] * 1e9:
+        reasons.append("upload")
+
+    return sum(SIGNAL_WEIGHTS[r] for r in reasons), reasons
 
 
 def cmd_watch(a):
@@ -756,55 +902,86 @@ def cmd_watch(a):
     print(t("watch_start"), flush=True)
     restore_penalties()
 
-    score = {}                       # ip -> накопленные очки нагрузки
+    both_streak, peak_streak = {}, {}
+    daily = load_daily()
     prev, prev_t = read_users(), time.monotonic()
+    last_daily_save = time.time()
 
     while True:
         time.sleep(WATCH_INTERVAL)
         try:
             cfg = load_config()
             g = cfg["guard"]
-            pens = load_penalties()
+            cap = cfg["speed_mbps"]
 
             cur = read_users()
             now_t = time.monotonic()
             dt = max(1.0, now_t - prev_t)
-            rt = rates(prev, cur, dt)
+            sample = traffic_sample(prev, cur, dt)
             prev, prev_t = cur, now_t
 
-            # снимаем истёкшие
-            for ip in [i for i in list(score) if i not in cur]:
-                score.pop(ip, None)
-            live = load_penalties()
-            for ip in set(pens) - set(live):
-                penalty_clear(ip)
-            if len(live) != len(pens):
-                save_penalties(live)
-                pens = live
+            # забываем тех, кто отвалился
+            for d in (both_streak, peak_streak):
+                for ip in [i for i in d if i not in cur]:
+                    d.pop(ip, None)
 
-            if not g["enabled"] or cfg["speed_mbps"] <= 0:
-                score.clear()
+            # снимаем истёкшие штрафы из карты ядра
+            pens = load_penalties()
+            in_map = {ip for ip, _ in
+                      [(parse_ip_key(k)[0], v) for k, v in map_dump("penalty_map")]}
+            for ip in in_map - set(pens):
+                penalty_clear(ip)
+
+            if not g["enabled"] or cap <= 0:
+                both_streak.clear()
+                peak_streak.clear()
                 continue
 
-            trigger = cfg["speed_mbps"] * g["trigger_percent"] / 100
-            need = max(1, int(g["sustain_min"] * 60 / WATCH_INTERVAL))
+            dl_floor = cap * g["both_dl_percent"] / 100
+            ul_floor = cap * g["both_ul_percent"] / 100
+            peak_floor = cap * g["trigger_percent"] / 100
+            active_floor = cap * 0.25
+            need_score = g["score_needed"]
             wl = whitelist_ips()
 
-            for ip, (dl, ul) in rt.items():
+            for ip, s in sample.items():
+                # суточные счётчики ведём для всех, даже для уже наказанных
+                if max(s["dl"], s["ul"]) >= active_floor:
+                    d = daily.setdefault(ip, {"active": 0, "up": 0})
+                    d["active"] += WATCH_INTERVAL
+                if s["up_bytes"]:
+                    daily.setdefault(ip, {"active": 0, "up": 0})["up"] += s["up_bytes"]
+
                 if ip in pens or ip in wl:
                     continue
-                heavy = max(dl, ul) >= trigger
-                score[ip] = min(need, score.get(ip, 0) + 1) if heavy \
-                    else max(0, score.get(ip, 0) - 1)
 
-                if score[ip] >= need:
+                # счётчики с допуском: короткий провал не обнуляет наблюдение
+                both = s["dl"] >= dl_floor and s["ul"] >= ul_floor
+                both_streak[ip] = (both_streak.get(ip, 0) + 1) if both \
+                    else max(0, both_streak.get(ip, 0) - 1)
+                peak = s["dl"] >= peak_floor
+                peak_streak[ip] = (peak_streak.get(ip, 0) + 1) if peak \
+                    else max(0, peak_streak.get(ip, 0) - 1)
+
+                score, reasons = evaluate(ip, s, g, cap,
+                                          both_streak[ip], peak_streak[ip], daily)
+                if score >= need_score:
                     until = time.time() + g["penalty_min"] * 60
                     penalty_apply(ip, g["penalty_mbps"], until)
-                    pens[ip] = {"until": until, "mbps": g["penalty_mbps"]}
+                    pens[ip] = {"until": until, "mbps": g["penalty_mbps"],
+                                "score": score, "reasons": reasons}
                     save_penalties(pens)
-                    score[ip] = 0
+                    both_streak[ip] = peak_streak[ip] = 0
                     print(t("watch_hit", ip=ip, mbps=g["penalty_mbps"],
-                            m=g["penalty_min"]), flush=True)
+                            m=g["penalty_min"]) +
+                          f" [{score}: {','.join(reasons)}]", flush=True)
+
+            if time.time() - last_daily_save > 60:
+                # чистим тех, кто за сутки не набрал ничего заметного
+                daily = {k: v for k, v in daily.items()
+                         if v["active"] > 0 or v["up"] > 1e6}
+                save_daily(daily)
+                last_daily_save = time.time()
         except Exception as e:
             print(f"watch: {e}", flush=True)
 
@@ -908,10 +1085,17 @@ def build_parser():
     g = sub.add_parser("guard", help=t("h_guard"))
     g.add_argument("--enable", action="store_true")
     g.add_argument("--disable", action="store_true")
+    g.add_argument("--score", type=int, default=None, help=t("h_score"))
+    g.add_argument("--both-min", type=int, default=None, help=t("h_both_min"))
+    g.add_argument("--both-dl", type=float, default=None, help=t("h_both_dl"))
+    g.add_argument("--both-ul", type=float, default=None, help=t("h_both_ul"))
     g.add_argument("--percent", type=float, default=None, help=t("h_percent"))
     g.add_argument("--sustain", type=int, default=None, help=t("h_sustain"))
     g.add_argument("--penalty-mbps", type=float, default=None, help=t("h_pen_mbps"))
     g.add_argument("--penalty-min", type=int, default=None, help=t("h_pen_min"))
+    g.add_argument("--hours", type=float, default=None, help=t("h_hours"))
+    g.add_argument("--upload-gb", type=float, default=None, help=t("h_upload_gb"))
+    g.add_argument("--packet", type=int, default=None, help=t("h_packet"))
     g.add_argument("--quiet", action="store_true")
     g.set_defaults(func=cmd_guard)
 

@@ -60,11 +60,15 @@ struct penalty {
     __u64 until_ns;
 };
 
-/* 24 байта: last_departure_ns, total_bytes, last_seen_ns */
+/* 32 байта: last_departure_ns, total_bytes, last_seen_ns, packets
+ * packets нужен, чтобы посчитать средний размер пакета. В карте отдачи
+ * это отделяет раздачу (полные пакеты 1200-1400 байт) от просмотра видео,
+ * где вверх уходят только ACK по 60-80 байт. */
 struct user_state {
     __u64 last_departure_ns;
     __u64 total_bytes;
     __u64 last_seen_ns;
+    __u64 packets;
 };
 
 struct {
@@ -207,12 +211,14 @@ static __always_inline int process_packet(struct __sk_buff *skb,
             .last_departure_ns = now,
             .last_seen_ns      = now,
             .total_bytes       = len,
+            .packets           = 1,
         };
         bpf_map_update_elem(user_map, &key, &fresh, BPF_ANY);
         return TC_ACT_OK;   /* первый пакет пропускаем без задержки */
     }
 
     __sync_fetch_and_add(&st->total_bytes, len);
+    __sync_fetch_and_add(&st->packets, 1);
     st->last_seen_ns = now;
 
     /* Персональный штраф важнее общего лимита. Просроченные записи вычищает
