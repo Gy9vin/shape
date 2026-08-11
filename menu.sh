@@ -68,7 +68,7 @@ screen_lang() {
 # Все значения читаются одним вызовом python: экран перерисовывается часто,
 # плодить по семь процессов на кадр незачем. Разделитель — вертикальная черта.
 read_state() {
-    python3 - <<'PY' 2>/dev/null || echo "0|?|0|15|10|1|60|3"
+    python3 - <<'PY' 2>/dev/null || echo "0|?|0|50|15|10|1|60|3"
 import json
 try:
     c = json.load(open("/etc/shaper/config.json"))
@@ -83,14 +83,15 @@ print("|".join([
     f"{float(c.get('speed_mbps', 0)):g}",
     ", ".join(map(str, ports)) if ports and ports != [0] else "*",
     "1" if g["enabled"] else "0",
-    f"{g['both_dl_percent']:g}", f"{g['both_ways_min']:g}",
+    f"{g['both_dl_percent']:g}", f"{g['both_ul_percent']:g}",
+    f"{g['both_ways_min']:g}",
     f"{g['penalty_mbps']:g}", f"{g['penalty_min']:g}", f"{g['score_needed']:g}",
 ]))
 PY
 }
 
 status_line() {
-    local ifc speed ports g_on bpct bmin pen dur score both auto_on=0 run_on=0
+    local ifc speed ports g_on bdl bul bmin pen dur score dlv ulv auto_on=0 run_on=0
 
     "$ENGINE" state >/dev/null 2>&1 && run_on=1
     systemctl is-enabled shaper >/dev/null 2>&1 && auto_on=1
@@ -99,7 +100,7 @@ status_line() {
     [[ -z "$ifc" ]] && ifc="$(ip route get 1.1.1.1 2>/dev/null |
                               sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
 
-    IFS='|' read -r speed ports g_on bpct bmin pen dur score <<< "$(read_state)"
+    IFS='|' read -r speed ports g_on bdl bul bmin pen dur score <<< "$(read_state)"
     [[ "$ports" == "*" ]] && ports="${T[st_all]}"
 
     if (( run_on )); then
@@ -125,9 +126,10 @@ status_line() {
         if [[ "$speed" == "0" ]]; then
             echo -e "  🚦  ${T[st_guard]} ${G}${T[st_g_on]}${N}    ${Y}${T[st_g_nolimit]}${N}"
         else
-            both="$(awk "BEGIN{printf \"%g\", $speed*$bpct/100}")"
+            dlv="$(awk "BEGIN{printf \"%g\", $speed*$bdl/100}")"
+            ulv="$(awk "BEGIN{printf \"%g\", $speed*$bul/100}")"
             echo -e "  🚦  ${T[st_guard]} ${G}${T[st_g_on]}${N}" \
-                    "${D}${T[st_g_both]} ${both} Mbit/s ${bmin} ${T[min]}," \
+                    "${D}${T[st_g_both]} ↓${dlv} ↑${ulv} Mbit/s ${bmin} ${T[min]}," \
                     "${score} ${T[st_g_pts]} → ${pen} Mbit/s ${T[g_for]} ${dur} ${T[min]}${N}"
         fi
     else
@@ -275,6 +277,36 @@ screen_guard() {
                [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --hours "$v" --quiet ;;
             7) v="$(ask "${T[g_set_gb]}" "$gb")"
                [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --upload-gb "$v" --quiet ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# ── Ограниченные пользователи ─────────────────────────────────────────
+limited_count() {
+    python3 -c "
+import json, time
+try: p = json.load(open('$ETC_DIR/penalties.json'))
+except Exception: p = {}
+now = time.time()
+print(sum(1 for v in p.values() if isinstance(v, dict) and v.get('until', 0) > now))
+" 2>/dev/null || echo 0
+}
+
+screen_limited() {
+    local ip
+    while :; do
+        title "${T[lm_title]}"
+        "$CTL" limited
+        hr
+        echo "  [1] ${T[lm_release]}"
+        echo "  [2] ${T[lm_release_all]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) ip="$(ask "${T[lm_ask]}")"
+               [[ -n "$ip" ]] && { "$CTL" release "$ip"; sleep 1; } ;;
+            2) "$CTL" release --all; sleep 1 ;;
             0|"") return ;;
         esac
     done
