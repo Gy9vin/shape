@@ -48,6 +48,9 @@ MSG = {
     "ru": {
         "root": "нужны права root",
         "lim_why": "за что",
+        "lim_when": "с",
+        "lim_total": "всего ограничено",
+        "lim_speed": "скорость нарушителя",
         "h_score": "баллов для штрафа (1-6)",
         "h_both_min": "минут одновременной нагрузки в обе стороны",
         "h_both_dl": "порог скачивания для двусторонней нагрузки, %",
@@ -136,6 +139,9 @@ MSG = {
     "en": {
         "root": "root privileges required",
         "lim_why": "why",
+        "lim_when": "since",
+        "lim_total": "limited total",
+        "lim_speed": "offender speed",
         "h_score": "score needed for a penalty (1-6)",
         "h_both_min": "minutes of simultaneous two-way load",
         "h_both_dl": "download floor for two-way load, %",
@@ -757,6 +763,7 @@ def cmd_limited(a):
     pens = load_penalties()
     if a.json:
         print(json.dumps([{"ip": ip, "mbps": p["mbps"],
+                           "since": p.get("since"),
                            "seconds_left": round(p["until"] - time.time()),
                            "score": p.get("score"),
                            "reasons": p.get("reasons", [])}
@@ -765,18 +772,19 @@ def cmd_limited(a):
     if not pens:
         print(f"\n  {C['gry']}{t('lim_none')}{C['r']}\n")
         return
-    print(f"\n  {C['b']}{t('lim_title')}{C['r']}")
+
+    print(f"\n{C['gry']}  {'IP':<24}{t('lim_when'):>8}{t('lim_left'):>12}"
+          f"   {t('lim_why')}{C['r']}")
     print("  " + "─" * 68)
-    for ip, p in sorted(pens.items(), key=lambda x: x[1]["until"]):
-        left = p["until"] - time.time()
-        print(f"  {C['red']}{ip:<26}{C['r']}{p['mbps']:g} Mbit/s"
-              f"   {t('lim_left')} {fmt_hold(left)}")
-        reasons = p.get("reasons") or []
-        if reasons:
-            why = ", ".join(t("why_" + r) for r in reasons)
-            print(f"  {C['gry']}{'':<26}{t('lim_why')}: {why}"
-                  f" [{p.get('score', '?')}]{C['r']}")
-    print()
+    # свежие сверху: интереснее всего то, что произошло только что
+    for ip, p in sorted(pens.items(), key=lambda x: -x[1].get("since", 0)):
+        since = p.get("since")
+        when = time.strftime("%H:%M", time.localtime(since)) if since else "—"
+        why = ", ".join(t("why_" + r) for r in p.get("reasons") or []) or "—"
+        print(f"  {C['red']}{ip:<24}{C['r']}{when:>8}"
+              f"{fmt_hold(p['until'] - time.time()):>12}   {C['gry']}{why}{C['r']}")
+    print(f"\n  {C['gry']}{t('lim_total')}: {len(pens)} · "
+          f"{t('lim_speed')} {next(iter(pens.values()))['mbps']:g} Mbit/s{C['r']}\n")
 
 
 def cmd_release(a):
@@ -1001,6 +1009,7 @@ def cmd_watch(a):
                     until = time.time() + g["penalty_min"] * 60
                     penalty_apply(ip, g["penalty_mbps"], until)
                     pens[ip] = {"until": until, "mbps": g["penalty_mbps"],
+                                "since": time.time(),
                                 "score": score, "reasons": reasons}
                     save_penalties(pens)
                     both_streak[ip] = peak_streak[ip] = 0

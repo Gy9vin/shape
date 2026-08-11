@@ -23,6 +23,15 @@ ui_lang_load "${UI_LANG:-ru}"
 
 [[ $EUID -eq 0 ]] || { echo -e "${R}${T[need_root]}${N}"; exit 1; }
 
+# Шрифтовой знак вместо картинки: рисовать скунса псевдографикой в терминале
+# смысла нет, а стоимость вывода нулевая — это статический текст.
+banner() {
+    local host; host="$(hostname -s 2>/dev/null || echo '?')"
+    echo -e "  ${G}╔═╗╦ ╦╔═╗╔═╗╔═╗${N}   ${D}v$VERSION ${T[subtitle]}${N}"
+    echo -e "  ${G}╚═╗╠═╣╠═╣╠═╝║╣ ${N}   ${D}🦨 SkunkBG${N}"
+    echo -e "  ${G}╚═╝╩ ╩╩ ╩╩  ╚═╝${N}   ${D}${T[node]}: ${B}${host}${N}"
+}
+
 hr()    { echo -e "${D}  ────────────────────────────────────────────────────────────${N}"; }
 title() { clear; echo; echo -e "  ${B}$1${N}"; hr; }
 pause() { echo; read -rsp "  ${T[back]} " _; }
@@ -45,7 +54,7 @@ conf_set() {
 # ── Выбор языка ───────────────────────────────────────────────────────
 screen_lang() {
     clear; echo
-    echo -e "  ${B}⚡ Shape${N} ${D}v$VERSION${N}"
+    banner
     hr
     echo -e "  ${B}Выбери язык / Choose language${N}"
     echo
@@ -321,7 +330,7 @@ print(sum(1 for v in p.values() if isinstance(v, dict) and v.get('until', 0) > n
 }
 
 screen_limited() {
-    local ip
+    local ip ans
     while :; do
         title "${T[lm_title]}"
         "$CTL" limited
@@ -333,7 +342,8 @@ screen_limited() {
         case "$(ask "${T[choice]}")" in
             1) ip="$(ask "${T[lm_ask]}")"
                [[ -n "$ip" ]] && { "$CTL" release "$ip"; sleep 1; } ;;
-            2) "$CTL" release --all; sleep 1 ;;
+            2) read -rp "  ${T[lm_confirm]} [y/N]: " ans
+               [[ "$ans" =~ ^[YyДд] ]] && { "$CTL" release --all; sleep 1; } ;;
             0|"") return ;;
         esac
     done
@@ -457,6 +467,8 @@ doctor() {
     ifc="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
     echo -e "  ${T[dr_iface]}: ${B}${ifc:-${T[dr_undetected]}}${N}"
     [[ -n "$ifc" ]] && echo -e "  ${T[dr_qdisc]}: $(tc qdisc show dev "$ifc" root 2>/dev/null | awk '{print $2}')"
+    printf "  %-17s: %s\n" "${T[dr_watch]}" "$(systemctl is-active shaper-watch >/dev/null 2>&1 &&
+        echo -e "${G}✓ ${T[dr_running]}${N}" || echo -e "${Y}⚠ ${T[dr_stopped]}${N}")"
     echo -e "  ${T[dr_maps]}: $([[ -d /sys/fs/bpf/shaper/maps ]] &&
         echo -e "${G}✓${N}" || echo -e "${D}${T[dr_nosvc]}${N}")"
 }
@@ -514,7 +526,7 @@ nlim=0
 while :; do
     clear
     echo
-    echo -e "  ⚡ ${B}${C}Shape${N} ${D}v$VERSION ${T[subtitle]}${N}"
+    banner
     hr
     status_line
     hr
