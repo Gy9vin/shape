@@ -55,6 +55,7 @@ MSG = {
         "h_hours": "часов активности за сутки",
         "h_upload_gb": "гигабайт отдачи за сутки",
         "h_download_gb": "гигабайт скачивания за сутки, 0 = выкл",
+        "h_watch_iv": "период опроса карт, сек (больше = легче процессору)",
         "why_download": "выкачал десятки гигабайт за сутки",
         "h_packet": "средний размер пакета в отдаче, байт",
         "guard_both": "Обе стороны сразу",
@@ -142,6 +143,7 @@ MSG = {
         "h_hours": "hours of activity per day",
         "h_upload_gb": "gigabytes uploaded per day",
         "h_download_gb": "gigabytes downloaded per day, 0 = off",
+        "h_watch_iv": "map polling period, sec (higher = lighter on CPU)",
         "why_download": "downloaded tens of gigabytes in 24h",
         "h_packet": "average upload packet size, bytes",
         "guard_both": "Both ways at once",
@@ -400,6 +402,11 @@ GUARD_DEFAULT = {
     # выключенной раздачей с точки зрения сети неотличим от обычной тяжёлой
     # закачки — выдаёт его только объём за сутки. 0 = признак выключен.
     "download_gb_per_day": 50,
+
+    # Период опроса карт. Каждый цикл — два дампа bpftool и разбор JSON;
+    # на одноядерных VPS есть смысл поднять до 20-30 секунд, детект от этого
+    # почти не страдает, потому что счётчики считаются в замерах, а не в секундах.
+    "watch_interval": 10,
 }
 
 # Веса признаков. Размер пакета — самый надёжный: он не зависит от скорости
@@ -699,7 +706,7 @@ def cmd_monitor(a):
 # Короткие провалы (буферизация, смена сегмента) штраф не отменяют, а вот
 # нормальный сёрфинг с паузами очков не накопит.
 
-WATCH_INTERVAL = 10
+WATCH_INTERVAL = 10          # значение по умолчанию, живое берётся из конфига
 
 
 def load_penalties():
@@ -808,6 +815,7 @@ def cmd_guard(a):
         (a.hours,      "hours_per_day",     1, 24),
         (a.upload_gb,  "upload_gb_per_day", 0.1, 1000),
         (a.download_gb, "download_gb_per_day", 0, 10000),
+        (a.interval,   "watch_interval",     5, 60),
         (a.packet,     "packet_bytes",      100, 1500),
     )
     for val, key, lo, hi in limits:
@@ -896,7 +904,8 @@ def evaluate(ip, s, g, cap, both_streak, peak_streak, daily):
     if gb and day.get("down", 0) >= gb * 1e9:
         return max(g["score_needed"], SIGNAL_WEIGHTS["download"]), ["download"]
 
-    if both_streak < max(1, int(g["both_ways_min"] * 60 / WATCH_INTERVAL)):
+    iv = g.get("watch_interval", WATCH_INTERVAL)
+    if both_streak < max(1, int(g["both_ways_min"] * 60 / iv)):
         return 0, []
 
     reasons = []
@@ -906,7 +915,7 @@ def evaluate(ip, s, g, cap, both_streak, peak_streak, daily):
     # средних. Признак не зависит от скорости канала — это его главная ценность.
     if s["up_pkt"] >= g["packet_bytes"] and s["ul"] >= 0.3:
         reasons.append("packet")
-    if peak_streak >= max(1, int(g["sustain_min"] * 60 / WATCH_INTERVAL)):
+    if peak_streak >= max(1, int(g["sustain_min"] * 60 / iv)):
         reasons.append("peak")
     if day["active"] >= g["hours_per_day"] * 3600:
         reasons.append("hours")
@@ -926,12 +935,14 @@ def cmd_watch(a):
     daily = load_daily()
     prev, prev_t = read_users(), time.monotonic()
     last_daily_save = time.time()
+    interval = load_config()["guard"].get("watch_interval", WATCH_INTERVAL)
 
     while True:
-        time.sleep(WATCH_INTERVAL)
+        time.sleep(interval)
         try:
             cfg = load_config()
             g = cfg["guard"]
+            interval = g.get("watch_interval", WATCH_INTERVAL)
             cap = cfg["speed_mbps"]
 
             cur = read_users()
@@ -969,7 +980,7 @@ def cmd_watch(a):
                 d = daily.setdefault(ip, {"active": 0, "up": 0, "down": 0})
                 d.setdefault("down", 0)
                 if max(s["dl"], s["ul"]) >= active_floor:
-                    d["active"] += WATCH_INTERVAL
+                    d["active"] += interval
                 d["up"] += s["up_bytes"]
                 d["down"] += s["dl_bytes"]
 
@@ -1117,6 +1128,7 @@ def build_parser():
     g.add_argument("--hours", type=float, default=None, help=t("h_hours"))
     g.add_argument("--upload-gb", type=float, default=None, help=t("h_upload_gb"))
     g.add_argument("--download-gb", type=float, default=None, help=t("h_download_gb"))
+    g.add_argument("--interval", type=int, default=None, help=t("h_watch_iv"))
     g.add_argument("--packet", type=int, default=None, help=t("h_packet"))
     g.add_argument("--quiet", action="store_true")
     g.set_defaults(func=cmd_guard)
