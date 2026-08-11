@@ -260,6 +260,8 @@ screen_guard() {
         echo "  [5] ${T[g_set_dur]}"
         echo "  [6] ${T[g_set_hours]}"
         echo "  [7] ${T[g_set_gb]}"
+        echo -e "  [8] ${T[g_set_dl]} ${D}(${bdl}%)${N}"
+        echo -e "  [9] ${T[g_set_ul]} ${D}(${bul}%)${N}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -277,6 +279,12 @@ screen_guard() {
                [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --hours "$v" --quiet ;;
             7) v="$(ask "${T[g_set_gb]}" "$gb")"
                [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --upload-gb "$v" --quiet ;;
+            8) echo -e "  ${D}${T[g_hint_dl]}${N}"
+               v="$(ask "${T[g_set_dl]}" "$bdl")"
+               [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --both-dl "$v" --quiet ;;
+            9) echo -e "  ${D}${T[g_hint_ul]}${N}"
+               v="$(ask "${T[g_set_ul]}" "$bul")"
+               [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --both-ul "$v" --quiet ;;
             0|"") return ;;
         esac
     done
