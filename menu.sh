@@ -77,7 +77,7 @@ screen_lang() {
 # Все значения читаются одним вызовом python: экран перерисовывается часто,
 # плодить по семь процессов на кадр незачем. Разделитель — вертикальная черта.
 read_state() {
-    python3 - <<'PY' 2>/dev/null || echo "0|?|0|50|15|10|1|60|3|50"
+    python3 - <<'PY' 2>/dev/null || echo "0|?|0|50|15|10|1|60|3|50|0"
 import json
 try:
     c = json.load(open("/etc/shaper/config.json"))
@@ -85,7 +85,8 @@ except Exception:
     c = {}
 g = {"enabled": False, "both_dl_percent": 50, "both_ul_percent": 15,
      "both_ways_min": 10, "penalty_mbps": 1, "penalty_min": 60,
-     "score_needed": 3, "download_gb_per_day": 50}
+     "score_needed": 3, "download_gb_per_day": 50,
+     "download_gb_per_hour": 0}
 g.update(c.get("guard", {}))
 ports = c.get("ports", [])
 print("|".join([
@@ -95,13 +96,14 @@ print("|".join([
     f"{g['both_dl_percent']:g}", f"{g['both_ul_percent']:g}",
     f"{g['both_ways_min']:g}",
     f"{g['penalty_mbps']:g}", f"{g['penalty_min']:g}", f"{g['score_needed']:g}",
-    f"{g['download_gb_per_day']:g}",
+    f"{g['download_gb_per_day']:g}", f"{g['download_gb_per_hour']:g}",
 ]))
 PY
 }
 
 status_line() {
-    local ifc speed ports g_on bdl bul bmin pen dur score dgb dlv ulv auto_on=0 run_on=0
+    local ifc speed ports g_on bdl bul bmin pen dur score dgb dgbh dlv ulv vol
+    local auto_on=0 run_on=0
 
     "$ENGINE" state >/dev/null 2>&1 && run_on=1
     systemctl is-enabled shaper >/dev/null 2>&1 && auto_on=1
@@ -110,7 +112,8 @@ status_line() {
     [[ -z "$ifc" ]] && ifc="$(ip route get 1.1.1.1 2>/dev/null |
                               sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
 
-    IFS='|' read -r speed ports g_on bdl bul bmin pen dur score dgb <<< "$(read_state)"
+    IFS='|' read -r speed ports g_on bdl bul bmin pen dur score dgb dgbh \
+        <<< "$(read_state)"
     [[ "$ports" == "*" ]] && ports="${T[st_all]}"
 
     if (( run_on )); then
@@ -141,7 +144,10 @@ status_line() {
             echo -e "  🚦  ${T[st_guard]} ${G}${T[st_g_on]}${N}" \
                     "${D}${T[st_g_both]} ↓${dlv} ↑${ulv} Mbit/s ${bmin} ${T[min]}" \
                     "+ ${score} ${T[st_g_pts]} → ${pen} Mbit/s ${T[g_for]} ${dur} ${T[min]}${N}"
-            [[ "$dgb" != "0" ]] && echo -e "      ${D}${T[st_g_or]} ${dgb} ${T[st_g_gbday]}${N}"
+            vol=""
+            [[ "$dgbh" != "0" ]] && vol="${dgbh} ${T[st_g_gbh]}"
+            [[ "$dgb"  != "0" ]] && vol="${vol:+$vol · }${dgb} ${T[st_g_gbd]}"
+            [[ -n "$vol" ]] && echo -e "      ${D}${T[st_g_or]} ${vol}${N}"
         fi
     else
         echo -e "  🚦  ${T[st_guard]} ${D}${T[st_g_off]}${N}   ${D}${T[st_g_none]}${N}"
