@@ -215,11 +215,12 @@ d = {'enabled': False, 'score_needed': 3, 'both_dl_percent': 50,
      'both_ul_percent': 15, 'both_ways_min': 10,
      'penalty_mbps': 1, 'penalty_min': 60,
      'hours_per_day': 4, 'upload_gb_per_day': 2, 'packet_bytes': 600,
+     'download_gb_per_day': 50,
      'trigger_percent': 80, 'sustain_min': 5}
 d.update(g); print(d['$1'])" 2>/dev/null; }
 
 screen_guard() {
-    local on score both_min bdl bul pen dur hours gb speed v
+    local on score both_min bdl bul pen dur hours gb dgb speed v
     while :; do
         speed="$(cfg speed_mbps 0)"
         on="$(guard_get enabled)";        score="$(guard_get score_needed)"
@@ -227,6 +228,7 @@ screen_guard() {
         bul="$(guard_get both_ul_percent)"
         pen="$(guard_get penalty_mbps)";  dur="$(guard_get penalty_min)"
         hours="$(guard_get hours_per_day)"; gb="$(guard_get upload_gb_per_day)"
+        dgb="$(guard_get download_gb_per_day)"
 
         title "${T[g_title]}"
         echo -e "  ${D}${T[g_h1]}${N}"
@@ -252,6 +254,9 @@ screen_guard() {
         echo -e "  ${D}  +1  ${T[why_peak]}${N}"
         echo -e "  ${D}  +2  ${T[why_hours]} (>${hours} ${T[hour]})${N}"
         echo -e "  ${D}  +1  ${T[why_upload]} (>${gb} GB)${N}"
+        if [[ "$dgb" != "0" ]]; then
+            echo -e "  ${D}${T[g_orpath]} ${T[why_download]} (>${dgb} GB)${N}"
+        fi
         hr
         echo "  [1] ${T[g_toggle]}"
         echo "  [2] ${T[g_set_score]}"
@@ -262,6 +267,7 @@ screen_guard() {
         echo "  [7] ${T[g_set_gb]}"
         echo -e "  [8] ${T[g_set_dl]} ${D}(${bdl}%)${N}"
         echo -e "  [9] ${T[g_set_ul]} ${D}(${bul}%)${N}"
+        echo -e " [10] ${T[g_set_dgb]} ${D}(${dgb} GB)${N}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -285,6 +291,9 @@ screen_guard() {
             9) echo -e "  ${D}${T[g_hint_ul]}${N}"
                v="$(ask "${T[g_set_ul]}" "$bul")"
                [[ "$v" =~ ^[0-9]+$ ]] && "$CTL" guard --both-ul "$v" --quiet ;;
+            10) echo -e "  ${D}${T[g_hint_dgb]}${N}"
+                v="$(ask "${T[g_set_dgb]}" "$dgb")"
+                [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --download-gb "$v" --quiet ;;
             0|"") return ;;
         esac
     done

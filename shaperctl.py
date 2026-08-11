@@ -54,6 +54,8 @@ MSG = {
         "h_both_ul": "порог отдачи для двусторонней нагрузки, %",
         "h_hours": "часов активности за сутки",
         "h_upload_gb": "гигабайт отдачи за сутки",
+        "h_download_gb": "гигабайт скачивания за сутки, 0 = выкл",
+        "why_download": "выкачал десятки гигабайт за сутки",
         "h_packet": "средний размер пакета в отдаче, байт",
         "guard_both": "Обе стороны сразу",
         "guard_score": "Баллов для штрафа",
@@ -139,6 +141,8 @@ MSG = {
         "h_both_ul": "upload floor for two-way load, %",
         "h_hours": "hours of activity per day",
         "h_upload_gb": "gigabytes uploaded per day",
+        "h_download_gb": "gigabytes downloaded per day, 0 = off",
+        "why_download": "downloaded tens of gigabytes in 24h",
         "h_packet": "average upload packet size, bytes",
         "guard_both": "Both ways at once",
         "guard_score": "Score needed",
@@ -391,11 +395,17 @@ GUARD_DEFAULT = {
     "sustain_min": 5,
     "hours_per_day": 4,       # +2 часов активности за сутки
     "upload_gb_per_day": 2,   # +1 гигабайт отдачи за сутки
+
+    # Отдельный путь к штрафу, в обход обязательного условия. Торрент с
+    # выключенной раздачей с точки зрения сети неотличим от обычной тяжёлой
+    # закачки — выдаёт его только объём за сутки. 0 = признак выключен.
+    "download_gb_per_day": 50,
 }
 
 # Веса признаков. Размер пакета — самый надёжный: он не зависит от скорости
 # канала, а у мобильных операторов отдача гуляет от 3 до 20 Мбит.
-SIGNAL_WEIGHTS = {"packet": 2, "peak": 1, "hours": 2, "upload": 1}
+SIGNAL_WEIGHTS = {"packet": 2, "peak": 1, "hours": 2, "upload": 1,
+                  "download": 3}
 
 # Веса признаков. Одной нагрузки (3) не хватает — нужен второй признак.
 # Так разовая большая закачка проходит мимо, а торрент набирает 7 из 7.
@@ -797,6 +807,7 @@ def cmd_guard(a):
         (a.penalty_min,  "penalty_min",     1, 10080),
         (a.hours,      "hours_per_day",     1, 24),
         (a.upload_gb,  "upload_gb_per_day", 0.1, 1000),
+        (a.download_gb, "download_gb_per_day", 0, 10000),
         (a.packet,     "packet_bytes",      100, 1500),
     )
     for val, key, lo, hi in limits:
@@ -843,6 +854,7 @@ def traffic_sample(prev, cur, dt):
             "ul": u_bytes * 8 / 1e6 / dt,
             "up_pkt": (u_bytes / u_pkts) if u_pkts else 0,
             "up_bytes": u_bytes,
+            "dl_bytes": d_bytes,
         }
     return out
 
@@ -875,11 +887,19 @@ def evaluate(ip, s, g, cap, both_streak, peak_streak, daily):
     баллов, каким бы тяжёлым трафик ни был: так из-под удара выходят стриминг
     (молчит вверх) и облачный бэкап (молчит вниз).
     """
+    day = daily.get(ip, {"active": 0, "up": 0, "down": 0})
+
+    # Независимый путь: качает десятками гигабайт в сутки. Отдача не важна —
+    # торрент с выключенной раздачей выглядит как обычная тяжёлая закачка,
+    # и единственное, что его выдаёт, это объём.
+    gb = g.get("download_gb_per_day", 0)
+    if gb and day.get("down", 0) >= gb * 1e9:
+        return max(g["score_needed"], SIGNAL_WEIGHTS["download"]), ["download"]
+
     if both_streak < max(1, int(g["both_ways_min"] * 60 / WATCH_INTERVAL)):
         return 0, []
 
     reasons = []
-    day = daily.get(ip, {"active": 0, "up": 0})
 
     # Крупные пакеты вверх = клиент отдаёт данные, а не подтверждения.
     # Нижний порог по отдаче нужен, чтобы редкие пакеты не давали случайных
@@ -946,11 +966,12 @@ def cmd_watch(a):
 
             for ip, s in sample.items():
                 # суточные счётчики ведём для всех, даже для уже наказанных
+                d = daily.setdefault(ip, {"active": 0, "up": 0, "down": 0})
+                d.setdefault("down", 0)
                 if max(s["dl"], s["ul"]) >= active_floor:
-                    d = daily.setdefault(ip, {"active": 0, "up": 0})
                     d["active"] += WATCH_INTERVAL
-                if s["up_bytes"]:
-                    daily.setdefault(ip, {"active": 0, "up": 0})["up"] += s["up_bytes"]
+                d["up"] += s["up_bytes"]
+                d["down"] += s["dl_bytes"]
 
                 if ip in pens or ip in wl:
                     continue
@@ -979,7 +1000,7 @@ def cmd_watch(a):
             if time.time() - last_daily_save > 60:
                 # чистим тех, кто за сутки не набрал ничего заметного
                 daily = {k: v for k, v in daily.items()
-                         if v["active"] > 0 or v["up"] > 1e6}
+                         if v["active"] > 0 or v["up"] > 1e6 or v.get("down", 0) > 1e6}
                 save_daily(daily)
                 last_daily_save = time.time()
         except Exception as e:
@@ -1095,6 +1116,7 @@ def build_parser():
     g.add_argument("--penalty-min", type=int, default=None, help=t("h_pen_min"))
     g.add_argument("--hours", type=float, default=None, help=t("h_hours"))
     g.add_argument("--upload-gb", type=float, default=None, help=t("h_upload_gb"))
+    g.add_argument("--download-gb", type=float, default=None, help=t("h_download_gb"))
     g.add_argument("--packet", type=int, default=None, help=t("h_packet"))
     g.add_argument("--quiet", action="store_true")
     g.set_defaults(func=cmd_guard)
