@@ -1,4 +1,15 @@
-# Shape v2.2
+<p align="center">
+  <img src="assets/banner.png" alt="Shape — ограничитель скорости по IP-адресу" width="820">
+</p>
+
+<p align="center">
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-2.3-8ECA43?style=flat-square" alt="версия"></a>
+  <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
+  <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
+  <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
+</p>
+
+# Shape v2.3
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -88,6 +99,10 @@ bash /tmp/shape/install.sh
 ```
 shaper
 ```
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="Главный экран" width="760">
+</p>
 
 ```
   ⚡ Shape · ограничитель скорости по IP-адресу
@@ -403,6 +418,7 @@ shaperctl.py status --live          # реальные скорости по IP
 
 ```
 VERSION                        номер версии, одна строка
+assets/                        баннер и снимок экрана для README
 bpf/shaper.bpf.c               eBPF-программа
 shaperctl.py                   настройки, статистика, монитор, сторож
 engine.sh                      сборка, загрузка, attach/detach
