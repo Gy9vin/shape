@@ -58,6 +58,8 @@ MSG = {
         "h_hours": "часов активности за сутки",
         "h_upload_gb": "гигабайт отдачи за сутки",
         "h_download_gb": "гигабайт скачивания за сутки, 0 = выкл",
+        "h_download_gbh": "гигабайт скачивания за час, 0 = выкл",
+        "why_hourly": "выкачал гигабайты за час",
         "h_watch_iv": "период опроса карт, сек (больше = легче процессору)",
         "why_download": "выкачал десятки гигабайт за сутки",
         "h_packet": "средний размер пакета в отдаче, байт",
@@ -149,6 +151,8 @@ MSG = {
         "h_hours": "hours of activity per day",
         "h_upload_gb": "gigabytes uploaded per day",
         "h_download_gb": "gigabytes downloaded per day, 0 = off",
+        "h_download_gbh": "gigabytes downloaded per hour, 0 = off",
+        "why_hourly": "downloaded gigabytes within an hour",
         "h_watch_iv": "map polling period, sec (higher = lighter on CPU)",
         "why_download": "downloaded tens of gigabytes in 24h",
         "h_packet": "average upload packet size, bytes",
@@ -409,6 +413,12 @@ GUARD_DEFAULT = {
     # закачки — выдаёт его только объём за сутки. 0 = признак выключен.
     "download_gb_per_day": 50,
 
+    # Часовой порог — самый быстрый объёмный признак. При лимите 10 Мбит/с
+    # час на полной скорости даёт ровно 4.5 ГБ, поэтому значение около 4
+    # означает «держал канал почти весь час». По умолчанию выключен: на
+    # капнутом канале столько же дают 4K-стриминг и загрузка игры.
+    "download_gb_per_hour": 0,
+
     # Период опроса карт. Каждый цикл — два дампа bpftool и разбор JSON;
     # на одноядерных VPS есть смысл поднять до 20-30 секунд, детект от этого
     # почти не страдает, потому что счётчики считаются в замерах, а не в секундах.
@@ -418,7 +428,7 @@ GUARD_DEFAULT = {
 # Веса признаков. Размер пакета — самый надёжный: он не зависит от скорости
 # канала, а у мобильных операторов отдача гуляет от 3 до 20 Мбит.
 SIGNAL_WEIGHTS = {"packet": 2, "peak": 1, "hours": 2, "upload": 1,
-                  "download": 3}
+                  "download": 3, "hourly": 3}
 
 # Веса признаков. Одной нагрузки (3) не хватает — нужен второй признак.
 # Так разовая большая закачка проходит мимо, а торрент набирает 7 из 7.
@@ -823,6 +833,7 @@ def cmd_guard(a):
         (a.hours,      "hours_per_day",     1, 24),
         (a.upload_gb,  "upload_gb_per_day", 0.1, 1000),
         (a.download_gb, "download_gb_per_day", 0, 10000),
+        (a.download_gbh, "download_gb_per_hour", 0, 1000),
         (a.interval,   "watch_interval",     5, 60),
         (a.packet,     "packet_bytes",      100, 1500),
     )
@@ -895,7 +906,19 @@ def save_daily(ips):
     os.replace(tmp, DAILY_FILE)
 
 
-def evaluate(ip, s, g, cap, both_streak, peak_streak, daily):
+HOUR_BUCKET = 300          # окно из двенадцати пятиминутных корзин
+
+
+def hourly_add(hourly, ip, nbytes, now):
+    """Копит скачанное за последний час корзинами по 5 минут."""
+    b = int(now // HOUR_BUCKET)
+    d = hourly.setdefault(ip, {})
+    d[b] = d.get(b, 0) + nbytes
+    for old in [k for k in d if k <= b - 12]:
+        del d[old]
+
+
+def evaluate(ip, s, g, cap, both_streak, peak_streak, daily, hourly=None):
     """
     Решает, нарушитель ли это. Возвращает (баллы, сработавшие признаки).
 
@@ -911,6 +934,11 @@ def evaluate(ip, s, g, cap, both_streak, peak_streak, daily):
     gb = g.get("download_gb_per_day", 0)
     if gb and day.get("down", 0) >= gb * 1e9:
         return max(g["score_needed"], SIGNAL_WEIGHTS["download"]), ["download"]
+
+    # То же самое, но по скользящему часу: реагирует за час вместо суток.
+    gbh = g.get("download_gb_per_hour", 0)
+    if gbh and hourly and sum(hourly.get(ip, {}).values()) >= gbh * 1e9:
+        return max(g["score_needed"], SIGNAL_WEIGHTS["hourly"]), ["hourly"]
 
     iv = g.get("watch_interval", WATCH_INTERVAL)
     if both_streak < max(1, int(g["both_ways_min"] * 60 / iv)):
@@ -939,7 +967,7 @@ def cmd_watch(a):
     print(t("watch_start"), flush=True)
     restore_penalties()
 
-    both_streak, peak_streak = {}, {}
+    both_streak, peak_streak, hourly = {}, {}, {}
     daily = load_daily()
     prev, prev_t = read_users(), time.monotonic()
     last_daily_save = time.time()
@@ -960,7 +988,7 @@ def cmd_watch(a):
             prev, prev_t = cur, now_t
 
             # забываем тех, кто отвалился
-            for d in (both_streak, peak_streak):
+            for d in (both_streak, peak_streak, hourly):
                 for ip in [i for i in d if i not in cur]:
                     d.pop(ip, None)
 
@@ -991,6 +1019,8 @@ def cmd_watch(a):
                     d["active"] += interval
                 d["up"] += s["up_bytes"]
                 d["down"] += s["dl_bytes"]
+                if s["dl_bytes"]:
+                    hourly_add(hourly, ip, s["dl_bytes"], time.time())
 
                 if ip in pens or ip in wl:
                     continue
@@ -1003,8 +1033,8 @@ def cmd_watch(a):
                 peak_streak[ip] = (peak_streak.get(ip, 0) + 1) if peak \
                     else max(0, peak_streak.get(ip, 0) - 1)
 
-                score, reasons = evaluate(ip, s, g, cap,
-                                          both_streak[ip], peak_streak[ip], daily)
+                score, reasons = evaluate(ip, s, g, cap, both_streak[ip],
+                                          peak_streak[ip], daily, hourly)
                 if score >= need_score:
                     until = time.time() + g["penalty_min"] * 60
                     penalty_apply(ip, g["penalty_mbps"], until)
@@ -1013,6 +1043,9 @@ def cmd_watch(a):
                                 "score": score, "reasons": reasons}
                     save_penalties(pens)
                     both_streak[ip] = peak_streak[ip] = 0
+                    # Окно очищаем: иначе после снятия штрафа те же гигабайты
+                    # в скользящем часе тут же уронили бы человека повторно.
+                    hourly.pop(ip, None)
                     print(t("watch_hit", ip=ip, mbps=g["penalty_mbps"],
                             m=g["penalty_min"]) +
                           f" [{score}: {','.join(reasons)}]", flush=True)
@@ -1137,6 +1170,7 @@ def build_parser():
     g.add_argument("--hours", type=float, default=None, help=t("h_hours"))
     g.add_argument("--upload-gb", type=float, default=None, help=t("h_upload_gb"))
     g.add_argument("--download-gb", type=float, default=None, help=t("h_download_gb"))
+    g.add_argument("--download-gbh", type=float, default=None, help=t("h_download_gbh"))
     g.add_argument("--interval", type=int, default=None, help=t("h_watch_iv"))
     g.add_argument("--packet", type=int, default=None, help=t("h_packet"))
     g.add_argument("--quiet", action="store_true")

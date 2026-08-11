@@ -221,7 +221,7 @@ print(','.join(map(str, p)))" 2>/dev/null || echo 443)"
 # Все настройки читаются одним вызовом: запуск python3 стоит десятки
 # миллисекунд, а раньше их было десять на каждую отрисовку экрана.
 guard_read() {
-    python3 - <<'PY' 2>/dev/null || echo "0|3|50|15|10|1|60|4|2|50|600"
+    python3 - <<'PY' 2>/dev/null || echo "0|3|50|15|10|1|60|4|2|50|0|600"
 import json
 try:
     g = json.load(open("/etc/shaper/config.json")).get("guard", {})
@@ -230,23 +230,76 @@ except Exception:
 d = {"enabled": False, "score_needed": 3, "both_dl_percent": 50,
      "both_ul_percent": 15, "both_ways_min": 10, "penalty_mbps": 1,
      "penalty_min": 60, "hours_per_day": 4, "upload_gb_per_day": 2,
-     "download_gb_per_day": 50, "packet_bytes": 600}
+     "download_gb_per_day": 50, "download_gb_per_hour": 0, "packet_bytes": 600}
 d.update(g)
 print("|".join([
     "1" if d["enabled"] else "0",
     f"{d['score_needed']:g}", f"{d['both_dl_percent']:g}", f"{d['both_ul_percent']:g}",
     f"{d['both_ways_min']:g}", f"{d['penalty_mbps']:g}", f"{d['penalty_min']:g}",
     f"{d['hours_per_day']:g}", f"{d['upload_gb_per_day']:g}",
-    f"{d['download_gb_per_day']:g}", f"{d['packet_bytes']:g}",
+    f"{d['download_gb_per_day']:g}", f"{d['download_gb_per_hour']:g}",
+    f"{d['packet_bytes']:g}",
 ]))
 PY
 }
 
+# ── Готовые пресеты ───────────────────────────────────────────────────
+# Каждый пресет — один вызов shaperctl со всеми флагами сразу. Ручная
+# настройка остаётся: пресет только расставляет числа, дальше правь что хочешь.
+guard_preset() {
+    local speed ans
+    speed="$(cfg speed_mbps 0)"
+    while :; do
+        title "${T[gp_title]}"
+        echo -e "  ${D}${T[gp_h1]}${N}"
+        echo
+        echo -e "  ${B}[1]${N} 📱 ${T[gp_mobile]}"
+        echo -e "      ${D}${T[gp_mobile_d1]}${N}"
+        echo -e "      ${D}${T[gp_mobile_d2]}${N}"
+        echo
+        echo -e "  ${B}[2]${N} 🖥  ${T[gp_mixed]}"
+        echo -e "      ${D}${T[gp_mixed_d]}${N}"
+        echo
+        echo -e "  ${B}[3]${N} 🚦 ${T[gp_torrent]}"
+        echo -e "      ${D}${T[gp_torrent_d]}${N}"
+        echo
+        echo -e "  ${B}[0]${N} ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) echo -e "\n  ${T[gp_will]}:"
+               echo -e "  ${D}  · ${T[gp_p_hour]} ${B}3 GB${N}${D} — ${T[gp_m1]}${N}"
+               echo -e "  ${D}  · ${T[gp_p_day]} 25 GB — ${T[gp_m2]}${N}"
+               echo -e "  ${D}  · ${T[gp_p_pen]} 1 Mbit/s × 240 ${T[min]}${N}"
+               if [[ "$speed" != "0" ]]; then
+                   echo
+                   echo -e "  ${D}${T[gp_m3]} $(awk "BEGIN{printf \"%.0f\", 3/($speed/8/1000)/60}") ${T[min]}${N}"
+                   echo -e "  ${D}${T[gp_m4]} ~19 GB${N}"
+               fi
+               echo
+               read -rp "  ${T[apply_q]}: " ans
+               [[ "$ans" =~ ^[NnНн] ]] && continue
+               "$CTL" guard --enable --score 3 --both-dl 50 --both-ul 15 --both-min 7 \
+                   --packet 600 --hours 4 --upload-gb 2 \
+                   --download-gb 25 --download-gbh 3 \
+                   --penalty-mbps 1 --penalty-min 240 && pause; return ;;
+            2) "$CTL" guard --enable --score 3 --both-dl 50 --both-ul 15 --both-min 10 \
+                   --packet 600 --hours 4 --upload-gb 2 \
+                   --download-gb 50 --download-gbh 0 \
+                   --penalty-mbps 1 --penalty-min 60 && pause; return ;;
+            3) "$CTL" guard --enable --score 3 --both-dl 50 --both-ul 15 --both-min 10 \
+                   --packet 600 --hours 4 --upload-gb 2 \
+                   --download-gb 0 --download-gbh 0 \
+                   --penalty-mbps 1 --penalty-min 60 && pause; return ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 screen_guard() {
-    local on score both_min bdl bul pen dur hours gb dgb pkt speed v
+    local on score both_min bdl bul pen dur hours gb dgb dgbh pkt speed v
     while :; do
         speed="$(cfg speed_mbps 0)"
-        IFS='|' read -r on score bdl bul both_min pen dur hours gb dgb pkt \
+        IFS='|' read -r on score bdl bul both_min pen dur hours gb dgb dgbh pkt \
             <<< "$(guard_read)"
 
         title "${T[g_title]}"
@@ -273,9 +326,8 @@ screen_guard() {
         echo -e "  ${D}  +1  ${T[why_peak]}${N}"
         echo -e "  ${D}  +2  ${T[why_hours]} (>${hours} ${T[hour]})${N}"
         echo -e "  ${D}  +1  ${T[why_upload]} (>${gb} GB)${N}"
-        if [[ "$dgb" != "0" ]]; then
-            echo -e "  ${D}${T[g_orpath]} ${T[why_download]} (>${dgb} GB)${N}"
-        fi
+        [[ "$dgb" != "0" ]] && echo -e "  ${D}${T[g_orpath]} ${T[why_download]} (>${dgb} GB)${N}"
+        [[ "$dgbh" != "0" ]] && echo -e "  ${D}${T[g_orpath]} ${T[why_hourly]} (>${dgbh} GB)${N}"
         hr
         echo "  [1] ${T[g_toggle]}"
         echo "  [2] ${T[g_set_score]}"
@@ -287,6 +339,9 @@ screen_guard() {
         echo -e "  [8] ${T[g_set_dl]} ${D}(${bdl}%)${N}"
         echo -e "  [9] ${T[g_set_ul]} ${D}(${bul}%)${N}"
         echo -e " [10] ${T[g_set_dgb]} ${D}(${dgb} GB)${N}"
+        echo -e " [11] ${T[g_set_dgbh]} ${D}(${dgbh} GB)${N}"
+        hr
+        echo -e " ${B}[12]${N} ⚡ ${T[gp_menu]}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -313,6 +368,12 @@ screen_guard() {
             10) echo -e "  ${D}${T[g_hint_dgb]}${N}"
                 v="$(ask "${T[g_set_dgb]}" "$dgb")"
                 [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --download-gb "$v" --quiet ;;
+            11) echo -e "  ${D}${T[g_hint_dgbh]}${N}"
+                [[ "$speed" != "0" ]] && echo -e "  ${D}${T[g_hint_max]}" \
+                    "$(awk "BEGIN{printf \"%.1f\", $speed*3600/8/1000}") GB${N}"
+                v="$(ask "${T[g_set_dgbh]}" "$dgbh")"
+                [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]] && "$CTL" guard --download-gbh "$v" --quiet ;;
+            12) guard_preset ;;
             0|"") return ;;
         esac
     done
