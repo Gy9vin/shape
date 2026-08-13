@@ -385,6 +385,87 @@ screen_guard() {
     done
 }
 
+# ── Telegram ──────────────────────────────────────────────────────────
+tg_read() {
+    python3 - <<'PY' 2>/dev/null || echo "0|—|—|—|—|1|1"
+import json, os
+try:
+    g = json.load(open("/etc/shaper/config.json")).get("telegram", {})
+except Exception:
+    g = {}
+d = {"enabled": False, "token": "", "chat_id": "", "thread_id": "",
+     "node_name": "", "events": True, "daily": True, "proxy": ""}
+d.update(g)
+print("|".join([
+    "1" if d["enabled"] else "0",
+    d["node_name"] or os.uname().nodename,
+    (d["token"][:10] + "…") if d["token"] else "—",
+    d["chat_id"] or "—",
+    d["thread_id"] or "—",
+    "1" if d["events"] else "0",
+    "1" if d["daily"] else "0",
+    d["proxy"] or "—",
+]))
+PY
+}
+
+screen_telegram() {
+    local on name tok chat thread ev dg proxy v
+    while :; do
+        IFS='|' read -r on name tok chat thread ev dg proxy <<< "$(tg_read)"
+        title "${T[tg_title]}"
+        echo -e "  ${D}${T[tg_h1]}${N}"
+        echo -e "  ${D}${T[tg_h2]}${N}"
+        echo
+        if [[ "$on" == "1" ]]; then
+            echo -e "  ${T[tg_state]}  : ${G}${T[g_on]}${N}"
+        else
+            echo -e "  ${T[tg_state]}  : ${D}${T[g_off]}${N}"
+        fi
+        echo -e "  ${T[tg_node]}  : ${B}${name}${N}"
+        echo -e "  ${T[tg_token]} : ${tok}"
+        echo -e "  ${T[tg_chat]}  : ${chat}${D}   ${T[tg_thread]}: ${thread}${N}"
+        echo -e "  ${T[tg_proxy]}  : ${proxy}"
+        echo -e "  ${D}${T[tg_what]}: $([[ "$ev" == 1 ]] && echo "${T[tg_ev]}" || echo "—")" \
+                "$([[ "$dg" == 1 ]] && echo "· ${T[tg_dg]}")${N}"
+        hr
+        echo "  [1] ${T[g_toggle]}"
+        echo "  [2] ${T[tg_set_token]}"
+        echo "  [3] ${T[tg_set_chat]}"
+        echo "  [4] ${T[tg_set_thread]}"
+        echo "  [5] ${T[tg_set_name]}"
+        echo "  [6] ${T[tg_set_proxy]}"
+        echo "  [7] ${T[tg_toggle_ev]}"
+        echo "  [8] ${T[tg_toggle_dg]}"
+        echo "  [9] ${T[tg_test]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) if [[ "$on" == "1" ]]; then "$CTL" telegram set --disable --quiet
+               else "$CTL" telegram set --enable --quiet; fi ;;
+            2) echo -e "  ${D}${T[tg_hint_token]}${N}"
+               v="$(ask "${T[tg_set_token]}")"
+               [[ -n "$v" ]] && "$CTL" telegram set --token "$v" --quiet ;;
+            3) echo -e "  ${D}${T[tg_hint_chat]}${N}"
+               v="$(ask "${T[tg_set_chat]}")"
+               [[ -n "$v" ]] && "$CTL" telegram set --chat "$v" --quiet ;;
+            4) echo -e "  ${D}${T[tg_hint_thread]}${N}"
+               v="$(ask "${T[tg_set_thread]}")"
+               "$CTL" telegram set --thread "$v" --quiet ;;
+            5) echo -e "  ${D}${T[tg_hint_name]}${N}"
+               v="$(ask "${T[tg_set_name]}" "$name")"
+               "$CTL" telegram set --name "$v" --quiet ;;
+            6) echo -e "  ${D}${T[tg_hint_proxy]}${N}"
+               v="$(ask "${T[tg_set_proxy]}")"
+               "$CTL" telegram set --proxy "$v" --quiet ;;
+            7) "$CTL" telegram set --events "$([[ "$ev" == 1 ]] && echo off || echo on)" --quiet ;;
+            8) "$CTL" telegram set --daily "$([[ "$dg" == 1 ]] && echo off || echo on)" --quiet ;;
+            9) echo; "$CTL" telegram test; pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 # ── Ограниченные пользователи ─────────────────────────────────────────
 limited_count() {
     python3 -c "
@@ -603,6 +684,7 @@ while :; do
     echo -e "  [2] 🚦 ${T[m2]} ${D}${T[m2d]}${N}"
     echo -e "  [3] 📡 ${T[m3]} ${D}${T[m3d]}${N}"
     echo -e "  [4] 📊 ${T[m4]} ${D}${T[m4d]}${N}"
+    echo -e "  [5] 📨 ${T[m5]} ${D}${T[m5d]}${N}"
     if [[ "$nlim" != "0" ]]; then
         echo -e "  [6] 🚫 ${T[m6]} ${R}($nlim)${N}"
     else
@@ -619,6 +701,7 @@ while :; do
         2) screen_guard ;;
         3) "$CTL" monitor ;;
         4) screen_stats ;;
+        5) screen_telegram ;;
         6) screen_limited ;;
         7) screen_whitelist ;;
         8) screen_service ;;

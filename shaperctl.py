@@ -7,11 +7,18 @@ shaperctl — управление eBPF-шейпером через pinned BPF-�
 """
 
 import argparse
+import http.client
+import io
 import ipaddress
 import json
 import os
+import socket
+import ssl
 import struct
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 import sys
 import time
 
@@ -47,6 +54,24 @@ C = {
 MSG = {
     "ru": {
         "root": "нужны права root",
+        "h_telegram": "уведомления в Telegram",
+        "h_tg_name": "как подписывать ноду в сообщениях",
+        "h_tg_proxy": "socks5://… или http://… — нужен на российских нодах",
+        "tg_state": "Уведомления", "tg_node": "Подпись ноды",
+        "tg_chat": "Чат", "tg_thread": "тема", "tg_proxy": "Прокси",
+        "tg_direct": "напрямую",
+        "tg_off": "уведомления выключены",
+        "tg_no_creds": "не заданы токен или chat_id",
+        "tg_bad_token": "токен неверный — проверь у @BotFather",
+        "tg_bad_chat": "неверный chat_id, либо бота не добавили в группу",
+        "tg_bad_thread": "нет такой темы — проверь ID темы",
+        "tg_forbidden": "бота заблокировали или выгнали из чата",
+        "tg_need_proxy": "похоже на блокировку — задай прокси",
+        "tg_sent": "сообщение отправлено",
+        "tg_test_text": "Проверка связи прошла успешно.",
+        "tg_limited": "Ограничен",
+        "tg_digest": "сводка за", "tg_traffic": "Трафик",
+        "tg_addresses": "Адресов", "tg_top": "Больше всех скачали",
         "lim_why": "за что",
         "lim_when": "с",
         "lim_total": "всего адресов",
@@ -140,6 +165,24 @@ MSG = {
     },
     "en": {
         "root": "root privileges required",
+        "h_telegram": "Telegram notifications",
+        "h_tg_name": "how to label this node in messages",
+        "h_tg_proxy": "socks5://… or http://… — needed on Russian nodes",
+        "tg_state": "Notifications", "tg_node": "Node label",
+        "tg_chat": "Chat", "tg_thread": "topic", "tg_proxy": "Proxy",
+        "tg_direct": "direct",
+        "tg_off": "notifications are disabled",
+        "tg_no_creds": "token or chat_id is missing",
+        "tg_bad_token": "invalid token — check with @BotFather",
+        "tg_bad_chat": "wrong chat_id, or the bot is not in the group",
+        "tg_bad_thread": "no such topic — check the thread ID",
+        "tg_forbidden": "the bot was blocked or removed from the chat",
+        "tg_need_proxy": "looks like blocking — set a proxy",
+        "tg_sent": "message sent",
+        "tg_test_text": "Connection test passed.",
+        "tg_limited": "Limited",
+        "tg_digest": "digest for", "tg_traffic": "Traffic",
+        "tg_addresses": "Addresses", "tg_top": "Top downloaders",
         "lim_why": "why",
         "lim_when": "since",
         "lim_total": "addresses total",
@@ -437,6 +480,19 @@ SCORE_LOAD, SCORE_RATIO, SCORE_PACKETS = 3, 2, 2
 SCORE_WINDOW_SEC = 60
 
 
+# Уведомления. По умолчанию выключены: свежая установка ничего никуда не шлёт.
+TG_DEFAULT = {
+    "enabled": False,
+    "token": "",
+    "chat_id": "",
+    "thread_id": "",      # message_thread_id для супергрупп с темами
+    "node_name": "",      # как подписывать ноду, пусто = имя хоста
+    "events": True,       # сообщение при каждом ограничении
+    "daily": True,        # сводка за прошедшие сутки, приходит в полночь
+    "proxy": "",          # socks5://… или http://… — нужен на российских нодах
+}
+
+
 def load_config():
     try:
         with open(CONFIG_FILE) as f:
@@ -445,9 +501,11 @@ def load_config():
         cfg = {}
     guard = dict(GUARD_DEFAULT)
     guard.update(cfg.get("guard", {}))
+    tg = dict(TG_DEFAULT)
+    tg.update(cfg.get("telegram", {}))
     return {"ports": cfg.get("ports", [443]),
             "speed_mbps": float(cfg.get("speed_mbps", 0)),
-            "guard": guard}
+            "guard": guard, "telegram": tg}
 
 
 def save_config(cfg):
@@ -456,6 +514,11 @@ def save_config(cfg):
     with open(tmp, "w") as f:
         json.dump(cfg, f, indent=2)
     os.replace(tmp, CONFIG_FILE)
+    # В конфиге лежит токен бота — читать его посторонним незачем.
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        pass
 
 
 def parse_ports(s):
@@ -969,6 +1032,7 @@ def cmd_watch(a):
 
     both_streak, peak_streak, hourly = {}, {}, {}
     daily = load_daily()
+    today = time.strftime("%Y-%m-%d")
     prev, prev_t = read_users(), time.monotonic()
     last_daily_save = time.time()
     interval = load_config()["guard"].get("watch_interval", WATCH_INTERVAL)
@@ -1049,6 +1113,7 @@ def cmd_watch(a):
                     print(t("watch_hit", ip=ip, mbps=g["penalty_mbps"],
                             m=g["penalty_min"]) +
                           f" [{score}: {','.join(reasons)}]", flush=True)
+                    tg_penalty(cfg, ip, g["penalty_mbps"], g["penalty_min"], reasons)
 
             if time.time() - last_daily_save > 60:
                 # чистим тех, кто за сутки не набрал ничего заметного
@@ -1070,6 +1135,192 @@ def whitelist_ips():
     except Exception:
         pass
     return out
+
+
+# ─────────────────────── отправка в Telegram ───────────────────────
+# Только stdlib. SOCKS5 реализован здесь же: на российских нодах
+# api.telegram.org режется по SNI, и без прокси сообщения не уходят.
+
+def _recvn(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise OSError("прокси закрыл соединение")
+        buf += chunk
+    return buf
+
+
+def _socks5(sock, host, port, user=None, pwd=None):
+    """Минимальный SOCKS5 CONNECT. Имя хоста резолвит прокси, не мы."""
+    sock.sendall(b"\x05\x02\x00\x02" if user else b"\x05\x01\x00")
+    ver, method = _recvn(sock, 2)
+    if ver != 5:
+        raise OSError("это не SOCKS5-прокси")
+    if method == 0x02:
+        u, p = user.encode(), (pwd or "").encode()
+        sock.sendall(b"\x01" + bytes([len(u)]) + u + bytes([len(p)]) + p)
+        if _recvn(sock, 2)[1] != 0:
+            raise OSError("SOCKS5: неверный логин или пароль")
+    elif method != 0x00:
+        raise OSError("SOCKS5: прокси требует неподдерживаемую авторизацию")
+    h = host.encode()
+    sock.sendall(b"\x05\x01\x00\x03" + bytes([len(h)]) + h + port.to_bytes(2, "big"))
+    rep = _recvn(sock, 4)
+    if rep[1] != 0:
+        codes = {2: "запрещено правилами", 3: "сеть недоступна",
+                 4: "хост недоступен", 5: "соединение отклонено"}
+        raise OSError(f"SOCKS5: {codes.get(rep[1], f'код {rep[1]}')}")
+    atyp = rep[3]
+    _recvn(sock, (4 if atyp == 1 else 16 if atyp == 4 else _recvn(sock, 1)[0]) + 2)
+
+
+def _post(url, data, proxy=""):
+    u = urllib.parse.urlsplit(url)
+    if proxy.startswith(("socks5://", "socks5h://")):
+        p = urllib.parse.urlsplit(proxy)
+        sock = socket.create_connection((p.hostname, p.port or 1080), timeout=15)
+        try:
+            _socks5(sock, u.hostname, 443, p.username, p.password)
+            ctx = ssl.create_default_context()
+            conn = http.client.HTTPSConnection(u.hostname, 443, timeout=15, context=ctx)
+            conn.sock = ctx.wrap_socket(sock, server_hostname=u.hostname)
+            conn.request("POST", u.path, body=data, headers={
+                "Host": u.hostname, "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(data))})
+            r = conn.getresponse()
+            body = r.read()
+            if r.status != 200:
+                raise urllib.error.HTTPError(url, r.status, r.reason, r.headers,
+                                             io.BytesIO(body))
+            return r.status
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    req = urllib.request.Request(url, data=data)
+    opener = (urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        if proxy else urllib.request)
+    with opener.open(req, timeout=15) as r:
+        return r.status
+
+
+def node_label(tg):
+    """Как подписывать ноду в сообщениях. Пусто — берём имя хоста."""
+    return tg.get("node_name") or os.uname().nodename
+
+
+def tg_send(text, cfg=None, force=False):
+    """Возвращает (успех, пояснение). force — для кнопки «проверить»."""
+    tg = (cfg or load_config())["telegram"]
+    if not force and not tg.get("enabled"):
+        return False, t("tg_off")
+    if not tg.get("token") or not tg.get("chat_id"):
+        return False, t("tg_no_creds")
+
+    fields = {"chat_id": tg["chat_id"], "text": text,
+              "parse_mode": "HTML", "disable_web_page_preview": "true"}
+    if str(tg.get("thread_id") or "").strip():
+        fields["message_thread_id"] = str(tg["thread_id"]).strip()
+    data = urllib.parse.urlencode(fields).encode()
+    url = f"https://api.telegram.org/bot{tg['token']}/sendMessage"
+
+    try:
+        return _post(url, data, tg.get("proxy", "")) == 200, "ok"
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:200]
+        hint = ""
+        if e.code in (401, 404):
+            hint = "\n  " + t("tg_bad_token")
+        elif "chat not found" in body:
+            hint = "\n  " + t("tg_bad_chat")
+        elif "message thread not found" in body:
+            hint = "\n  " + t("tg_bad_thread")
+        elif e.code == 403:
+            hint = "\n  " + t("tg_forbidden")
+        return False, f"HTTP {e.code}: {body}{hint}"
+    except Exception as e:
+        hint = "" if tg.get("proxy") else "\n  " + t("tg_need_proxy")
+        return False, f"{e}{hint}"
+
+
+def tg_penalty(cfg, ip, mbps, minutes, reasons):
+    """Событие: адрес получил ограничение."""
+    tg = cfg["telegram"]
+    if not tg.get("enabled") or not tg.get("events"):
+        return
+    why = ", ".join(t("why_" + r) for r in reasons) or "—"
+    ok, err = tg_send(
+        f"🚦 <b>{node_label(tg)}</b>\n"
+        f"{t('tg_limited')} <code>{ip}</code> → {mbps:g} Mbit/s "
+        f"{t('guard_for')} {fmt_hold(minutes * 60)}\n"
+        f"<i>{why}</i>", cfg)
+    if not ok:
+        print(f"telegram: {err}", flush=True)
+
+
+def tg_digest(cfg, day, snapshot):
+    """Сводка за прошедшие сутки. Уходит при смене даты."""
+    tg = cfg["telegram"]
+    if not tg.get("enabled") or not tg.get("daily") or not snapshot:
+        return
+    down = sum(v.get("down", 0) for v in snapshot.values())
+    up = sum(v.get("up", 0) for v in snapshot.values())
+    top = sorted(snapshot.items(), key=lambda x: -x[1].get("down", 0))[:5]
+    lines = [f"📊 <b>{node_label(tg)}</b> · {t('tg_digest')} {day}",
+             f"{t('tg_traffic')}: ↓ {fmt_bytes(down)} · ↑ {fmt_bytes(up)}",
+             f"{t('tg_addresses')}: {len(snapshot)}"]
+    if top:
+        lines.append("")
+        lines.append(t("tg_top") + ":")
+        for i, (ip, v) in enumerate(top, 1):
+            lines.append(f"{i}. <code>{ip}</code> — {fmt_bytes(v.get('down', 0))}")
+    ok, err = tg_send("\n".join(lines), cfg)
+    if not ok:
+        print(f"telegram: {err}", flush=True)
+
+
+def cmd_telegram(a):
+    cfg = load_config()
+    tg = cfg["telegram"]
+    if a.action == "show":
+        print()
+        state = f"{C['grn']}{t('guard_on')}{C['r']}" if tg["enabled"] \
+            else f"{C['gry']}{t('guard_off')}{C['r']}"
+        print(f"  {t('tg_state')}   : {state}")
+        print(f"  {t('tg_node')}    : {node_label(tg)}")
+        print(f"  {t('tg_chat')}    : {tg['chat_id'] or '—'}"
+              f"{'  · ' + t('tg_thread') + ' ' + str(tg['thread_id']) if tg['thread_id'] else ''}")
+        print(f"  {t('tg_proxy')}   : {tg['proxy'] or t('tg_direct')}")
+        print()
+        return
+    if a.action == "test":
+        ok, err = tg_send(
+            f"🦨 <b>{node_label(tg)}</b>\n{t('tg_test_text')}", cfg, force=True)
+        print(f"{C['grn']}✓ {t('tg_sent')}{C['r']}" if ok
+              else f"{C['red']}✗ {err}{C['r']}")
+        return
+    # set
+    for key, val in (("token", a.token), ("chat_id", a.chat), ("thread_id", a.thread),
+                     ("node_name", a.name), ("proxy", a.proxy)):
+        if val is not None:
+            tg[key] = val.strip()
+    if a.enable:
+        tg["enabled"] = True
+    if a.disable:
+        tg["enabled"] = False
+    if a.events is not None:
+        tg["events"] = a.events == "on"
+    if a.daily is not None:
+        tg["daily"] = a.daily == "on"
+    cfg["telegram"] = tg
+    save_config({"ports": cfg["ports"], "speed_mbps": cfg["speed_mbps"],
+                 "guard": cfg["guard"], "telegram": tg})
+    if not a.quiet:
+        cmd_telegram(argparse.Namespace(action="show"))
 
 
 # ────────────────────────────── whitelist ──────────────────────────────
@@ -1186,6 +1437,20 @@ def build_parser():
     rl.add_argument("ip", nargs="?", default="")
     rl.add_argument("--all", action="store_true")
     rl.set_defaults(func=cmd_release)
+
+    tg = sub.add_parser("telegram", help=t("h_telegram"))
+    tg.add_argument("action", choices=["show", "set", "test"], nargs="?", default="show")
+    tg.add_argument("--token", default=None)
+    tg.add_argument("--chat", default=None)
+    tg.add_argument("--thread", default=None)
+    tg.add_argument("--name", default=None, help=t("h_tg_name"))
+    tg.add_argument("--proxy", default=None, help=t("h_tg_proxy"))
+    tg.add_argument("--enable", action="store_true")
+    tg.add_argument("--disable", action="store_true")
+    tg.add_argument("--events", choices=["on", "off"], default=None)
+    tg.add_argument("--daily", choices=["on", "off"], default=None)
+    tg.add_argument("--quiet", action="store_true")
+    tg.set_defaults(func=cmd_telegram)
 
     w = sub.add_parser("whitelist", help=t("h_whitelist"))
     w.add_argument("action", choices=["add", "del", "sync", "list"])
