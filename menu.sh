@@ -409,6 +409,146 @@ print("|".join([
 PY
 }
 
+# ── SSH-туннель для прокси ────────────────────────────────────────────
+# На российских нодах api.telegram.org недоступен, а MTProto-прокси для Bot API
+# не годится. Самый короткий путь — поднять SOCKS через SSH на своей же
+# зарубежной ноде: нового софта почти не надо, трафик копеечный.
+TUN_KEY="/root/.ssh/shape_tunnel"
+TUN_UNIT="/etc/systemd/system/shape-tunnel.service"
+
+tunnel_setup() {
+    local host port user lport ans
+
+    title "${T[tn_title]}"
+    echo -e "  ${D}${T[tn_h1]}${N}"
+    echo -e "  ${D}${T[tn_h2]}${N}"
+    echo
+    host="$(ask "${T[tn_host]}" "${TUNNEL_HOST:-}")"
+    [[ -z "$host" ]] && return
+    port="$(ask "${T[tn_port]}" "${TUNNEL_PORT:-22}")"
+    user="$(ask "${T[tn_user]}" "${TUNNEL_USER:-root}")"
+    lport="$(ask "${T[tn_lport]}" "${TUNNEL_LPORT:-1080}")"
+
+    # ключ
+    if [[ ! -f "$TUN_KEY" ]]; then
+        echo -e "\n  ${D}${T[tn_keygen]}${N}"
+        ssh-keygen -t ed25519 -N "" -C "shape-tunnel" -f "$TUN_KEY" -q
+    fi
+
+    echo
+    echo -e "  ${B}${T[tn_pub]}${N}"
+    echo -e "  ${G}$(cat "$TUN_KEY.pub")${N}"
+    echo
+    echo -e "  ${D}${T[tn_how1]}${N}"
+    echo -e "  ${D}${T[tn_how2]}${N}"
+    echo
+    echo "  [1] ${T[tn_copy]}"
+    echo "  [2] ${T[tn_manual]}"
+    echo "  [0] ${T[cancel]}"
+    echo
+    case "$(ask "${T[choice]}" 1)" in
+        1) echo
+           ssh-copy-id -i "$TUN_KEY.pub" -p "$port" \
+               -o StrictHostKeyChecking=accept-new "$user@$host" || {
+               echo -e "  ${R}${T[tn_copy_fail]}${N}"; pause; return; } ;;
+        2) echo; read -rsp "  ${T[tn_wait]} " _ ;;
+        *) return ;;
+    esac
+
+    # autossh держит туннель живым лучше голого ssh, но не обязателен
+    local exe="/usr/bin/ssh" extra=""
+    if command -v autossh >/dev/null || apt-get install -y -qq autossh >/dev/null 2>&1; then
+        exe="$(command -v autossh)"; extra="-M 0"
+    fi
+
+    cat > "$TUN_UNIT" <<EOF
+[Unit]
+Description=Shape SOCKS tunnel for Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=AUTOSSH_GATETIME=0
+ExecStart=$exe $extra -N -D 127.0.0.1:$lport -i $TUN_KEY -p $port \\
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \\
+    -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \\
+    $user@$host
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now shape-tunnel >/dev/null 2>&1
+    conf_set TUNNEL_HOST "$host"; conf_set TUNNEL_PORT "$port"
+    conf_set TUNNEL_USER "$user"; conf_set TUNNEL_LPORT "$lport"
+    TUNNEL_HOST="$host"; TUNNEL_PORT="$port"
+    TUNNEL_USER="$user"; TUNNEL_LPORT="$lport"
+
+    echo -e "\n  ${D}${T[tn_starting]}${N}"
+    sleep 4
+    if tunnel_check "$lport"; then
+        "$CTL" telegram set --proxy "socks5://127.0.0.1:$lport" --quiet
+        echo -e "  ${G}✓ ${T[tn_ok]}${N}"
+        echo -e "  ${D}${T[tn_set]} socks5://127.0.0.1:$lport${N}"
+    else
+        echo -e "  ${R}✗ ${T[tn_fail]}${N}"
+        echo -e "  ${D}journalctl -u shape-tunnel -n 20${N}"
+    fi
+    pause
+}
+
+tunnel_check() {
+    local lport="${1:-${TUNNEL_LPORT:-1080}}" code
+    command -v curl >/dev/null || return 1
+    # 401 — это успех: связь есть, просто токен 0:0 заведомо липовый
+    code="$(curl -sS --socks5-hostname "127.0.0.1:$lport" -o /dev/null -m 12 \
+            -w '%{http_code}' https://api.telegram.org/bot0:0/getMe 2>/dev/null)"
+    [[ "$code" == "401" ]]
+}
+
+screen_tunnel() {
+    while :; do
+        title "${T[tn_title]}"
+        if [[ -f "$TUN_UNIT" ]]; then
+            if systemctl is-active shape-tunnel >/dev/null 2>&1; then
+                echo -e "  ${T[tn_state]} : ${G}${T[dr_running]}${N}"
+            else
+                echo -e "  ${T[tn_state]} : ${R}${T[dr_stopped]}${N}"
+            fi
+            echo -e "  ${T[tn_server]}: ${B}${TUNNEL_USER:-root}@${TUNNEL_HOST:-?}:${TUNNEL_PORT:-22}${N}"
+            echo -e "  ${T[tn_socks]} : ${B}socks5://127.0.0.1:${TUNNEL_LPORT:-1080}${N}"
+        else
+            echo -e "  ${T[tn_state]} : ${D}${T[tn_none]}${N}"
+            echo
+            echo -e "  ${D}${T[tn_h1]}${N}"
+            echo -e "  ${D}${T[tn_h2]}${N}"
+        fi
+        hr
+        echo "  [1] ${T[tn_setup]}"
+        echo "  [2] ${T[tn_test]}"
+        echo "  [3] ${T[sv_logs]}"
+        echo "  [4] ${T[tn_remove]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) tunnel_setup ;;
+            2) echo -e "\n  ${D}${T[tn_checking]}${N}"
+               if tunnel_check; then echo -e "  ${G}✓ ${T[tn_ok]}${N}"
+               else echo -e "  ${R}✗ ${T[tn_fail]}${N}"; fi
+               pause ;;
+            3) title "${T[sv_logs]}"
+               journalctl -u shape-tunnel -n 30 --no-pager | sed 's/^/  /'; pause ;;
+            4) systemctl disable --now shape-tunnel >/dev/null 2>&1
+               rm -f "$TUN_UNIT"; systemctl daemon-reload
+               "$CTL" telegram set --proxy "" --quiet
+               echo -e "  ${G}✓ ${T[tn_removed]}${N}"; sleep 2 ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 screen_telegram() {
     local on name tok chat thread ev dg proxy v
     while :; do
@@ -444,6 +584,7 @@ screen_telegram() {
             echo -e "  [8] ${T[tg_dg]}: ${Y}${T[tg_off]}${N} ${D}${T[tg_press]}${N}"
         fi
         echo "  [9] ${T[tg_test]}"
+        echo -e " [10] 🔌 ${T[tn_menu]}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -467,6 +608,7 @@ screen_telegram() {
             7) "$CTL" telegram set --events "$([[ "$ev" == 1 ]] && echo off || echo on)" --quiet ;;
             8) "$CTL" telegram set --daily "$([[ "$dg" == 1 ]] && echo off || echo on)" --quiet ;;
             9) echo; "$CTL" telegram test; pause ;;
+            10) screen_tunnel ;;
             0|"") return ;;
         esac
     done
