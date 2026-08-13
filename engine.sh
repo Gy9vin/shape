@@ -24,10 +24,21 @@ die()  { err "$*"; exit 1; }
 [[ -f "$CONF" ]] && source "$CONF"
 IFACE="${IFACE:-}"
 
+# Имя интерфейса подставляется в команды tc и в пути внутри /sys. Даже если в
+# конфиг попадёт мусор, дальше этой строки он не пройдёт: длина имени в Linux
+# ограничена 15 символами, и ничего кроме букв, цифр, точки, дефиса и @ там
+# быть не может (@ бывает у VLAN-интерфейсов вида eth0@if2).
+iface_ok() { [[ "$1" =~ ^[A-Za-z0-9._@-]{1,15}$ ]]; }
+if [[ -n "$IFACE" ]] && ! iface_ok "$IFACE"; then
+    err "недопустимое имя интерфейса в $CONF — определяю автоматически"
+    IFACE=""
+fi
+
 need_iface() {
     [[ -n "$IFACE" ]] || IFACE="$(ip route get 1.1.1.1 2>/dev/null |
                                   sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
     [[ -n "$IFACE" ]] || die "не удалось определить интерфейс, задай IFACE в $CONF"
+    iface_ok "$IFACE" || die "недопустимое имя интерфейса: $IFACE"
     [[ -d "/sys/class/net/$IFACE" ]] || die "интерфейс $IFACE не существует"
 }
 
@@ -132,8 +143,12 @@ load() {
 
 unload_quiet() {
     local ifc="${IFACE:-}"
-    [[ -z "$ifc" && -f "$ETC_DIR/.active_iface" ]] && . "$ETC_DIR/.active_iface" && ifc="$IFACE"
-    if [[ -n "$ifc" && -d "/sys/class/net/$ifc" ]]; then
+    if [[ -z "$ifc" && -f "$ETC_DIR/.active_iface" ]]; then
+        # Файл пишем сами, но читаем его как чужой: он попадает в source.
+        ifc="$(sed -n 's/^IFACE="\([A-Za-z0-9._@-]\{1,15\}\)"$/\1/p' \
+               "$ETC_DIR/.active_iface" | head -1)"
+    fi
+    if [[ -n "$ifc" ]] && iface_ok "$ifc" && [[ -d "/sys/class/net/$ifc" ]]; then
         tc filter del dev "$ifc" egress  2>/dev/null || true
         tc filter del dev "$ifc" ingress 2>/dev/null || true
         tc qdisc  del dev "$ifc" clsact  2>/dev/null || true

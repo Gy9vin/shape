@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-2.7-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-2.8-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
 </p>
 
-# Shape v2.7
+# Shape v2.8
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -532,6 +532,9 @@ systemd/shaper-watch.service   сторож нарушителей
 /etc/shaper/penalties.json кто ограничен, до какого времени и за что
 /etc/shaper/daily.json     суточные счётчики активности и объёма
 /etc/shaper/digest.json    отложенная сводка, ждёт назначенного часа
+
+Каталог `/etc/shaper` доступен только root (750), `config.json` — 600:
+в нём лежит токен бота.
 ```
 
 ---

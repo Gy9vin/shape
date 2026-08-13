@@ -42,13 +42,25 @@ try: c = json.load(open('$ETC_DIR/config.json'))
 except Exception: c = {}
 print(c.get('$1', '$2'))" 2>/dev/null || echo "$2"; }
 
+# shaper.conf читается через `source` и в меню, и в engine.sh — то есть его
+# содержимое выполняется от root при каждом старте сервиса. Значит в файл не
+# должно попасть ничего, кроме простого KEY="значение": кавычка внутри
+# значения разорвала бы строку и всё, что дальше, стало бы командой.
+# Поэтому: ключ — только буквы и подчёркивания, значение — без спецсимволов,
+# запись через awk, а не sed (в sed «&» и «|» в замене имеют свой смысл).
+conf_safe() { [[ "$1" =~ ^[A-Za-z0-9_.:@/-]*$ ]]; }
+
 conf_set() {
-    touch "$CONF"
-    if grep -q "^$1=" "$CONF"; then
-        sed -i "s|^$1=.*|$1=\"$2\"|" "$CONF"
-    else
-        echo "$1=\"$2\"" >> "$CONF"
-    fi
+    local key="$1" val="$2"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+    conf_safe "$val" || return 1
+    touch "$CONF"; chmod 600 "$CONF" 2>/dev/null
+    local tmp; tmp="$(mktemp "${CONF}.XXXXXX")" || return 1
+    awk -v k="$key" -v v="$val" '
+        $0 ~ "^"k"=" { if (!done) { print k"=\"" v "\""; done=1 } ; next }
+        { print }
+        END { if (!done) print k"=\"" v "\"" }
+    ' "$CONF" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$CONF"
 }
 
 # ── Выбор языка ───────────────────────────────────────────────────────
@@ -416,7 +428,14 @@ PY
 # не годится. Самый короткий путь — поднять SOCKS через SSH на своей же
 # зарубежной ноде: нового софта почти не надо, трафик копеечный.
 TUN_KEY="/root/.ssh/shape_tunnel"
+TUN_KNOWN="/root/.ssh/shape_tunnel_known_hosts"
 TUN_UNIT="/etc/systemd/system/shape-tunnel.service"
+
+# Всё, что здесь введут, попадает в две опасные точки: в ExecStart юнита
+# systemd и в shaper.conf, который потом выполняется через source. Перевод
+# строки в адресе дописал бы в юнит свою директиву, кавычка — свою команду
+# в конфиг. Поэтому проверяем формат до того, как что-то запишем.
+tn_bad() { echo -e "  ${R}✗ ${T[tn_bad_value]} ${B}$1${N}"; pause; }
 
 tunnel_setup() {
     local host port user lport ans
@@ -427,14 +446,46 @@ tunnel_setup() {
     echo
     host="$(ask "${T[tn_host]}" "${TUNNEL_HOST:-}")"
     [[ -z "$host" ]] && return
+    # имя хоста или IP: буквы, цифры, точка, дефис, двоеточие для IPv6
+    [[ "$host" =~ ^[A-Za-z0-9.:_-]{1,253}$ ]] || { tn_bad "${T[tn_host]}"; return; }
     port="$(ask "${T[tn_port]}" "${TUNNEL_PORT:-22}")"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 )) \
+        || { tn_bad "${T[tn_port]}"; return; }
     user="$(ask "${T[tn_user]}" "${TUNNEL_USER:-root}")"
+    [[ "$user" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,31}$ ]] || { tn_bad "${T[tn_user]}"; return; }
     lport="$(ask "${T[tn_lport]}" "${TUNNEL_LPORT:-1080}")"
+    [[ "$lport" =~ ^[0-9]{1,5}$ ]] && (( lport >= 1 && lport <= 65535 )) \
+        || { tn_bad "${T[tn_lport]}"; return; }
 
     # ключ
     if [[ ! -f "$TUN_KEY" ]]; then
         echo -e "\n  ${D}${T[tn_keygen]}${N}"
-        ssh-keygen -t ed25519 -N "" -C "shape-tunnel" -f "$TUN_KEY" -q
+        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+        ssh-keygen -t ed25519 -N "" -C "shape-tunnel" -f "$TUN_KEY" -q || {
+            tn_bad "${T[tn_keygen]}"; return; }
+    fi
+    chmod 600 "$TUN_KEY" 2>/dev/null
+
+    # Ключ хоста сверяем глазами один раз и запоминаем. Через этот туннель
+    # пойдёт токен бота, а StrictHostKeyChecking=accept-new молча доверяет
+    # тому, кто ответил первым — если подменили именно первое соединение,
+    # подмену уже никто не заметит.
+    local hostopt="-o StrictHostKeyChecking=accept-new"
+    echo -e "\n  ${D}${T[tn_fp_get]}${N}"
+    if ssh-keyscan -T 8 -p "$port" "$host" > "$TUN_KNOWN.new" 2>/dev/null \
+       && [[ -s "$TUN_KNOWN.new" ]]; then
+        echo -e "  ${B}${T[tn_fp]}${N}"
+        ssh-keygen -lf "$TUN_KNOWN.new" 2>/dev/null | sed 's/^/    /'
+        echo
+        read -rp "  ${T[tn_fp_q]} [y/N]: " ans
+        if [[ ! "$ans" =~ ^[YyДд] ]]; then
+            rm -f "$TUN_KNOWN.new"; echo "  ${T[cancelled]}"; pause; return
+        fi
+        mv -f "$TUN_KNOWN.new" "$TUN_KNOWN"; chmod 600 "$TUN_KNOWN"
+        hostopt="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$TUN_KNOWN"
+    else
+        rm -f "$TUN_KNOWN.new"
+        echo -e "  ${Y}⚠ ${T[tn_fp_skip]}${N}"
     fi
 
     echo
@@ -450,8 +501,8 @@ tunnel_setup() {
     echo
     case "$(ask "${T[choice]}" 1)" in
         1) echo
-           ssh-copy-id -i "$TUN_KEY.pub" -p "$port" \
-               -o StrictHostKeyChecking=accept-new "$user@$host" || {
+           # shellcheck disable=SC2086
+           ssh-copy-id -i "$TUN_KEY.pub" -p "$port" $hostopt "$user@$host" || {
                echo -e "  ${R}${T[tn_copy_fail]}${N}"; pause; return; } ;;
         2) echo; read -rsp "  ${T[tn_wait]} " _ ;;
         *) return ;;
@@ -473,7 +524,7 @@ Wants=network-online.target
 Environment=AUTOSSH_GATETIME=0
 ExecStart=$exe $extra -N -D 127.0.0.1:$lport -i $TUN_KEY -p $port \\
     -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \\
-    -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \\
+    -o ExitOnForwardFailure=yes -o IdentitiesOnly=yes $hostopt \\
     $user@$host
 Restart=always
 RestartSec=10
@@ -718,12 +769,23 @@ screen_update() {
                 echo -e "  ${R}✗ ${T[up_nogit]}${N}"; pause; return; }
     fi
 
-    tmp="$(mktemp -d)"
+    # Предсказуемый шаблон: после exec install.sh каталог убрать уже некому,
+    # поэтому чистим прошлые клоны при следующем обновлении.
+    rm -rf /tmp/shape-update.* 2>/dev/null
+    tmp="$(mktemp -d -t shape-update.XXXXXX)" || { pause; return; }
     echo -e "  ${D}${T[up_dl]}${N}"
     if ! git clone --depth 20 --quiet "$REPO_URL" "$tmp" 2>/dev/null; then
         echo -e "  ${R}✗ ${T[up_fail]}${N}"
         rm -rf "$tmp"; pause; return
     fi
+
+    # Скачанное запускаем от root, поэтому сначала убеждаемся, что это
+    # действительно Shape, а не пустой или оборвавшийся клон.
+    for f in install.sh engine.sh shaperctl.py VERSION bpf/shaper.bpf.c; do
+        [[ -s "$tmp/$f" ]] || {
+            echo -e "  ${R}✗ ${T[up_broken]} $f${N}"
+            rm -rf "$tmp"; pause; return; }
+    done
 
     new_ver="$(git -C "$tmp" rev-parse --short HEAD)"
     cur_hash="$(cat "$APP_DIR/.commit" 2>/dev/null)"

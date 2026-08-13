@@ -42,6 +42,21 @@
  * секунда на слабом ядре, 8192 — полтора мегабайта и десятки миллисекунд.
  * Запас всё равно огромный: на ноду со 150 клиентами приходится 300-500
  * адресов в сутки с учётом смены мобильных IP. */
+/* Номера заголовков расширения IPv6. Приходят из linux/in6.h, но на части
+ * дистрибутивов этот заголовок в цепочку не попадает — подстрахуемся. */
+#ifndef IPPROTO_HOPOPTS
+#define IPPROTO_HOPOPTS   0
+#endif
+#ifndef IPPROTO_ROUTING
+#define IPPROTO_ROUTING   43
+#endif
+#ifndef IPPROTO_FRAGMENT
+#define IPPROTO_FRAGMENT  44
+#endif
+#ifndef IPPROTO_DSTOPTS
+#define IPPROTO_DSTOPTS   60
+#endif
+
 #define MAX_USERS      8192
 /* Если EDT уводит отправку больше чем на 2 с вперёд — очередь безнадёжна. */
 #define EDT_HORIZON_NS 2000000000ULL
@@ -139,6 +154,10 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     __u16 sport = 0, dport = 0;
     __u8  proto = 0;
     void *l4 = 0;
+    /* Порты не удалось прочитать: не первый фрагмент или незнакомый L4.
+     * Такой пакет всё равно принадлежит клиенту, поэтому шейпим его, если
+     * включено правило «все порты», и пропускаем, если правило по портам. */
+    __u32 no_ports = 0;
 
     if (eth->h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = (struct iphdr *)(eth + 1);
@@ -150,6 +169,13 @@ static __always_inline int process_packet(struct __sk_buff *skb,
         key.addr[0] = (direction == 0) ? ip->daddr : ip->saddr;
         proto = ip->protocol;
         l4 = (void *)ip + (ip->ihl * 4);
+
+        /* Не первый фрагмент: на месте заголовка L4 лежат данные. Раньше эти
+         * байты читались как порты — и полезная нагрузка иногда случайно
+         * совпадала с 443, а иногда нет. Смещение фрагмента — младшие 13 бит
+         * frag_off; старшие три это флаги, их отбрасываем. */
+        if (ip->frag_off & bpf_htons(0x1FFF))
+            no_ports = 1;
 
     } else if (eth->h_proto == bpf_htons(ETH_P_IPV6)) {
         struct ipv6hdr *ip6 = (struct ipv6hdr *)(eth + 1);
@@ -163,6 +189,45 @@ static __always_inline int process_packet(struct __sk_buff *skb,
 
         proto = ip6->nexthdr;
         l4 = (void *)(ip6 + 1);
+
+        /* Цепочка заголовков расширения. Без неё пакет с любым hop-by-hop
+         * впереди выглядел бы как «протокол не TCP и не UDP» и уходил мимо
+         * шейпера — клиенту достаточно добавить один пустой заголовок, чтобы
+         * получить безлимит на отдачу. Глубина ограничена: верификатору нужен
+         * конечный цикл, а больше двух-трёх заголовков в жизни не встречается. */
+#pragma unroll
+        for (int i = 0; i < 3; i++) {
+            if (proto == IPPROTO_TCP || proto == IPPROTO_UDP)
+                break;
+            if (proto == IPPROTO_FRAGMENT) {
+                /* Заголовок фрагмента: 8 байт, дальше либо первый фрагмент
+                 * с портами, либо продолжение без них. */
+                struct frag_hdr {
+                    __u8  nexthdr;
+                    __u8  reserved;
+                    __be16 frag_off;
+                    __be32 identification;
+                } *fh = l4;
+                if ((void *)(fh + 1) > data_end)
+                    return TC_ACT_OK;
+                if (fh->frag_off & bpf_htons(0xFFF8))
+                    no_ports = 1;
+                proto = fh->nexthdr;
+                l4 = (void *)(fh + 1);
+            } else if (proto == IPPROTO_HOPOPTS || proto == IPPROTO_ROUTING ||
+                       proto == IPPROTO_DSTOPTS) {
+                struct ext_hdr {
+                    __u8 nexthdr;
+                    __u8 hdrlen;    /* длина в восьмёрках байт, не считая первой */
+                } *eh = l4;
+                if ((void *)(eh + 1) > data_end)
+                    return TC_ACT_OK;
+                proto = eh->nexthdr;
+                l4 = (void *)l4 + ((__u32)(eh->hdrlen + 1) << 3);
+            } else {
+                break;
+            }
+        }
     } else {
         return TC_ACT_OK;   /* ARP, VLAN и прочее — не трогаем */
     }
@@ -178,7 +243,9 @@ static __always_inline int process_packet(struct __sk_buff *skb,
         return TC_ACT_OK;
 
     /* ── Порты ── */
-    if (proto == IPPROTO_TCP) {
+    if (no_ports) {
+        /* нечего читать, решение примет проверка правила «все порты» */
+    } else if (proto == IPPROTO_TCP) {
         struct tcphdr *tcp = l4;
         if ((void *)(tcp + 1) > data_end)
             return TC_ACT_OK;
@@ -203,7 +270,7 @@ static __always_inline int process_packet(struct __sk_buff *skb,
      * и учитывался под IP этого сайта.
      */
     __u32 key_port = (direction == 0) ? sport : dport;
-    if (!bpf_map_lookup_elem(&port_map, &key_port)) {
+    if (no_ports || !bpf_map_lookup_elem(&port_map, &key_port)) {
         if (!bpf_map_lookup_elem(&port_map, &zero))  /* порт 0 = все порты */
             return TC_ACT_OK;
     }
@@ -233,6 +300,13 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     struct penalty *pen = bpf_map_lookup_elem(&penalty_map, &key);
     if (pen && pen->rate_bytes_per_sec > 0 && now < pen->until_ns)
         rate = pen->rate_bytes_per_sec;
+
+    /* Значение перечитано из карты, а не то, что проверяли в начале: между
+     * проверкой и этой строкой лимит могли снять из userspace. Деление на
+     * ноль в BPF даёт ноль, а не панику, но пакет тогда уехал бы с нулевой
+     * задержкой мимо всякого учёта — лучше честно пропустить. */
+    if (rate == 0)
+        return TC_ACT_OK;
 
     __u64 delay_ns  = ((__u64)len * 1000000000ULL) / rate;
     __u64 departure = st->last_departure_ns;

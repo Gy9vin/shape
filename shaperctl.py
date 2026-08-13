@@ -7,11 +7,13 @@ shaperctl — управление eBPF-шейпером через pinned BPF-�
 """
 
 import argparse
+import html
 import http.client
 import io
 import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import struct
@@ -75,6 +77,12 @@ MSG = {
         "tg_sent": "сообщение отправлено",
         "tg_test_text": "Проверка связи прошла успешно.",
         "tg_limited": "Ограничен",
+        "bad_ip": "«{ip}» — это не IP-адрес",
+        "tg_bad_token_fmt": "токен выглядит как 123456789:AAF… — возьми его у @BotFather",
+        "tg_bad_chat_fmt": "chat_id — это число (часто со знаком минус) или @имя",
+        "tg_bad_thread_fmt": "ID темы — число из ссылки на тему",
+        "tg_bad_proxy": "в адресе прокси нет хоста или порт вне диапазона",
+        "tg_name_long": "подпись ноды — до 64 символов",
         "tg_at": "Время сводки",
         "tg_digest_now": "сводка за текущие сутки",
         "tg_no_data": "за сегодня ещё нечего показать",
@@ -195,6 +203,12 @@ MSG = {
         "tg_sent": "message sent",
         "tg_test_text": "Connection test passed.",
         "tg_limited": "Limited",
+        "bad_ip": "«{ip}» is not an IP address",
+        "tg_bad_token_fmt": "a token looks like 123456789:AAF… — get it from @BotFather",
+        "tg_bad_chat_fmt": "chat_id is a number (often negative) or @name",
+        "tg_bad_thread_fmt": "topic ID is the number from the topic link",
+        "tg_bad_proxy": "the proxy address has no host, or the port is out of range",
+        "tg_name_long": "node label is limited to 64 characters",
         "tg_at": "Digest time",
         "tg_digest_now": "digest for the current day",
         "tg_no_data": "nothing to report for today yet",
@@ -324,14 +338,23 @@ def die(msg, code=1):
 
 
 def run(cmd, check=True):
-    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    """
+    Запуск внешней команды списком аргументов, без оболочки.
+
+    shell=True здесь был бы миной: аргументы собираются из имён карт и
+    hex-строк, и достаточно одного невнимательного вызова, чтобы значение
+    из конфига попало в /bin/sh с правами root. Без оболочки такой класс
+    ошибок невозможен в принципе.
+    """
+    p = subprocess.run(cmd, shell=False, capture_output=True, text=True)
     if check and p.returncode != 0:
-        die(t("cmd_fail", c=cmd, e=p.stderr.strip()))
+        die(t("cmd_fail", c=" ".join(cmd), e=p.stderr.strip()))
     return p.stdout.strip(), p.returncode
 
 
 def hexs(data):
-    return " ".join(f"{b:02x}" for b in data)
+    """Байты -> отдельные аргументы 'de ad be ef' для bpftool."""
+    return [f"{b:02x}" for b in data]
 
 
 def map_path(name):
@@ -345,12 +368,13 @@ def require_engine():
 
 def map_update(name, key, value):
     require_engine()
-    run(f"bpftool map update pinned {map_path(name)} "
-        f"key hex {hexs(key)} value hex {hexs(value)}")
+    run(["bpftool", "map", "update", "pinned", map_path(name),
+         "key", "hex", *hexs(key), "value", "hex", *hexs(value)])
 
 
 def map_delete(name, key):
-    run(f"bpftool map delete pinned {map_path(name)} key hex {hexs(key)}", check=False)
+    run(["bpftool", "map", "delete", "pinned", map_path(name),
+         "key", "hex", *hexs(key)], check=False)
 
 
 def map_dump(name):
@@ -362,7 +386,7 @@ def map_dump(name):
     path = map_path(name)
     if not os.path.exists(path):
         return []
-    out, rc = run(f"bpftool map dump pinned {path} -j", check=False)
+    out, rc = run(["bpftool", "map", "dump", "pinned", path, "-j"], check=False)
     if rc != 0 or not out:
         return []
     try:
@@ -529,16 +553,43 @@ def load_config():
 
 
 def save_config(cfg):
+    """
+    Пишет конфиг целиком, сохраняя незнакомые разделы.
+
+    Слияние с тем, что уже лежит на диске, — страховка от того самого класса
+    ошибок, из-за которого правка автоограничения когда-то стирала настройки
+    Telegram: вызывающий передал не все разделы, и остальные исчезли.
+    """
     os.makedirs(ETC_DIR, exist_ok=True)
+    try:
+        with open(CONFIG_FILE) as f:
+            merged = json.load(f)
+        if not isinstance(merged, dict):
+            merged = {}
+    except Exception:
+        merged = {}
+    merged.update(cfg)
+
     tmp = CONFIG_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2)
+    # Права ставим до записи: между open и chmod иначе есть окно, в котором
+    # файл с токеном лежит доступным на чтение всем.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(merged, f, indent=2)
     os.replace(tmp, CONFIG_FILE)
     # В конфиге лежит токен бота — читать его посторонним незачем.
     try:
         os.chmod(CONFIG_FILE, 0o600)
     except OSError:
         pass
+
+
+def valid_ip(s):
+    """Строка -> нормализованный адрес или None. Единственная точка правды."""
+    try:
+        return str(ipaddress.ip_address(str(s).strip()))
+    except ValueError:
+        return None
 
 
 def parse_ports(s):
@@ -580,6 +631,11 @@ def cmd_apply(a):
             die(t("no_ports"))
         cfg["ports"] = ports
     if a.speed is not None:
+        # nan и inf проходят любые сравнения: nan < 0 ложь, nan > MAX ложь.
+        # Без явной проверки такое значение доехало бы до int() и уронило
+        # команду с трассировкой прямо посреди применения настроек.
+        if a.speed != a.speed or a.speed in (float("inf"), float("-inf")):
+            die(t("neg_speed"))
         if a.speed < 0:
             die(t("neg_speed"))
         if a.speed > MAX_MBPS:
@@ -813,11 +869,23 @@ def load_penalties():
     try:
         with open(PEN_FILE) as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
     except Exception:
         return {}
     now = time.time()
-    return {ip: p for ip, p in data.items()
-            if isinstance(p, dict) and p.get("until", 0) > now}
+    out = {}
+    for ip, p in data.items():
+        # Файл могли покорёжить руками. Сторож перезапускается каждые 15 с,
+        # и одна строка «until»: «завтра» иначе крутила бы его в вечном цикле.
+        if not isinstance(p, dict) or valid_ip(ip) is None:
+            continue
+        try:
+            if float(p.get("until", 0)) > now and float(p.get("mbps", 0)) > 0:
+                out[ip] = p
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def save_penalties(pens):
@@ -876,8 +944,10 @@ def cmd_limited(a):
         why = ", ".join(t("why_" + r) for r in p.get("reasons") or []) or "—"
         print(f"  {C['red']}{ip:<24}{C['r']}{when:>8}"
               f"{fmt_hold(p['until'] - time.time()):>12}   {C['gry']}{why}{C['r']}")
+    speeds = sorted({float(p.get("mbps", 0)) for p in pens.values()})
+    speed_txt = " / ".join(f"{s:g}" for s in speeds)
     print(f"\n  {C['gry']}{t('lim_total')}: {len(pens)} · "
-          f"{t('lim_speed')} {next(iter(pens.values()))['mbps']:g} Mbit/s{C['r']}\n")
+          f"{t('lim_speed')} {speed_txt} Mbit/s{C['r']}\n")
 
 
 def cmd_release(a):
@@ -890,10 +960,14 @@ def cmd_release(a):
         return
     if not a.ip:
         die(t("rel_need_ip"))
-    penalty_clear(a.ip)
+    ip = valid_ip(a.ip)
+    if ip is None:
+        die(t("bad_ip", ip=a.ip[:60]))
+    penalty_clear(ip)
+    pens.pop(ip, None)
     pens.pop(a.ip, None)
     save_penalties(pens)
-    print(f"{C['grn']}✓ {t('rel_one', ip=a.ip)}{C['r']}")
+    print(f"{C['grn']}✓ {t('rel_one', ip=ip)}{C['r']}")
 
 
 def cmd_guard(a):
@@ -926,7 +1000,10 @@ def cmd_guard(a):
                 die(t("guard_range", k=key, lo=lo, hi=hi))
             g[key] = val
 
-    save_config({"ports": cfg["ports"], "speed_mbps": cfg["speed_mbps"], "guard": g})
+    # Секцию telegram сюда обязательно: раньше её здесь не было, и любая
+    # правка автоограничения молча стирала токен, чат, прокси и время сводки.
+    cfg["guard"] = g
+    save_config(cfg)
     if not a.quiet:
         cmd_guard_show(cfg["speed_mbps"], g)
 
@@ -1092,15 +1169,18 @@ def cmd_watch(a):
             for ip in in_map - set(pens):
                 penalty_clear(ip)
 
-            if not g["enabled"] or cap <= 0:
+            # Автоограничение выключено — штрафов не выдаём, но счёт трафика
+            # продолжаем: на нём держится суточная сводка в Telegram, и раньше
+            # при выключенном стороже она приходила пустой.
+            guard_on = bool(g["enabled"]) and cap > 0
+            if not guard_on:
                 both_streak.clear()
                 peak_streak.clear()
-                continue
 
             dl_floor = cap * g["both_dl_percent"] / 100
             ul_floor = cap * g["both_ul_percent"] / 100
             peak_floor = cap * g["trigger_percent"] / 100
-            active_floor = cap * 0.25
+            active_floor = cap * 0.25 if cap > 0 else 1.0
             need_score = g["score_needed"]
             wl = whitelist_ips()
 
@@ -1115,7 +1195,7 @@ def cmd_watch(a):
                 if s["dl_bytes"]:
                     hourly_add(hourly, ip, s["dl_bytes"], time.time())
 
-                if ip in pens or ip in wl:
+                if not guard_on or ip in pens or ip in wl:
                     continue
 
                 # счётчики с допуском: короткий провал не обнуляет наблюдение
@@ -1238,8 +1318,27 @@ def _post(url, data, proxy=""):
 
 
 def node_label(tg):
-    """Как подписывать ноду в сообщениях. Пусто — берём имя хоста."""
-    return tg.get("node_name") or os.uname().nodename
+    """
+    Подпись ноды для сообщения. Пусто — берём имя хоста.
+
+    Экранируем: сообщения уходят с parse_mode=HTML, и одинокий «<» в подписи
+    или в имени хоста заставляет Telegram отвечать 400 «can't parse entities».
+    Уведомления после этого молча перестают приходить.
+    """
+    return html.escape(tg.get("node_name") or os.uname().nodename)
+
+
+def scrub(text, cfg=None):
+    """Убирает токен бота из текста ошибки — журнал читают не только свои."""
+    try:
+        token = (cfg or {}).get("telegram", {}).get("token", "")
+    except Exception:
+        token = ""
+    s = str(text)
+    if token:
+        s = s.replace(token, "***")
+    # На случай, если токен просочился из другого источника: /bot<цифры>:<...>
+    return re.sub(r"(?<=/bot)\d+:[A-Za-z0-9_-]+", "***", s)
 
 
 def tg_send(text, cfg=None, force=False):
@@ -1270,10 +1369,11 @@ def tg_send(text, cfg=None, force=False):
             hint = "\n  " + t("tg_bad_thread")
         elif e.code == 403:
             hint = "\n  " + t("tg_forbidden")
-        return False, f"HTTP {e.code}: {body}{hint}"
+        # Текст ошибки уходит в journalctl: токен из него вычищаем.
+        return False, scrub(f"HTTP {e.code}: {body}{hint}", {"telegram": tg})
     except Exception as e:
         hint = "" if tg.get("proxy") else "\n  " + t("tg_need_proxy")
-        return False, f"{e}{hint}"
+        return False, scrub(f"{e}{hint}", {"telegram": tg})
 
 
 def tg_penalty(cfg, ip, mbps, minutes, reasons):
@@ -1418,6 +1518,30 @@ def cmd_telegram(a):
             die(t("tg_mtproto") + "\n  " + t("tg_mtproto2") + "\n  " + t("tg_mtproto3"))
         if p and not p.startswith(("socks5://", "socks5h://", "http://", "https://")):
             die(t("tg_proxy_scheme"))
+        # Адрес прокси уходит в socket.create_connection и в ProxyHandler.
+        # Мусор вместо хоста или порта должен отсекаться здесь, а не всплывать
+        # исключением внутри сторожа раз в десять секунд.
+        if p:
+            try:
+                u = urllib.parse.urlsplit(p)
+                if not u.hostname or (u.port is not None and not 1 <= u.port <= 65535):
+                    raise ValueError
+            except ValueError:
+                die(t("tg_bad_proxy"))
+
+    # Токен уходит прямо в путь URL: /bot<TOKEN>/sendMessage. Символ «/» или
+    # пробел в нём увёл бы запрос на другой метод API, поэтому формат строгий.
+    if a.token is not None and a.token.strip() \
+            and not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", a.token.strip()):
+        die(t("tg_bad_token_fmt"))
+    if a.chat is not None and a.chat.strip() \
+            and not re.fullmatch(r"-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31}", a.chat.strip()):
+        die(t("tg_bad_chat_fmt"))
+    if a.thread is not None and a.thread.strip() \
+            and not re.fullmatch(r"\d{1,19}", a.thread.strip()):
+        die(t("tg_bad_thread_fmt"))
+    if a.name is not None and len(a.name.strip()) > 64:
+        die(t("tg_name_long"))
 
     for key, val in (("token", a.token), ("chat_id", a.chat), ("thread_id", a.thread),
                      ("node_name", a.name), ("proxy", a.proxy)):
@@ -1432,8 +1556,7 @@ def cmd_telegram(a):
     if a.daily is not None:
         tg["daily"] = a.daily == "on"
     cfg["telegram"] = tg
-    save_config({"ports": cfg["ports"], "speed_mbps": cfg["speed_mbps"],
-                 "guard": cfg["guard"], "telegram": tg})
+    save_config(cfg)
     if not a.quiet:
         cmd_telegram(argparse.Namespace(action="show"))
 
@@ -1449,18 +1572,28 @@ def cmd_whitelist(a):
     require_engine()
 
     if a.action == "add":
-        ip_key(a.ip)                      # проверка адреса до записи в файл
-        with open(WL_FILE, "a") as f:
-            f.write(a.ip + "\n")
-        map_update("whitelist_map", ip_key(a.ip), b"\x01")
-        print(f"{C['grn']}✓ {t('wl_added', ip=a.ip)}{C['r']}")
+        # Проверяем и нормализуем до записи: в файл не должно попасть ничего,
+        # кроме адреса. Иначе строка вернётся при sync и будет отвергнута.
+        ip = valid_ip(a.ip)
+        if ip is None:
+            die(t("bad_ip", ip=str(a.ip)[:60]))
+        if ip not in whitelist_ips():
+            with open(WL_FILE, "a") as f:
+                f.write(ip + "\n")
+        map_update("whitelist_map", ip_key(ip), b"\x01")
+        print(f"{C['grn']}✓ {t('wl_added', ip=ip)}{C['r']}")
 
     elif a.action == "del":
+        ip = valid_ip(a.ip)
+        if ip is None:
+            die(t("bad_ip", ip=str(a.ip)[:60]))
         if os.path.exists(WL_FILE):
-            kept = [l for l in open(WL_FILE) if l.strip() != a.ip]
-            open(WL_FILE, "w").writelines(kept)
-        map_delete("whitelist_map", ip_key(a.ip))
-        print(f"{C['grn']}✓ {t('wl_removed', ip=a.ip)}{C['r']}")
+            with open(WL_FILE) as f:
+                kept = [l for l in f if valid_ip(l.split("#")[0].strip()) != ip]
+            with open(WL_FILE, "w") as f:
+                f.writelines(kept)
+        map_delete("whitelist_map", ip_key(ip))
+        print(f"{C['grn']}✓ {t('wl_removed', ip=ip)}{C['r']}")
 
     elif a.action == "sync":
         for k, _ in map_dump("whitelist_map"):

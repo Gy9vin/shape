@@ -17,6 +17,13 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     step "Удаление"
     systemctl disable --now shaper shaper-watch 2>/dev/null || true
     "$APP_DIR/engine.sh" unload 2>/dev/null || true
+    # Туннель ставится мастером из меню и тоже принадлежит Shape: оставить
+    # его после удаления значит оставить работающее ssh-соединение наружу.
+    if [[ -f /etc/systemd/system/shape-tunnel.service ]]; then
+        systemctl disable --now shape-tunnel 2>/dev/null || true
+        rm -f /etc/systemd/system/shape-tunnel.service
+        ok "SSH-туннель убран (ключ /root/.ssh/shape_tunnel оставлен)"
+    fi
     rm -f /etc/systemd/system/shaper.service \
           /etc/systemd/system/shaper-watch.service /usr/local/bin/shaper
     rm -rf "$APP_DIR"
@@ -67,6 +74,9 @@ ok "старые файлы убраны"
 
 step "Копирование файлов"
 mkdir -p "$APP_DIR/bpf" "$ETC_DIR"
+# В config.json лежит токен бота, в shaper.conf — адрес зарубежной ноды.
+# Читать это кому-то кроме root незачем, а сам каталог доступен только root.
+chmod 750 "$ETC_DIR"
 install -m 755 "$SRC/shaperctl.py"     "$APP_DIR/shaperctl.py"
 install -m 755 "$SRC/engine.sh"        "$APP_DIR/engine.sh"
 install -m 755 "$SRC/menu.sh"          "$APP_DIR/menu.sh"
@@ -76,6 +86,7 @@ install -m 644 "$SRC/bpf/shaper.bpf.c" "$APP_DIR/bpf/shaper.bpf.c"
 
 [[ -f "$ETC_DIR/config.json" ]] || echo '{"ports": [443], "speed_mbps": 0}' > "$ETC_DIR/config.json"
 [[ -f "$ETC_DIR/penalties.json" ]] || echo '{}' > "$ETC_DIR/penalties.json"
+chmod 600 "$ETC_DIR/config.json" "$ETC_DIR/penalties.json" 2>/dev/null || true
 [[ -f "$ETC_DIR/shaper.conf" ]] || cat > "$ETC_DIR/shaper.conf" <<'EOF'
 # Сетевой интерфейс. Пусто = определить автоматически по маршруту в интернет.
 IFACE=""
@@ -84,6 +95,8 @@ EOF
 # IP, которые полностью минуют шейпер. По одному в строке.
 # 203.0.113.10
 EOF
+chmod 600 "$ETC_DIR/shaper.conf" 2>/dev/null || true
+chmod 640 "$ETC_DIR/whitelist.txt" 2>/dev/null || true
 ok "файлы в $APP_DIR, конфиг в $ETC_DIR"
 
 # Хеш коммита, из которого ставим: по нему пункт «Обновить» понимает,
