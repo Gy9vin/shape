@@ -31,6 +31,7 @@ CONFIG_FILE = os.path.join(ETC_DIR, "config.json")
 WL_FILE     = os.path.join(ETC_DIR, "whitelist.txt")
 PEN_FILE    = os.path.join(ETC_DIR, "penalties.json")
 DAILY_FILE  = os.path.join(ETC_DIR, "daily.json")
+DIGEST_FILE = os.path.join(ETC_DIR, "digest.json")
 
 NS = 1_000_000_000
 # Мбит/с -> байт/с. Мегабит десятичный: 1 Мбит = 1 000 000 бит = 125 000 байт.
@@ -74,6 +75,11 @@ MSG = {
         "tg_sent": "сообщение отправлено",
         "tg_test_text": "Проверка связи прошла успешно.",
         "tg_limited": "Ограничен",
+        "tg_at": "Время сводки",
+        "tg_digest_now": "сводка за текущие сутки",
+        "tg_no_data": "за сегодня ещё нечего показать",
+        "tg_bad_time": "время указывают как ЧЧ:ММ, например 09:00",
+        "h_tg_at": "во сколько присылать сводку, ЧЧ:ММ",
         "tg_digest": "сводка за", "tg_traffic": "Трафик",
         "tg_addresses": "Адресов", "tg_top": "Больше всех скачали",
         "lim_why": "за что",
@@ -189,6 +195,11 @@ MSG = {
         "tg_sent": "message sent",
         "tg_test_text": "Connection test passed.",
         "tg_limited": "Limited",
+        "tg_at": "Digest time",
+        "tg_digest_now": "digest for the current day",
+        "tg_no_data": "nothing to report for today yet",
+        "tg_bad_time": "time is written as HH:MM, for example 09:00",
+        "h_tg_at": "when to send the digest, HH:MM",
         "tg_digest": "digest for", "tg_traffic": "Traffic",
         "tg_addresses": "Addresses", "tg_top": "Top downloaders",
         "lim_why": "why",
@@ -496,7 +507,8 @@ TG_DEFAULT = {
     "thread_id": "",      # message_thread_id для супергрупп с темами
     "node_name": "",      # как подписывать ноду, пусто = имя хоста
     "events": True,       # сообщение при каждом ограничении
-    "daily": True,        # сводка за прошедшие сутки, приходит в полночь
+    "daily": True,        # сводка за прошедшие сутки
+    "digest_at": "09:00", # во сколько её присылать, местное время ноды
     "proxy": "",          # socks5://… или http://… — нужен на российских нодах
 }
 
@@ -1053,6 +1065,15 @@ def cmd_watch(a):
             interval = g.get("watch_interval", WATCH_INTERVAL)
             cap = cfg["speed_mbps"]
 
+            # Сутки закрылись: откладываем срез и обнуляем счётчики.
+            day_now = time.strftime("%Y-%m-%d")
+            if day_now != today:
+                digest_stash(today, daily)
+                daily = {}
+                save_daily(daily)
+                today = day_now
+            digest_due(cfg)
+
             cur = read_users()
             now_t = time.monotonic()
             dt = max(1.0, now_t - prev_t)
@@ -1270,15 +1291,14 @@ def tg_penalty(cfg, ip, mbps, minutes, reasons):
         print(f"telegram: {err}", flush=True)
 
 
-def tg_digest(cfg, day, snapshot):
-    """Сводка за прошедшие сутки. Уходит при смене даты."""
+def digest_text(cfg, day, snapshot, partial=False):
+    """Текст сводки. partial — сутки ещё не закончились."""
     tg = cfg["telegram"]
-    if not tg.get("enabled") or not tg.get("daily") or not snapshot:
-        return
     down = sum(v.get("down", 0) for v in snapshot.values())
     up = sum(v.get("up", 0) for v in snapshot.values())
     top = sorted(snapshot.items(), key=lambda x: -x[1].get("down", 0))[:5]
-    lines = [f"📊 <b>{node_label(tg)}</b> · {t('tg_digest')} {day}",
+    head = t("tg_digest_now") if partial else f"{t('tg_digest')} {day}"
+    lines = [f"📊 <b>{node_label(tg)}</b> · {head}",
              f"{t('tg_traffic')}: ↓ {fmt_bytes(down)} · ↑ {fmt_bytes(up)}",
              f"{t('tg_addresses')}: {len(snapshot)}"]
     if top:
@@ -1286,9 +1306,70 @@ def tg_digest(cfg, day, snapshot):
         lines.append(t("tg_top") + ":")
         for i, (ip, v) in enumerate(top, 1):
             lines.append(f"{i}. <code>{ip}</code> — {fmt_bytes(v.get('down', 0))}")
-    ok, err = tg_send("\n".join(lines), cfg)
-    if not ok:
-        print(f"telegram: {err}", flush=True)
+    return "\n".join(lines)
+
+
+def parse_hhmm(s, fallback=(9, 0)):
+    """'09:30' -> (9, 30). Кривое значение не должно ронять сторожа."""
+    try:
+        h, m = str(s).strip().split(":")
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+    except Exception:
+        pass
+    return fallback
+
+
+def digest_stash(day, snapshot):
+    """Закрываем сутки: откладываем срез до назначенного часа."""
+    if not snapshot:
+        return
+    tmp = DIGEST_FILE + ".tmp"
+    os.makedirs(ETC_DIR, exist_ok=True)
+    with open(tmp, "w") as f:
+        json.dump({"day": day, "ips": snapshot}, f)
+    os.replace(tmp, DIGEST_FILE)
+
+
+def digest_due(cfg):
+    """
+    Раз в цикл проверяем, не пора ли отправить отложенную сводку.
+
+    Отправляем не раньше назначенного времени следующих суток. Если нода
+    была выключена и момент пропущен больше чем на сутки — сводку роняем,
+    позавчерашние цифры никому не нужны.
+    """
+    try:
+        with open(DIGEST_FILE) as f:
+            d = json.load(f)
+    except Exception:
+        return
+    tg = cfg["telegram"]
+    day, ips = d.get("day", ""), d.get("ips", {})
+    h, m = parse_hhmm(tg.get("digest_at", "09:00"))
+    try:
+        base = time.mktime(time.strptime(day, "%Y-%m-%d"))
+    except Exception:
+        os.remove(DIGEST_FILE)
+        return
+    due = base + 86400 + h * 3600 + m * 60
+    now = time.time()
+    if now < max(due, d.get("retry_at", 0)):
+        return
+    if now <= due + 86400 and ips and tg.get("enabled") and tg.get("daily"):
+        ok, err = tg_send(digest_text(cfg, day, ips), cfg)
+        if not ok:
+            # связи нет — не долбим API каждые десять секунд
+            print(f"telegram: {err}", flush=True)
+            d["retry_at"] = now + 900
+            with open(DIGEST_FILE, "w") as f:
+                json.dump(d, f)
+            return
+    try:
+        os.remove(DIGEST_FILE)
+    except OSError:
+        pass
 
 
 def cmd_telegram(a):
@@ -1303,6 +1384,7 @@ def cmd_telegram(a):
         print(f"  {t('tg_chat')}    : {tg['chat_id'] or '—'}"
               f"{'  · ' + t('tg_thread') + ' ' + str(tg['thread_id']) if tg['thread_id'] else ''}")
         print(f"  {t('tg_proxy')}   : {tg['proxy'] or t('tg_direct')}")
+        print(f"  {t('tg_at')}   : {tg.get('digest_at', '09:00')}")
         print()
         return
     if a.action == "test":
@@ -1311,7 +1393,23 @@ def cmd_telegram(a):
         print(f"{C['grn']}✓ {t('tg_sent')}{C['r']}" if ok
               else f"{C['red']}✗ {err}{C['r']}")
         return
+    if a.action == "digest":
+        # Сводка по горячим следам: сторож пишет daily.json раз в минуту.
+        snap = load_daily()
+        if not snap:
+            print(f"{C['gry']}{t('tg_no_data')}{C['r']}")
+            return
+        ok, err = tg_send(digest_text(cfg, time.strftime("%Y-%m-%d"), snap,
+                                      partial=True), cfg, force=True)
+        print(f"{C['grn']}✓ {t('tg_sent')}{C['r']}" if ok
+              else f"{C['red']}✗ {err}{C['r']}")
+        return
     # set
+    if a.at is not None:
+        v = a.at.strip()
+        if parse_hhmm(v, None) is None:
+            die(t("tg_bad_time"))
+        tg["digest_at"] = "%02d:%02d" % parse_hhmm(v)
     if a.proxy is not None:
         p = a.proxy.strip()
         # MTProto-прокси из ссылки t.me/proxy умеет только протокол мессенджера.
@@ -1456,7 +1554,9 @@ def build_parser():
     rl.set_defaults(func=cmd_release)
 
     tg = sub.add_parser("telegram", help=t("h_telegram"))
-    tg.add_argument("action", choices=["show", "set", "test"], nargs="?", default="show")
+    tg.add_argument("action", choices=["show", "set", "test", "digest"],
+                    nargs="?", default="show")
+    tg.add_argument("--at", default=None, help=t("h_tg_at"))
     tg.add_argument("--token", default=None)
     tg.add_argument("--chat", default=None)
     tg.add_argument("--thread", default=None)

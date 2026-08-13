@@ -387,14 +387,15 @@ screen_guard() {
 
 # ── Telegram ──────────────────────────────────────────────────────────
 tg_read() {
-    python3 - <<'PY' 2>/dev/null || echo "0|—|—|—|—|1|1"
+    python3 - <<'PY' 2>/dev/null || echo "0|—|—|—|—|1|1|—|09:00"
 import json, os
 try:
     g = json.load(open("/etc/shaper/config.json")).get("telegram", {})
 except Exception:
     g = {}
 d = {"enabled": False, "token": "", "chat_id": "", "thread_id": "",
-     "node_name": "", "events": True, "daily": True, "proxy": ""}
+     "node_name": "", "events": True, "daily": True, "proxy": "",
+     "digest_at": "09:00"}
 d.update(g)
 print("|".join([
     "1" if d["enabled"] else "0",
@@ -405,6 +406,7 @@ print("|".join([
     "1" if d["events"] else "0",
     "1" if d["daily"] else "0",
     d["proxy"] or "—",
+    d.get("digest_at") or "09:00",
 ]))
 PY
 }
@@ -550,9 +552,9 @@ screen_tunnel() {
 }
 
 screen_telegram() {
-    local on name tok chat thread ev dg proxy v
+    local on name tok chat thread ev dg proxy at v
     while :; do
-        IFS='|' read -r on name tok chat thread ev dg proxy <<< "$(tg_read)"
+        IFS='|' read -r on name tok chat thread ev dg proxy at <<< "$(tg_read)"
         title "${T[tg_title]}"
         echo -e "  ${D}${T[tg_h1]}${N}"
         echo -e "  ${D}${T[tg_h2]}${N}"
@@ -583,8 +585,10 @@ screen_telegram() {
         else
             echo -e "  [8] ${T[tg_dg]}: ${Y}${T[tg_off]}${N} ${D}${T[tg_press]}${N}"
         fi
-        echo "  [9] ${T[tg_test]}"
-        echo -e " [10] 🔌 ${T[tn_menu]}"
+        echo -e "  [9] ${T[tg_set_at]}: ${B}${at}${N}"
+        echo " [10] ${T[tg_send_now]}"
+        echo " [11] ${T[tg_test]}"
+        echo -e " [12] 🔌 ${T[tn_menu]}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -607,8 +611,12 @@ screen_telegram() {
                "$CTL" telegram set --proxy "$v" --quiet ;;
             7) "$CTL" telegram set --events "$([[ "$ev" == 1 ]] && echo off || echo on)" --quiet ;;
             8) "$CTL" telegram set --daily "$([[ "$dg" == 1 ]] && echo off || echo on)" --quiet ;;
-            9) echo; "$CTL" telegram test; pause ;;
-            10) screen_tunnel ;;
+            9) echo -e "  ${D}${T[tg_hint_at]}${N}"
+               v="$(ask "${T[tg_set_at]}" "$at")"
+               [[ -n "$v" ]] && { "$CTL" telegram set --at "$v" --quiet || pause; } ;;
+            10) echo; "$CTL" telegram digest; pause ;;
+            11) echo; "$CTL" telegram test; pause ;;
+            12) screen_tunnel ;;
             0|"") return ;;
         esac
     done
