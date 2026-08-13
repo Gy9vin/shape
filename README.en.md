@@ -1,0 +1,634 @@
+<p align="center">
+  <img src="assets/banner.png" alt="Shape — per-IP speed limiter" width="820">
+</p>
+
+<p align="center">
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.0-8ECA43?style=flat-square" alt="version"></a>
+  <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
+  <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
+  <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
+</p>
+
+<p align="center">
+  <a href="README.md">Русский</a> · <b>English</b>
+</p>
+
+# Shape v3.0
+
+Per-IP speed limiter for VPN nodes. eBPF + EDT.
+
+The interface speaks Russian and English — the language is asked on first run
+and can be changed later: Service → 🌐 Язык / Language.
+
+One setting: **a port and a speed in Mbit/s**. Every IP address gets its own
+independent limit in both directions.
+
+**The limit applies to an IP address, not to an account.** This matters: a whole
+family behind one home router shares a single address and therefore a single
+limit. The other way round, one person on a phone and a laptop on different
+networks gets two independent limits. Your panel knows about accounts, the
+shaper does not — it works at the network layer and only sees addresses.
+
+Version history lives in [CHANGELOG.md](CHANGELOG.md).
+
+There is an optional [Node API](#node-api) for external systems — installed
+separately, and Shape runs perfectly well without it.
+
+Zero external dependencies: the system Python plus `clang`, `bpftool` and
+`iproute2`. Runs on a single-core VPS with 512 MB of RAM.
+
+---
+
+## Installation
+
+```bash
+apt update && apt install -y git && \
+git clone https://github.com/SkunkBG/shape.git /tmp/shape && \
+bash /tmp/shape/install.sh && shaper
+```
+
+With the optional API:
+
+```bash
+bash /tmp/shape/install.sh --with-api
+```
+
+### Requirements
+
+| | |
+|---|---|
+| Linux kernel | 5.4+ |
+| CPU | one core is enough |
+| RAM | 512 MB is enough |
+| Packages | `clang`, `bpftool`, `iproute2`, `python3` |
+
+The installer pulls dependencies itself on apt/dnf/yum. On Debian 11/12 and
+Ubuntu 22.04/24.04 everything is in the standard repositories.
+
+### What it costs
+
+Packet processing happens in the kernel and takes a few nanoseconds per packet —
+invisible on the CPU graph even at gigabit speeds.
+
+The noticeable part is the watchdog. Every 10 seconds it dumps two BPF maps and
+parses JSON. The cost is driven by map size, not by the number of clients: LRU
+maps fill up to capacity and stay full.
+
+| Map entries | JSON | Parse per cycle |
+|---|---|---|
+| 8192 (default) | 1.3 MB | ~30 ms |
+| 65536 | 10.6 MB | ~300 ms |
+
+Eight thousand entries is a twentyfold margin: a node with 150 clients sees
+300–500 addresses a day even accounting for mobile IPs rotating.
+
+All in all the watchdog eats under one percent of a single-core CPU, plus about
+25 MB for Python and 2 MB for the BPF maps.
+
+**Want it even lighter?** Raise the polling interval in the auto-limiter
+settings to 20–30 seconds. Detection quality barely changes, because thresholds
+are counted in samples rather than in seconds.
+
+## Updating
+
+`shaper` → **Service** → **Update from GitHub**. The menu shows the installed
+and the available version, the latest changes, and asks for confirmation.
+
+Settings, whitelist and the limit are preserved. Before an update the current
+version is copied to `/opt/shaper.bak`; if the new one fails to build, the
+installer rolls back to it automatically.
+
+The same from the command line:
+
+```bash
+rm -rf /tmp/shape && git clone https://github.com/SkunkBG/shape.git /tmp/shape
+bash /tmp/shape/install.sh
+```
+
+Removal: `bash install.sh --uninstall`.
+Removing only the API: `bash install.sh --uninstall-api`.
+
+---
+
+## Using it
+
+```
+shaper
+```
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="Main screen" width="760">
+</p>
+
+The main screen shows what actually matters: whether the shaper is running,
+whether autostart survives a reboot, the current speed, the ports, and the state
+of the auto-limiter.
+
+### Setting a limit
+
+Menu → **🎚 Speed limit**. Pick a ready value or type your own, then confirm the
+port. The menu lists the ports processes are actually listening on, so you don't
+have to guess.
+
+### Monitor
+
+Menu → **📡 Monitor**. Live per-IP speeds, a one-minute average and how long the
+address has been holding the load:
+
+```
+  IP                        now   upload   1-min avg  holding   load
+  ────────────────────────────────────────────────────────────────────
+  185.12.34.56             14.9      1.2        14.6    12 min   ██████████████
+  91.79.27.87               9.8      0.1         6.2     2 min   █████████·····
+```
+
+Yellow means the address has been loading the channel for over 30 seconds, red
+means it is pinned at the limit. That is usually enough to spot a downloader
+without any auto-limiting at all.
+
+---
+
+## Auto-limiting heavy users
+
+A global limit does not stop torrents: a person simply holds their 10 Mbit/s
+around the clock. The watchdog catches exactly that.
+
+Every 10 seconds it samples each IP and decides on a combination of signals
+rather than a single threshold. Everything is configurable: 🚦 Auto-limit.
+
+### The mandatory condition
+
+**Traffic in both directions at once** — at least half of the limit down, at
+least 15% of it up, for ten minutes in a row. Without this no penalty is issued
+at all, no matter how heavy the traffic is.
+
+The condition rests on a simple observation: a torrent is about the only
+everyday activity that pulls data down *and* up for hours. Streaming is silent
+upward, cloud backup is silent downward, a plain download is silent upward —
+none of them pass the check, so none of them are ever punished.
+
+The thresholds differ on purpose. A torrent takes **all** the available
+download, while a video call holds a modest 2–3 Mbit/s. The upload threshold is
+low because mobile carriers give only 3–20 Mbit/s up, and with a 10 Mbit limit
+seeding uses just a third of the channel.
+
+### Points
+
+| Signal | Points |
+|---|---|
+| Large packets going up (>600 B) | +2 |
+| Pinned at the download ceiling | +1 |
+| More than 4 hours of activity per day | +2 |
+| More than 2 GB uploaded per day | +1 |
+
+A penalty is issued at three points.
+
+The key signal is the **average upload packet size**, and it is the only one
+independent of channel speed. A client that only consumes sends bare ACKs of
+40–80 bytes upward. A client that seeds sends data of 1200–1400. That twentyfold
+difference is the same at 3 Mbit and at 20.
+
+### Verified by simulation
+
+| Scenario | Result |
+|---|---|
+| YouTube 1080p on a phone | clean |
+| YouTube 4K on a TV | clean |
+| Three-hour video conference | clean |
+| Cloud backup | clean |
+| Downloading a 5 GB ISO | clean |
+| Online gaming | clean |
+| Torrent at 3, 5, 10, 20 Mbit uplink | limited after 10 min |
+| Torrent with pauses | limited after 23 min |
+
+### Volume thresholds
+
+Two-way load catches a torrent that seeds. A client with seeding disabled only
+sends block requests and never passes the mandatory condition — and that is
+honest: **a torrent with seeding off is indistinguishable from an ordinary heavy
+download at the network layer.** No signal can give it away, because there is
+nothing to give away.
+
+Volume gives it away. Two independent thresholds, both bypassing the mandatory
+condition.
+
+**Per hour** is the fastest signal. At a 10 Mbit/s limit an hour at full speed
+yields exactly 4.5 GB, so a threshold around three means "held the channel for
+two thirds of an hour". A download hits it in 40 minutes.
+
+**Per day** is insurance against someone spreading the load thin.
+
+Both are set in the menu, `0` disables them. By default the hourly one is off
+and the daily one is 50 GB.
+
+### Why the hour matters more than the day
+
+A daily threshold punishes duration, an hourly one punishes intensity. Ten hours
+of YouTube at 1080p is 18 GB: any daily limit below twenty punishes a person who
+never once exceeded a reasonable speed.
+
+The hourly threshold does not have this problem. The 1080p bitrate is 1.8 GB per
+hour — half of a three-gigabyte threshold — so you can watch all day.
+
+That is why the hourly rule should be the main one and the daily one should be
+kept high, purely as a backstop.
+
+### Presets
+
+Menu → Auto-limit → **[12] Ready-made presets**. They set every number at once,
+after which any of them can still be tuned by hand.
+
+**Phone-only node** — 3 GB per hour, 25 GB per day, penalty 1 Mbit/s for 4
+hours. Modelled minute by minute over a full day:
+
+| Scenario | Per day | Penalties |
+|---|---|---|
+| YouTube 1080p, 10 hours straight | 18.0 GB | 0 |
+| YouTube 720p, all day | 16.9 GB | 0 |
+| TikTok all day | 13.5 GB | 0 |
+| YouTube 4K for two hours | 7.2 GB | 1 |
+| Game update, 3 hours | 6.5 GB | 1 |
+| Downloading around the clock | 25.7 GB | 6 |
+
+Without limits the last one would have taken 108 GB in the same day.
+
+**Universal** — 50 GB per day, hourly threshold off. For nodes with generous
+traffic.
+
+**Torrents only** — volume thresholds off, only two-way load is used. For
+unmetered channels.
+
+### Reading the verdict
+
+The limited list shows exactly which signals caught the person:
+
+```
+  IP                         at    remaining   why
+  ────────────────────────────────────────────────────────────
+  91.79.27.87             20:48       11.1 h   downloaded gigabytes within an hour
+  185.12.34.56            20:33       46 min   sends real data, not just ACKs,
+                                               holds the download ceiling
+```
+
+Newest first, with the time the penalty was issued in the "at" column.
+
+This helps you tune the thresholds and answer clients with specifics. Limited
+addresses live in their own menu entry with a counter; you can release one or
+all of them. Penalties survive a service restart and a server reboot.
+
+---
+
+## What it can and cannot do
+
+**It cannot** tell a torrent from anything else. Inside VLESS/Reality on port
+443 all traffic is a single encrypted TLS stream: there is no BitTorrent
+handshake and no tracker ports to see. No L3/L4 tool can see that, by design.
+
+**It can** do exactly what is needed: hold an honest speed ceiling per user so
+that one downloader does not take the channel from everybody else. Whether they
+are pulling a Windows image or watching YouTube makes no difference — the
+ceiling is the same.
+
+---
+
+## How it works
+
+```
+Packet on the interface
+   │
+   ├─ limit set?          no  ──► pass
+   ├─ IP whitelisted?     yes ──► pass
+   ├─ port in the list?   no  ──► pass
+   │
+   ├─ Download (egress) : EDT — the packet is given a departure time and
+   │                      fq holds it back. Nothing is dropped.
+   └─ Upload  (ingress) : Token Bucket — excess packets are dropped,
+                          TCP shrinks its window by itself.
+```
+
+EDT (Earliest Departure Time) instead of classic queues means the speed is
+shaped smoothly: packets are not thrown away, they are spread evenly over time.
+For video and calls that is noticeably nicer than dropping.
+
+The port is matched strictly by direction: on download only `sport` is compared,
+on upload only `dport`. Otherwise a rule for "443" would also catch the node's
+own outbound traffic to other people's sites, where `dport=443`.
+
+Port `0` means "all ports". That includes SSH and the node's own service
+traffic, so don't set it without a reason.
+
+State maps are LRU: once they hit capacity the kernel evicts the least recently
+used addresses on its own. No background cleanup needed.
+
+---
+
+## Units
+
+Speed is in **Mbit/s** everywhere, the way providers write it. Inside eBPF it is
+stored as bytes per second, which the EDT arithmetic needs. The conversion is
+`bytes/s = Mbit/s × 125000`, decimal megabits.
+
+For reference: a call is 4 Mbit/s, YouTube 1080p is 10, 4K is 25.
+
+The limit applies to each IP address separately. Fifty people at 15 Mbit/s is up
+to 750 Mbit/s on the channel if they all download at once.
+
+---
+
+## CLI
+
+```bash
+shaperctl.py show                          # current settings
+shaperctl.py apply --ports 443 --speed 15  # set the limit
+shaperctl.py apply --speed 0               # remove the limit
+shaperctl.py apply --ports 443,8443        # change ports only
+
+shaperctl.py monitor                       # live load monitor
+shaperctl.py monitor --interval 5          # refresh less often
+
+shaperctl.py status                        # accumulated traffic per IP
+shaperctl.py status --live                 # + current speed over 3 s
+shaperctl.py status --full                 # all IPs
+shaperctl.py status --json                 # for your own scripts
+
+shaperctl.py whitelist add 203.0.113.10
+shaperctl.py whitelist list
+
+shaperctl.py guard --enable --score 3 --both-min 10
+shaperctl.py guard --both-dl 50 --both-ul 15 --packet 600
+shaperctl.py guard --hours 4 --upload-gb 2 --penalty-mbps 1 --penalty-min 60
+shaperctl.py guard --disable
+shaperctl.py limited                       # who is limited right now
+shaperctl.py release 185.12.34.56          # release one
+shaperctl.py release --all                 # release everybody
+```
+
+The `status --json` format:
+
+```json
+{
+  "ip": "185.12.34.56",
+  "downloaded_bytes": 5368709120,
+  "uploaded_bytes": 419430400,
+  "download_mbps": 14.8,
+  "upload_mbps": 1.2,
+  "idle_sec": 0.4
+}
+```
+
+---
+
+## Checking it
+
+```bash
+shaper                              # → Service → Check the environment
+tc filter show dev ens3 egress      # the bpf filter should be visible
+shaperctl.py status --live          # real per-IP speeds
+```
+
+Empty statistics while clients are online means the limit sits on the wrong
+port. Look at what processes are actually listening: `ss -tulnp`.
+
+---
+
+## Telegram notifications
+
+Off by default. Configured in the menu, entry **[5] Telegram**.
+
+They send **events, not reports**. An address gets limited — one message with
+the reason. Once a day — a digest for the day that just ended. That comes out to
+5–20 messages a day instead of a stream people stop reading after a week.
+
+```
+🚦 RU Moscow
+Limited 185.12.34.56 → 1 Mbit/s for 4.0 h
+downloaded gigabytes within an hour
+```
+
+```
+📊 RU Moscow · digest for 2026-08-11
+Traffic: ↓ 352.1 GB · ↑ 31.4 GB
+Addresses: 137
+
+Top downloaders:
+1. 185.12.34.56 — 24.8 GB
+2. 91.234.12.7 — 19.2 GB
+```
+
+**Digest time** is set in the menu, entry `[9]`, `09:00` node local time by
+default. The digest always covers the previous calendar day: at midnight a
+snapshot of the counters is stashed in `/etc/shaper/digest.json` and waits for
+the appointed hour. If there was no connectivity then, it retries every fifteen
+minutes for a day and is dropped afterwards — the day-before-yesterday's numbers
+are of no use to anyone.
+
+**A digest can be requested manually** with entry `[10]`: it sends the numbers
+for the current, not yet finished day. It works even with notifications off, as
+long as a token and a chat are configured.
+
+**The node label** is set by hand — for example `RU Moscow` or `DE Frankfurt`.
+All nodes can write into one topic: the label shows which one fired.
+
+**Forum group topics** are supported through `message_thread_id`. The topic ID
+is the last number in its link. Leave the field empty if you have no topics.
+
+**Proxy.** On Russian nodes `api.telegram.org` is blocked by SNI: TCP goes
+through, TLS is cut. Set `socks5://user:pass@host:1080` — SOCKS5 is implemented
+inside the script, no `PySocks` needed. With `socks5://` the hostname is
+resolved by the proxy, so poisoned DNS stops being a problem too.
+
+**An MTProto proxy will not work.** Links like `t.me/proxy?server=…&secret=…`
+only work for the messenger itself: that is the MTProto protocol, while the Bot
+API is plain HTTPS. The menu rejects such a string with an explanation.
+
+### The SSH tunnel wizard
+
+Menu → Telegram → **[12] SSH tunnel for the proxy**. Asks for the address of a
+foreign node of yours, the SSH port, the user and the local SOCKS port, then
+does everything itself: generates an ed25519 key, shows the server's host key
+fingerprint for you to confirm, installs `autossh`, writes a systemd unit with
+automatic restart, brings the tunnel up and verifies it with a real request to
+the Bot API. On success it writes `socks5://127.0.0.1:1080` into the
+notification settings by itself.
+
+The tunnel costs the foreign node almost nothing: a couple of kilobytes a day.
+
+---
+
+## Node API
+
+An optional local HTTP interface: an external system can control this node's
+shaper through it. Installed separately, runs separately, removed separately.
+**Shape is completely self-sufficient without it** — stop or delete the API and
+the shaper keeps limiting exactly as before.
+
+```
+central system  →  Shape API  →  Shape  →  BPF
+```
+
+The API has no limiting logic of its own: it calls the same `shaperctl.py`
+functions the menu does. So "limited via the menu" and "limited via the API" are
+literally the same code and cannot drift apart.
+
+### Installing
+
+```bash
+sudo bash install.sh --with-api      # Shape together with the API
+sudo bash install.sh                 # Shape only, as before
+```
+
+API files are placed by any installation, but the service is only enabled with
+the flag. You can enable it later from the menu: **Service → 🔗 Node API**.
+Remove it without touching Shape:
+
+```bash
+sudo bash install.sh --uninstall-api
+```
+
+### Network
+
+`127.0.0.1:8765` by default. Nothing is exposed to the public internet and
+nothing is added to the firewall. To hand the API to a private network — a
+WireGuard one, for example — set the listen address and the allowed networks in
+the menu:
+
+```
+Listen address    : 10.100.0.7
+Allowed addresses : 10.100.0.0/24
+```
+
+The port can be the same on every node: these are different machines, there is
+nothing to conflict. A node knows nothing about other nodes — no shared state,
+no database, no cluster identifiers. Addresses and tokens are known only to the
+central system.
+
+### Access
+
+Two tokens, both generated on the node itself at first start and stored in
+`/etc/shaper/api.json` with mode 600:
+
+| Token | What it allows |
+|---|---|
+| `read` | status, node, list of limits, statistics, events, BPF state |
+| `write` | all of the above plus creating and removing limits, changing settings |
+
+Show and reissue them from the menu. There are no tokens in the repository and
+there cannot be.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/api/v1/status
+```
+
+### Endpoints
+
+All under `/api/v1/`. The OpenAPI schema is at `/api/v1/openapi.json`, the
+documentation page at `/api/v1/docs`.
+
+| Method | Path | Scope | What it does |
+|---|---|---|---|
+| GET | `/health` | — | is the service alive |
+| GET | `/status` | read | state of Shape, engine, auto-limiter, versions, uptime |
+| GET | `/node` | read | hostname, OS, kernel, architecture, interface, IPv4/IPv6 |
+| GET | `/limits` | read | active limits |
+| GET | `/limits/{ip}` | read | the limit for one address |
+| POST | `/limits` | write | create a limit |
+| DELETE | `/limits/{ip}` | write | remove a limit |
+| POST | `/limits/{ip}/temporary` | write | temporary limit for an address |
+| DELETE | `/limits/{ip}/temporary` | write | remove a temporary limit |
+| GET | `/stats` | read | traffic, speeds, active and limited address counts |
+| GET | `/events` | read | event log with filters and a cursor |
+| GET | `/config` | read | the safe part of the settings |
+| PATCH | `/config` | write | change the settings that are allowed to change |
+| GET | `/bpf/status` | read | whether eBPF is loaded, maps and entry counts |
+
+Creating a limit:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/v1/limits \
+     -H "Authorization: Bearer $WRITE_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"ip":"203.0.113.10","download_mbps":1,"duration":43200,"reason":"torrent"}'
+```
+
+The kernel holds **one** speed per address and applies it in both directions.
+So `upload_mbps` may be omitted, and if given it must equal `download_mbps`,
+otherwise you get a 422 with an explanation. That is more honest than silently
+applying one of the two values.
+
+Errors come back structured, without tracebacks:
+
+```json
+{"error": {"code": "INVALID_IP", "message": "ip: «1.2.3.4;id» is not an IP address",
+           "request_id": "9f2c1a4b7e0d5c31"}}
+```
+
+The `request_id` is in every response and in every line of the node's log, which
+makes it easy to tie an external system's request to what happened on the node.
+
+### What the API deliberately cannot do
+
+Run commands, change paths or executables, load BPF programs, invoke `bpftool`
+arbitrarily, read or write arbitrary files, or hand out the Telegram bot token
+or the API tokens themselves. The list of writable settings is an allowlist;
+everything else is rejected with a 422.
+
+### Event log
+
+`/var/lib/shape/events.jsonl`, one JSON line per event, rotated by size. The
+engine, the watchdog, the CLI and the API all write there — one history for
+everyone. No separate database for this, and none needed.
+
+Types: `limit_applied`, `limit_released`, `limit_expired`, `guard_triggered`,
+`config_changed`, `engine_started`, `engine_stopped`, `api_action`, `error`.
+
+---
+
+## Limitations
+
+Shaping applies to the interface the engine is attached to. On a node with
+several uplinks pick the one clients actually arrive through — the menu shows
+which one was detected.
+
+IPv4 and IPv6 are both handled. IPv4 fragments and IPv6 extension headers are
+recognised explicitly rather than parsed as if they carried an L4 header.
+
+Traffic that does not match the port rule is not counted at all — that is the
+point of the rule, but it also means the statistics only show what passes
+through the shaper.
+
+---
+
+## Files
+
+```
+/opt/shaper/               the code
+/opt/shaper/api/           the API (optional)
+/etc/shaper/config.json    limit, ports, auto-limiter, notifications (600)
+/etc/shaper/shaper.conf    interface and interface-level settings
+/etc/shaper/whitelist.txt  the whitelist
+/etc/shaper/penalties.json who is limited, until when and why
+/etc/shaper/daily.json     daily activity and volume counters
+/etc/shaper/digest.json    the stashed digest waiting for its hour
+/etc/shaper/api.json       API settings and tokens (600)
+/var/lib/shape/events.jsonl the event log
+```
+
+`/etc/shaper` is root-only (750) and `config.json` is 600: it holds the bot
+token.
+
+---
+
+## Support the project
+
+Shape is free and will stay that way. If it saved your channel or your nerves,
+you can buy a coffee: **https://web.tribute.tg/d/OHz**
+
+This changes nothing: there will be no donor-only features and no restrictions
+for anyone else.
+
+---
+
+## License
+
+GPL-2.0. The eBPF part requires a GPL-compatible license — otherwise the kernel
+refuses to load the program.

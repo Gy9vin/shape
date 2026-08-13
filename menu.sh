@@ -8,6 +8,7 @@ CONF="$ETC_DIR/shaper.conf"
 CTL="$APP_DIR/shaperctl.py"
 ENGINE="$APP_DIR/engine.sh"
 REPO_URL="https://github.com/SkunkBG/shape.git"
+DONATE_URL="https://web.tribute.tg/d/OHz"
 VERSION="$(cat "$APP_DIR/VERSION" 2>/dev/null || echo '?')"
 
 B='\033[1m'; N='\033[0m'; D='\033[90m'
@@ -818,6 +819,209 @@ screen_update() {
     exec bash "$tmp/install.sh"
 }
 
+# ── API ───────────────────────────────────────────────────────────────
+# Экран управления необязательным сервисом shape-api. Сам шейпер про API
+# ничего не знает: остановка или удаление API его не касаются.
+API_UNIT="/etc/systemd/system/shape-api.service"
+
+api_read() {
+    python3 - <<'PYAPI' 2>/dev/null || echo "127.0.0.1|8765|0|—"
+import json
+try:
+    c = json.load(open("/etc/shaper/api.json"))
+except Exception:
+    c = {}
+allowed = c.get("allowed_ips") or []
+print("|".join([
+    str(c.get("bind_address", "127.0.0.1")),
+    str(c.get("port", 8765)),
+    "1" if (c.get("tokens") or {}).get("write") else "0",
+    ", ".join(map(str, allowed)) if allowed else "—",
+]))
+PYAPI
+}
+
+screen_api() {
+    local bind port has_tok allowed v
+    while :; do
+        IFS='|' read -r bind port has_tok allowed <<< "$(api_read)"
+        title "${T[api_title]}"
+        echo -e "  ${D}${T[api_h1]}${N}"
+        echo -e "  ${D}${T[api_h2]}${N}"
+        echo
+        if [[ -f "$API_UNIT" ]]; then
+            if systemctl is-active shape-api >/dev/null 2>&1; then
+                echo -e "  ${T[api_state]} : ${G}${T[dr_running]}${N}"
+            else
+                echo -e "  ${T[api_state]} : ${R}${T[dr_stopped]}${N}"
+            fi
+            echo -e "  ${T[api_addr]} : ${B}${bind}:${port}${N}"
+            echo -e "  ${T[api_allow]} : ${allowed}"
+            echo -e "  ${T[api_docs]} : ${D}http://${bind}:${port}/api/v1/docs${N}"
+            hr
+            echo "  [1] ${T[api_tokens]}"
+            echo "  [2] ${T[api_rotate]}"
+            echo "  [3] ${T[api_bind]}"
+            echo "  [4] ${T[api_port]}"
+            echo "  [5] ${T[api_allow_set]}"
+            echo "  [6] ${T[sv_restart]}"
+            echo "  [7] ${T[sv_logs]}"
+            echo "  [8] ${T[api_test]}"
+            echo "  [9] ${T[api_remove]}"
+        else
+            echo -e "  ${T[api_state]} : ${D}${T[api_none]}${N}"
+            hr
+            echo "  [1] ${T[api_install]}"
+        fi
+        echo "  [0] ← ${T[m0]}"
+        echo
+        if [[ ! -f "$API_UNIT" ]]; then
+            case "$(ask "${T[choice]}")" in
+                1) api_install ;;
+                0|"") return ;;
+            esac
+            continue
+        fi
+        case "$(ask "${T[choice]}")" in
+            1) echo; "$APP_DIR/api/server.py" --print-tokens | sed 's/^/  /'
+               echo -e "\n  ${D}${T[api_tok_hint]}${N}"; pause ;;
+            2) read -rp "  ${T[api_rotate_q]} [y/N]: " v
+               [[ "$v" =~ ^[YyДд] ]] && { api_rotate; pause; } ;;
+            3) echo -e "  ${D}${T[api_bind_hint]}${N}"
+               v="$(ask "${T[api_bind]}" "$bind")"
+               api_set bind_address "$v"; pause ;;
+            4) v="$(ask "${T[api_port]}" "$port")"
+               api_set port "$v"; pause ;;
+            5) echo -e "  ${D}${T[api_allow_hint]}${N}"
+               v="$(ask "${T[api_allow_set]}")"
+               api_set allowed_ips "$v"; pause ;;
+            6) systemctl restart shape-api; sleep 1 ;;
+            7) title "${T[sv_logs]}"
+               journalctl -u shape-api -n 40 --no-pager | sed 's/^/  /'; pause ;;
+            8) echo; api_test; pause ;;
+            9) read -rp "  ${T[api_remove_q]} [y/N]: " v
+               if [[ "$v" =~ ^[YyДд] ]]; then
+                   systemctl disable --now shape-api >/dev/null 2>&1
+                   rm -f "$API_UNIT"; rm -rf "$APP_DIR/api"
+                   systemctl daemon-reload
+                   echo -e "  ${G}✓ ${T[api_removed]}${N}"; sleep 2; return
+               fi ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+api_install() {
+    if [[ ! -f "$APP_DIR/api/server.py" ]]; then
+        echo -e "  ${Y}${T[api_need_update]}${N}"; pause; return
+    fi
+    if [[ -f "$APP_DIR/api/shape-api.service" ]]; then
+        install -m 644 "$APP_DIR/api/shape-api.service" "$API_UNIT"
+    else
+        echo -e "  ${Y}${T[api_need_update]}${N}"; pause; return
+    fi
+    systemctl daemon-reload
+    systemctl enable --now shape-api >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active shape-api >/dev/null 2>&1; then
+        echo -e "  ${G}✓ ${T[api_installed]}${N}"
+    else
+        echo -e "  ${R}✗ ${T[api_failed]}${N}"
+    fi
+    pause
+}
+
+# Значения проверяем здесь же: они попадают в конфиг сервиса, который слушает
+# сеть. Адрес и порт — строго по формату, список сетей — через ipaddress,
+# а не «как ввели».
+api_set() {
+    python3 - "$1" "$2" <<'PYAPI'
+import ipaddress, json, os, sys
+key, raw = sys.argv[1], sys.argv[2].strip()
+path = "/etc/shaper/api.json"
+try:
+    cfg = json.load(open(path))
+except Exception:
+    cfg = {}
+if key == "bind_address":
+    try:
+        ipaddress.ip_address(raw)
+    except ValueError:
+        print("  \033[31m✗ это не IP-адрес\033[0m"); sys.exit(1)
+    cfg[key] = raw
+elif key == "port":
+    if not raw.isdigit() or not 1 <= int(raw) <= 65535:
+        print("  \033[31m✗ порт вне диапазона 1..65535\033[0m"); sys.exit(1)
+    cfg[key] = int(raw)
+elif key == "allowed_ips":
+    nets = []
+    for part in raw.replace(",", " ").split():
+        try:
+            nets.append(str(ipaddress.ip_network(part, strict=False)))
+        except ValueError:
+            print(f"  \033[31m✗ «{part[:40]}» — не адрес и не сеть\033[0m")
+            sys.exit(1)
+    cfg[key] = nets
+else:
+    sys.exit(1)
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
+print("  \033[32m✓ сохранено\033[0m")
+PYAPI
+    systemctl restart shape-api 2>/dev/null
+    sleep 1
+}
+
+api_rotate() {
+    python3 - <<'PYAPI'
+import json, os, secrets
+path = "/etc/shaper/api.json"
+try:
+    cfg = json.load(open(path))
+except Exception:
+    cfg = {}
+cfg["tokens"] = {"read": secrets.token_urlsafe(32),
+                 "write": secrets.token_urlsafe(32)}
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.replace(tmp, path)
+print("  \033[32m✓ токены перевыпущены, прежние больше не действуют\033[0m")
+PYAPI
+    systemctl restart shape-api 2>/dev/null
+}
+
+api_test() {
+    local bind port tok code
+    IFS='|' read -r bind port _ _ <<< "$(api_read)"
+    command -v curl >/dev/null || { echo -e "  ${Y}curl не установлен${N}"; return; }
+    code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' \
+            "http://${bind}:${port}/api/v1/health" 2>/dev/null)"
+    if [[ "$code" == "200" ]]; then
+        echo -e "  ${G}✓ /api/v1/health → 200${N}"
+    else
+        echo -e "  ${R}✗ /api/v1/health → ${code:-нет ответа}${N}"; return
+    fi
+    tok="$(python3 -c "
+import json
+try: print(json.load(open('/etc/shaper/api.json'))['tokens']['read'])
+except Exception: print('')" 2>/dev/null)"
+    code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' \
+            -H "Authorization: Bearer $tok" \
+            "http://${bind}:${port}/api/v1/status" 2>/dev/null)"
+    [[ "$code" == "200" ]] && echo -e "  ${G}✓ /api/v1/status → 200${N}" \
+                           || echo -e "  ${R}✗ /api/v1/status → ${code}${N}"
+    code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' \
+            -H "Authorization: Bearer wrong" \
+            "http://${bind}:${port}/api/v1/status" 2>/dev/null)"
+    [[ "$code" == "401" ]] && echo -e "  ${G}✓ ${T[api_t_bad]} → 401${N}" \
+                           || echo -e "  ${R}✗ ${T[api_t_bad]} → ${code}${N}"
+}
+
 # ── Сервис ────────────────────────────────────────────────────────────
 doctor() {
     local k ifc
@@ -859,6 +1063,15 @@ screen_service() {
         echo -e "  [6] 🩺 ${T[sv_doctor]}"
         echo -e "  [7] ⬆️  ${T[sv_update]} ${D}(${T[sv_version]} $(installed_version))${N}"
         echo -e "  [8] 🌐 ${T[sv_lang]}"
+        if [[ -f "$API_UNIT" ]]; then
+            if systemctl is-active shape-api >/dev/null 2>&1; then
+                echo -e "  [9] 🔗 ${T[api_menu]} ${G}${T[tg_on]}${N}"
+            else
+                echo -e "  [9] 🔗 ${T[api_menu]} ${R}${T[dr_stopped]}${N}"
+            fi
+        else
+            echo -e "  [9] 🔗 ${T[api_menu]} ${D}${T[api_none]}${N}"
+        fi
         echo -e "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -880,6 +1093,7 @@ screen_service() {
             6) title "${T[dr_title]}"; doctor; pause ;;
             7) screen_update ;;
             8) screen_lang ;;
+            9) screen_api ;;
             0|"") return ;;
         esac
     done
@@ -912,7 +1126,9 @@ while :; do
     echo -e "  [8] 🔧 ${T[m8]} ${D}${T[m8d]}${N}"
     echo -e "  [0] 🚪 ${T[m0]}"
     hr
-    echo -e "  ☕ ${D}${T[credit]}${N}"
+    # Ссылка живёт только здесь, в подвале главного экрана: на рабочих
+    # экранах ей не место — они и так плотные.
+    echo -e "  ☕ ${D}${T[credit]} · ${T[donate]}: ${DONATE_URL}${N}"
     echo
     case "$(ask "${T[choice]}")" in
         1) screen_limit ;;

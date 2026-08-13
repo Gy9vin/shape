@@ -138,6 +138,9 @@ load() {
     [[ -f "$ETC_DIR/whitelist.txt" ]] && "$APP_DIR/shaperctl.py" whitelist sync | sed 's/^/  /'
 
     echo "IFACE=\"$IFACE\"" > "$ETC_DIR/.active_iface"
+    # Событие в общий журнал: его читает API, а в будущем — центральная система.
+    "$APP_DIR/shaperctl.py" event engine_started --source engine \
+        --message "iface=$IFACE" 2>/dev/null || true
     ok "шейпер запущен"
 }
 
@@ -158,6 +161,7 @@ unload_quiet() {
 
 unload() {
     unload_quiet
+    "$APP_DIR/shaperctl.py" event engine_stopped --source engine 2>/dev/null || true
     ok "шейпер выгружен (qdisc fq оставлен — он безвреден)"
 }
 

@@ -7,6 +7,8 @@ shaperctl — управление eBPF-шейпером через pinned BPF-�
 """
 
 import argparse
+import contextlib
+import fcntl
 import html
 import http.client
 import io
@@ -34,6 +36,11 @@ WL_FILE     = os.path.join(ETC_DIR, "whitelist.txt")
 PEN_FILE    = os.path.join(ETC_DIR, "penalties.json")
 DAILY_FILE  = os.path.join(ETC_DIR, "daily.json")
 DIGEST_FILE = os.path.join(ETC_DIR, "digest.json")
+# Изменчивое состояние — отдельно от настроек: журнал событий пухнет,
+# а /etc принято держать маленьким и бэкапить целиком.
+VAR_DIR     = "/var/lib/shape"
+EVENT_FILE  = os.path.join(VAR_DIR, "events.jsonl")
+EVENT_SEQ   = os.path.join(VAR_DIR, "events.seq")
 
 NS = 1_000_000_000
 # Мбит/с -> байт/с. Мегабит десятичный: 1 Мбит = 1 000 000 бит = 125 000 байт.
@@ -150,6 +157,7 @@ MSG = {
         "h_full": "показать все IP",
         "h_json": "вывод в JSON",
         "h_whitelist": "белый список IP",
+        "h_event": "записать событие в журнал",
         "no_engine": "движок не запущен — карты не найдены в {d}\n  запусти: systemctl start shaper",
         "cmd_fail": "команда не выполнилась: {c}\n  {e}",
         "port_nan": "порт «{p}» не число",
@@ -276,6 +284,7 @@ MSG = {
         "h_full": "show all IPs",
         "h_json": "JSON output",
         "h_whitelist": "IP whitelist",
+        "h_event": "write a line into the event log",
         "no_engine": "engine is not running — no maps in {d}\n  start it: systemctl start shaper",
         "cmd_fail": "command failed: {c}\n  {e}",
         "port_nan": "port \u00ab{p}\u00bb is not a number",
@@ -740,7 +749,7 @@ def cmd_status(a):
     print(f"{C['gry']}{head}{C['r']}")
 
     shown = rows if a.full else rows[:a.top]
-    for ip, c, dl, ul, idle in shown:
+    for ip, c, dl, _ul, idle in shown:
         mark = f"{C['gry']}·{C['r']}" if idle > 300 else " "
         line = f" {mark}{ip:<30}{fmt_bytes(c['down']):>12}{fmt_bytes(c['up']):>12}"
         if a.live:
@@ -896,6 +905,145 @@ def save_penalties(pens):
     os.replace(tmp, PEN_FILE)
 
 
+@contextlib.contextmanager
+def file_lock(path):
+    """
+    Блокировка на время «прочитал — изменил — записал».
+
+    Раньше штрафы правил только сторож, и гонки быть не могло. Теперь их
+    правят ещё CLI и API: без замка сторож, сохраняя свой штраф, затирал бы
+    чужую запись, сделанную секунду назад, — в карте ядра она осталась бы,
+    а в файле исчезла.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def penalties_update(fn):
+    """
+    Атомарно меняет список штрафов: fn получает словарь и правит его на месте.
+    Возвращает то, что вернул fn. Единственный правильный способ записи —
+    им пользуются и сторож, и CLI, и API.
+    """
+    with file_lock(PEN_FILE + ".lock"):
+        pens = load_penalties()
+        result = fn(pens)
+        save_penalties(pens)
+    return result
+
+
+# ───────────────────────────── журнал событий ─────────────────────────────
+# Одна строка JSON на событие. Пишут сторож, CLI, движок и API — читают
+# оттуда же, чтобы у всех была одна версия истории. Базы данных для этого
+# заводить незачем: файл с ротацией по размеру переживает и сотню нод.
+
+EVENT_TYPES = {
+    "limit_applied",     # адрес получил ограничение
+    "limit_released",    # ограничение снято
+    "limit_expired",     # ограничение истекло само
+    "guard_triggered",   # сработало автоограничение
+    "config_changed",    # изменены настройки
+    "engine_started",    # движок загрузил eBPF
+    "engine_stopped",    # движок выгружен
+    "api_action",        # действие через API
+    "error",             # ошибка
+}
+EVENT_MAX_BYTES = 4 * 1024 * 1024      # больше — половина уезжает в .1
+
+
+def log_event(etype, ip=None, source="shape", **fields):
+    """
+    Добавляет событие. Никогда не бросает исключение: журнал не должен
+    ронять ни сторож, ни API. Секретов здесь быть не может — в fields
+    попадают только заранее известные поля вызывающего кода.
+    """
+    try:
+        if etype not in EVENT_TYPES:
+            etype = "error"
+        rec = {"ts": round(time.time(), 3), "type": etype, "source": str(source)[:32]}
+        if ip:
+            rec["ip"] = str(ip)[:45]
+        for k, v in fields.items():
+            if v is None:
+                continue
+            rec[str(k)[:32]] = v if isinstance(v, (int, float, bool)) else str(v)[:200]
+
+        os.makedirs(VAR_DIR, exist_ok=True)
+        with file_lock(os.path.join(VAR_DIR, "events.lock")):
+            seq = 0
+            try:
+                with open(EVENT_SEQ) as f:
+                    seq = int(f.read().strip() or 0)
+            except Exception:
+                seq = 0
+            seq += 1
+            rec["id"] = seq
+
+            if os.path.exists(EVENT_FILE) and os.path.getsize(EVENT_FILE) > EVENT_MAX_BYTES:
+                os.replace(EVENT_FILE, EVENT_FILE + ".1")
+            fd = os.open(EVENT_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
+            with os.fdopen(fd, "a") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            tmp = EVENT_SEQ + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(str(seq))
+            os.replace(tmp, EVENT_SEQ)
+        return rec["id"]
+    except Exception:
+        return 0
+
+
+def read_events(after=0, limit=100, etype=None, ip=None, since=None, until=None):
+    """
+    Возвращает (список событий, есть ли ещё). Читаем с конца — свежие нужны
+    чаще. Ротированный файл подхватываем, только если в свежем не хватило.
+    """
+    limit = max(1, min(int(limit or 100), 1000))
+    out = []
+    for path in (EVENT_FILE, EVENT_FILE + ".1"):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if after and rec.get("id", 0) <= after:
+                continue
+            if etype and rec.get("type") != etype:
+                continue
+            if ip and rec.get("ip") != ip:
+                continue
+            if since and rec.get("ts", 0) < since:
+                continue
+            if until and rec.get("ts", 0) > until:
+                continue
+            out.append(rec)
+            if len(out) > limit:
+                return out[:limit], True
+        if len(out) >= limit:
+            break
+    return out[:limit], False
+
+
 def penalty_apply(ip, mbps, until_epoch):
     """Пишет штраф в BPF-карту. until пересчитывается в шкалу ядра."""
     left = max(1.0, until_epoch - time.time())
@@ -951,12 +1099,16 @@ def cmd_limited(a):
 
 
 def cmd_release(a):
-    pens = load_penalties()
     if a.all:
-        for ip in list(pens):
-            penalty_clear(ip)
-        save_penalties({})
-        print(f"{C['grn']}✓ {t('rel_all', n=len(pens))}{C['r']}")
+        def drop_all(pens):
+            for ip in list(pens):
+                penalty_clear(ip)
+                log_event("limit_released", ip=ip, source="cli")
+            n = len(pens)
+            pens.clear()
+            return n
+        n = penalties_update(drop_all)
+        print(f"{C['grn']}✓ {t('rel_all', n=n)}{C['r']}")
         return
     if not a.ip:
         die(t("rel_need_ip"))
@@ -964,9 +1116,12 @@ def cmd_release(a):
     if ip is None:
         die(t("bad_ip", ip=a.ip[:60]))
     penalty_clear(ip)
-    pens.pop(ip, None)
-    pens.pop(a.ip, None)
-    save_penalties(pens)
+
+    def drop_one(pens):
+        pens.pop(ip, None)
+        pens.pop(a.ip, None)
+    penalties_update(drop_one)
+    log_event("limit_released", ip=ip, source="cli")
     print(f"{C['grn']}✓ {t('rel_one', ip=ip)}{C['r']}")
 
 
@@ -1168,6 +1323,7 @@ def cmd_watch(a):
                       [(parse_ip_key(k)[0], v) for k, v in map_dump("penalty_map")]}
             for ip in in_map - set(pens):
                 penalty_clear(ip)
+                log_event("limit_expired", ip=ip, source="watchdog")
 
             # Автоограничение выключено — штрафов не выдаём, но счёт трафика
             # продолжаем: на нём держится суточная сводка в Telegram, и раньше
@@ -1211,10 +1367,16 @@ def cmd_watch(a):
                 if score >= need_score:
                     until = time.time() + g["penalty_min"] * 60
                     penalty_apply(ip, g["penalty_mbps"], until)
-                    pens[ip] = {"until": until, "mbps": g["penalty_mbps"],
-                                "since": time.time(),
-                                "score": score, "reasons": reasons}
-                    save_penalties(pens)
+                    entry = {"until": until, "mbps": g["penalty_mbps"],
+                             "since": time.time(), "source": "watchdog",
+                             "kind": "auto", "reason": ",".join(reasons),
+                             "score": score, "reasons": reasons}
+                    # Под замком: файл теперь правит ещё и API.
+                    penalties_update(lambda p, i=ip, e=entry: p.__setitem__(i, e))
+                    pens[ip] = entry
+                    log_event("guard_triggered", ip=ip, source="watchdog",
+                              mbps=g["penalty_mbps"], minutes=g["penalty_min"],
+                              score=score, reason=",".join(reasons))
                     both_streak[ip] = peak_streak[ip] = 0
                     # Окно очищаем: иначе после снятия штрафа те же гигабайты
                     # в скользящем часе тут же уронили бы человека повторно.
@@ -1568,6 +1730,12 @@ def ip_key(ip_str):
     return ip.packed + b"\x00" * 12 if ip.version == 4 else ip.packed
 
 
+def cmd_event(a):
+    """Записать событие в журнал. Вызывается из engine.sh при старте и стопе."""
+    ip = valid_ip(a.ip) if a.ip else None
+    log_event(a.type, ip=ip, source=a.source, message=a.message)
+
+
 def cmd_whitelist(a):
     require_engine()
 
@@ -1701,6 +1869,13 @@ def build_parser():
     tg.add_argument("--daily", choices=["on", "off"], default=None)
     tg.add_argument("--quiet", action="store_true")
     tg.set_defaults(func=cmd_telegram)
+
+    ev = sub.add_parser("event", help=t("h_event"))
+    ev.add_argument("type", choices=sorted(EVENT_TYPES))
+    ev.add_argument("--ip", default=None)
+    ev.add_argument("--source", default="cli")
+    ev.add_argument("--message", default=None)
+    ev.set_defaults(func=cmd_event)
 
     w = sub.add_parser("whitelist", help=t("h_whitelist"))
     w.add_argument("action", choices=["add", "del", "sync", "list"])

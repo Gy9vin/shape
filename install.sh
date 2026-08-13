@@ -13,6 +13,32 @@ die()  { echo -e "  ${R}✗ $*${N}" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "запускай от root: sudo bash install.sh"
 
+# Установка API — по флагу. Без него Shape ставится ровно как раньше:
+# API не должен становиться обязательной частью ни для кого.
+WITH_API=0
+[[ "${1:-}" == "--with-api" ]] && { WITH_API=1; shift; }
+# Обновление не должно тихо оставлять старый код API: если сервис уже стоит,
+# обновляем его вместе с остальным, даже когда флаг не передали.
+[[ -f /etc/systemd/system/shape-api.service ]] && WITH_API=1
+
+api_remove() {
+    systemctl disable --now shape-api >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/shape-api.service
+    systemctl daemon-reload
+}
+
+if [[ "${1:-}" == "--uninstall-api" ]]; then
+    step "Удаление API"
+    api_remove
+    # Конфиг с токенами оставляем: переустановят — токены не поменяются,
+    # и центральной системе не придётся ничего перевыпускать.
+    ok "API удалён, Shape продолжает работать"
+    systemctl is-active shaper >/dev/null 2>&1 \
+        && ok "shaper.service работает" \
+        || echo -e "  ${Y}⚠ shaper.service не запущен — это не связано с API${N}"
+    exit 0
+fi
+
 if [[ "${1:-}" == "--uninstall" ]]; then
     step "Удаление"
     systemctl disable --now shaper shaper-watch 2>/dev/null || true
@@ -24,6 +50,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         rm -f /etc/systemd/system/shape-tunnel.service
         ok "SSH-туннель убран (ключ /root/.ssh/shape_tunnel оставлен)"
     fi
+    api_remove
     rm -f /etc/systemd/system/shaper.service \
           /etc/systemd/system/shaper-watch.service /usr/local/bin/shaper
     rm -rf "$APP_DIR"
@@ -77,6 +104,8 @@ mkdir -p "$APP_DIR/bpf" "$ETC_DIR"
 # В config.json лежит токен бота, в shaper.conf — адрес зарубежной ноды.
 # Читать это кому-то кроме root незачем, а сам каталог доступен только root.
 chmod 750 "$ETC_DIR"
+# Изменчивое состояние: журнал событий. Отдельно от настроек.
+mkdir -p /var/lib/shape && chmod 750 /var/lib/shape
 install -m 755 "$SRC/shaperctl.py"     "$APP_DIR/shaperctl.py"
 install -m 755 "$SRC/engine.sh"        "$APP_DIR/engine.sh"
 install -m 755 "$SRC/menu.sh"          "$APP_DIR/menu.sh"
@@ -133,6 +162,35 @@ else
     echo -e "  ${R}✗ автостарт включить не удалось${N}"
     echo -e "  ${Y}  после ребута шейпер не поднимется, включи вручную:${N}"
     echo -e "  ${Y}  systemctl enable shaper${N}"
+fi
+
+# Файлы API кладём всегда, а сервис включаем только по флагу. Так API можно
+# включить потом из меню, ничего не скачивая, и при этом обычная установка
+# Shape остаётся установкой Shape: ни одного лишнего работающего процесса.
+mkdir -p "$APP_DIR/api"
+install -m 750 "$SRC/api/server.py" "$APP_DIR/api/server.py"
+install -m 644 "$SRC/systemd/shape-api.service" "$APP_DIR/api/shape-api.service"
+
+if (( WITH_API )); then
+    step "Установка API"
+    install -m 644 "$SRC/systemd/shape-api.service" /etc/systemd/system/
+    systemctl daemon-reload
+    # Токены генерирует сам сервис при первом запуске и кладёт в api.json
+    # с правами 600. В репозитории и в установщике их нет.
+    "$APP_DIR/api/server.py" --print-tokens >/dev/null 2>&1 || true
+    systemctl enable --now shape-api >/dev/null 2>&1 || true
+    if systemctl is-active shape-api >/dev/null 2>&1; then
+        ok "API работает на $(python3 -c "
+import json
+try:
+    c = json.load(open('$ETC_DIR/api.json'))
+    print('%s:%s' % (c.get('bind_address','127.0.0.1'), c.get('port',8765)))
+except Exception: print('127.0.0.1:8765')" 2>/dev/null)"
+        echo -e "  ${D}токены: shaper → Сервис → API${N}"
+    else
+        echo -e "  ${Y}⚠ API не стартанул: journalctl -u shape-api -n 30${N}"
+        echo -e "  ${D}на работу шейпера это не влияет${N}"
+    fi
 fi
 
 cat > /usr/local/bin/shaper <<'EOF'
