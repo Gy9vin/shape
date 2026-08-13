@@ -418,16 +418,14 @@ screen_telegram() {
         echo -e "  ${D}${T[tg_h2]}${N}"
         echo
         if [[ "$on" == "1" ]]; then
-            echo -e "  ${T[tg_state]}  : ${G}${T[g_on]}${N}"
+            echo -e "  ${T[tg_state]} : ${G}${T[g_on]}${N}"
         else
-            echo -e "  ${T[tg_state]}  : ${D}${T[g_off]}${N}"
+            echo -e "  ${T[tg_state]} : ${D}${T[g_off]}${N}"
         fi
-        echo -e "  ${T[tg_node]}  : ${B}${name}${N}"
+        echo -e "  ${T[tg_node]} : ${B}${name}${N}"
         echo -e "  ${T[tg_token]} : ${tok}"
-        echo -e "  ${T[tg_chat]}  : ${chat}${D}   ${T[tg_thread]}: ${thread}${N}"
-        echo -e "  ${T[tg_proxy]}  : ${proxy}"
-        echo -e "  ${D}${T[tg_what]}: $([[ "$ev" == 1 ]] && echo "${T[tg_ev]}" || echo "—")" \
-                "$([[ "$dg" == 1 ]] && echo "· ${T[tg_dg]}")${N}"
+        echo -e "  ${T[tg_chat]} : ${chat}${D}   ${T[tg_thread]}: ${thread}${N}"
+        echo -e "  ${T[tg_proxy]} : ${proxy}"
         hr
         echo "  [1] ${T[g_toggle]}"
         echo "  [2] ${T[tg_set_token]}"
@@ -435,8 +433,16 @@ screen_telegram() {
         echo "  [4] ${T[tg_set_thread]}"
         echo "  [5] ${T[tg_set_name]}"
         echo "  [6] ${T[tg_set_proxy]}"
-        echo "  [7] ${T[tg_toggle_ev]}"
-        echo "  [8] ${T[tg_toggle_dg]}"
+        if [[ "$ev" == "1" ]]; then
+            echo -e "  [7] ${T[tg_ev]}: ${G}${T[tg_on]}${N} ${D}${T[tg_press]}${N}"
+        else
+            echo -e "  [7] ${T[tg_ev]}: ${Y}${T[tg_off]}${N} ${D}${T[tg_press]}${N}"
+        fi
+        if [[ "$dg" == "1" ]]; then
+            echo -e "  [8] ${T[tg_dg]}: ${G}${T[tg_on]}${N} ${D}${T[tg_press]}${N}"
+        else
+            echo -e "  [8] ${T[tg_dg]}: ${Y}${T[tg_off]}${N} ${D}${T[tg_press]}${N}"
+        fi
         echo "  [9] ${T[tg_test]}"
         echo "  [0] ← ${T[m0]}"
         echo

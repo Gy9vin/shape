@@ -54,6 +54,10 @@ C = {
 MSG = {
     "ru": {
         "root": "нужны права root",
+        "tg_mtproto": "это MTProto-прокси из ссылки t.me/proxy",
+        "tg_mtproto2": "он умеет только протокол мессенджера, Bot API через него не пройдёт",
+        "tg_mtproto3": "нужен SOCKS5 или HTTP: socks5://логин:пароль@хост:1080",
+        "tg_proxy_scheme": "прокси должен начинаться с socks5:// или http://",
         "h_telegram": "уведомления в Telegram",
         "h_tg_name": "как подписывать ноду в сообщениях",
         "h_tg_proxy": "socks5://… или http://… — нужен на российских нодах",
@@ -165,6 +169,10 @@ MSG = {
     },
     "en": {
         "root": "root privileges required",
+        "tg_mtproto": "this is an MTProto proxy from a t.me/proxy link",
+        "tg_mtproto2": "it only speaks the messenger protocol, the Bot API will not pass",
+        "tg_mtproto3": "you need SOCKS5 or HTTP: socks5://user:pass@host:1080",
+        "tg_proxy_scheme": "proxy must start with socks5:// or http://",
         "h_telegram": "Telegram notifications",
         "h_tg_name": "how to label this node in messages",
         "h_tg_proxy": "socks5://… or http://… — needed on Russian nodes",
@@ -1304,6 +1312,15 @@ def cmd_telegram(a):
               else f"{C['red']}✗ {err}{C['r']}")
         return
     # set
+    if a.proxy is not None:
+        p = a.proxy.strip()
+        # MTProto-прокси из ссылки t.me/proxy умеет только протокол мессенджера.
+        # Bot API — обычный HTTPS, через такой прокси он не пройдёт.
+        if p and ("t.me/proxy" in p or "secret=" in p or p.startswith("tg://")):
+            die(t("tg_mtproto") + "\n  " + t("tg_mtproto2") + "\n  " + t("tg_mtproto3"))
+        if p and not p.startswith(("socks5://", "socks5h://", "http://", "https://")):
+            die(t("tg_proxy_scheme"))
+
     for key, val in (("token", a.token), ("chat_id", a.chat), ("thread_id", a.thread),
                      ("node_name", a.name), ("proxy", a.proxy)):
         if val is not None:

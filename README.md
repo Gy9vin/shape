@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-2.4-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-2.5-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
 </p>
 
-# Shape v2.4
+# Shape v2.5
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -434,6 +434,14 @@ shaperctl.py status --live          # реальные скорости по IP
 проходит, TLS обрывается. Укажи `socks5://логин:пароль@хост:1080` — SOCKS5
 реализован прямо в скрипте, `PySocks` ставить не нужно. При `socks5://` имя
 хоста резолвит прокси, так что подменённый DNS тоже перестаёт мешать.
+
+**MTProto-прокси не подойдёт.** Ссылки вида `t.me/proxy?server=…&secret=…`
+работают только для самого мессенджера: это протокол MTProto, а Bot API —
+обычный HTTPS. Такую строку меню отклонит с объяснением. Нужен настоящий
+SOCKS5 или HTTP-прокси на машине вне зоны блокировки.
+
+Проще всего поднять SOCKS прямо на своей зарубежной ноде — туннелем по SSH
+или отдельным инбаундом в Xray.
 
 Токен лежит в `config.json`, файл автоматически получает права `600`.
 
