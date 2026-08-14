@@ -263,6 +263,77 @@ int main(void)
     check("нулевой лимит пропускает без деления на ноль",
           run_pkt(len, 0) == TC_ACT_OK);
 
+    /* Hysteria2 и вообще QUIC — это UDP/443, а не TCP. Ветка UDP в разборе
+     * есть с самого начала, но до появления первой такой ноды её ничто не
+     * проверяло: весь набор гонял только TCP. */
+    printf("\n\033[1m8. UDP: QUIC на том же порту\033[0m\n");
+    map_put(&config_map, &zero, &cfg);           /* вернуть лимит 10 Мбит/с */
+    unsigned QCLIENT = 0x1100007F;
+    struct ip_key ku = {0}; ku.addr[0] = QCLIENT;
+
+    len = build_v4(IPPROTO_UDP, 443, 51000, 0, 1200, QCLIENT, SERVER);
+    check("download по UDP/443 принят к учёту", run_pkt(len, 0) == TC_ACT_OK);
+    struct user_state *su = bpf_map_lookup_elem(&user_state_map_down, &ku);
+    check("состояние клиента QUIC заведено", su != NULL);
+    check("байты посчитаны", su && su->total_bytes > 0);
+    /* Первый пакет нового адреса пропускается без задержки намеренно —
+     * задержку считаем со второго, как и для TCP. */
+    check("первый пакет не задержан", skb.tstamp == 0);
+    len = build_v4(IPPROTO_UDP, 443, 51000, 0, 1200, QCLIENT, SERVER);
+    run_pkt(len, 0);
+    check("со второго пакета отправка откладывается", skb.tstamp > 0);
+
+    fake_now = 5000000000ULL;
+    len = build_v4(IPPROTO_UDP, 443, 51000, 0, 1200, QCLIENT, SERVER);
+    run_pkt(len, 0); t0 = skb.tstamp;
+    run_pkt(len, 0); t1 = skb.tstamp;
+    /* 1254 байта при 1.25 МБ/с ≈ 1.0 мс на пакет */
+    check("шаг между UDP-пакетами соответствует лимиту",
+          (t1 - t0) > 850000 && (t1 - t0) < 1200000);
+
+    unsigned QUP = 0x1200007F;
+    struct ip_key ku2 = {0}; ku2.addr[0] = QUP;
+    len = build_v4(IPPROTO_UDP, 51000, 443, 0, 1200, SERVER, QUP);
+    run_pkt(len, 1);
+    check("upload по UDP/443 учтён по адресу отправителя",
+          bpf_map_lookup_elem(&user_state_map_up, &ku2) != NULL);
+
+    unsigned QOTHER = 0x1300007F;
+    struct ip_key ku3 = {0}; ku3.addr[0] = QOTHER;
+    len = build_v4(IPPROTO_UDP, 4444, 51000, 0, 1200, QOTHER, SERVER);
+    run_pkt(len, 0);
+    check("UDP на чужом порту не учитывается",
+          bpf_map_lookup_elem(&user_state_map_down, &ku3) == NULL);
+
+    /* Исходящий QUIC самой ноды к чужому сайту: dport=443 на egress.
+     * Под правило «443» он попасть не должен — иначе трафик ноды шейпился
+     * бы повторно и записывался на адрес чужого сайта. */
+    unsigned SITE = 0x1400007F;
+    struct ip_key ku4 = {0}; ku4.addr[0] = SITE;
+    len = build_v4(IPPROTO_UDP, 51000, 443, 0, 1200, SITE, SERVER);
+    run_pkt(len, 0);
+    check("исходящий QUIC ноды под правило не попадает",
+          bpf_map_lookup_elem(&user_state_map_down, &ku4) == NULL);
+
+    /* Обрезанный UDP-заголовок: восьми байт нет. Должно быть решение
+     * «пропустить», а не чтение за границей пакета. */
+    unsigned TRUNC = 0x1500007F;
+    len = build_v4(IPPROTO_UDP, 443, 51000, 0, 0, TRUNC, SERVER);
+    check("обрезанный UDP-заголовок не роняет разбор",
+          run_pkt(14 + 20 + 4, 0) == TC_ACT_OK);
+
+    /* Белый список работает одинаково для обоих протоколов. */
+    unsigned QWL = 0x1600007F;
+    struct ip_key kwu = {0}; kwu.addr[0] = QWL;
+    map_put(&whitelist_map, &kwu, &one);
+    len = build_v4(IPPROTO_UDP, 443, 51000, 0, 1200, QWL, SERVER);
+    run_pkt(len, 0);                       /* первый — заводит состояние */
+    run_pkt(len, 0);                       /* второй — доходит до проверки */
+    struct user_state *sw = bpf_map_lookup_elem(&user_state_map_down, &kwu);
+    check("адрес из белого списка по UDP считается", sw != NULL);
+    check("его байты растут", sw && sw->total_bytes > 1200);
+    check("но задержка не применяется", skb.tstamp == 0);
+
     printf("\n\033[1mИтог: %d пройдено, %d провалено\033[0m\n", ok, fail);
     return fail ? 1 : 0;
 }

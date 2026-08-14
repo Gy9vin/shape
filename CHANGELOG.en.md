@@ -42,6 +42,14 @@ Russian blocking — sending to Telegram always failed with
   was set. Shape has its own proxy setting and should not pick one up from
   anywhere else.
 
+* **UDP is now covered by tests.** The UDP parsing branch has been in the
+  eBPF program from the start — Hysteria2, and QUIC in general on 443, is
+  shaped exactly like VLESS over TCP. But the whole harness only ever fed
+  it TCP, so that branch was never exercised. 13 checks were added:
+  accounting in both directions, delay under the limit, direction
+  strictness (the node's own outgoing QUIC does not match the rule), a
+  truncated header, the whitelist. The harness now holds 36 checks.
+
 ### Why the tests missed it
 
 Every previous Telegram check replaced `_post` wholesale — meaning the
