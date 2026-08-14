@@ -15,7 +15,8 @@
  * Карты:
  *   config_map     : 0 -> struct config     (bytes_per_sec, 0 = выключено)
  *   port_map       : port (u32) -> u8       (порт 0 = все порты)
- *   whitelist_map  : ip (4x u32) -> u8      (эти IP минуют шейпер)
+ *   whitelist_map  : ip (4x u32) -> u8      (к этим IP лимит не применяется,
+ *                                            но их трафик всё равно считается)
  *   penalty_map    : ip -> struct penalty   (штраф нарушителю на время)
  *   user_state_map_down/up : ip -> struct user_state
  *
@@ -238,10 +239,6 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     if (!conf || conf->bytes_per_sec == 0)
         return TC_ACT_OK;
 
-    /* ── Белый список: свой адрес, мониторинг, панель ── */
-    if (bpf_map_lookup_elem(&whitelist_map, &key))
-        return TC_ACT_OK;
-
     /* ── Порты ── */
     if (no_ports) {
         /* нечего читать, решение примет проверка правила «все порты» */
@@ -293,6 +290,18 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     __sync_fetch_and_add(&st->total_bytes, len);
     __sync_fetch_and_add(&st->packets, 1);
     st->last_seen_ns = now;
+
+    /* ── Белый список ──
+     * Проверяется здесь, а не в начале: счётчики адреса должны вестись в
+     * любом случае. Раньше проверка стояла до учёта, и адрес из белого
+     * списка исчезал отовсюду — из монитора, статистики и метрик. Понять,
+     * сколько канала он съедает, было нельзя вообще никак, хотя съедать он
+     * может сколько угодно: лимит к нему не применяется.
+     *
+     * Теперь считаем всех, а ограничиваем не всех.
+     */
+    if (bpf_map_lookup_elem(&whitelist_map, &key))
+        return TC_ACT_OK;
 
     /* Персональный штраф важнее общего лимита. Просроченные записи вычищает
      * сторож; здесь просто игнорируем их по времени. */

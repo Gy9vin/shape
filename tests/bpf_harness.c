@@ -224,9 +224,19 @@ int main(void)
     struct ip_key kw = {0}; kw.addr[0] = 0x0B00007F;
     map_put(&whitelist_map, &kw, &one);
     len = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x0B00007F, SERVER);
+    run_pkt(len, 0);                       /* первый пакет заводит запись */
+    check("адрес из белого списка попадает в учёт",
+          bpf_map_lookup_elem(&user_state_map_down, &kw) != NULL);
+    struct user_state *wst = bpf_map_lookup_elem(&user_state_map_down, &kw);
+    unsigned long long before = wst->total_bytes;
+    skb.tstamp = 0;
     run_pkt(len, 0);
-    check("адрес из белого списка не попадает в учёт",
-          bpf_map_lookup_elem(&user_state_map_down, &kw) == NULL);
+    check("его байты считаются", wst->total_bytes > before);
+    check("но время отправки ему не назначается", skb.tstamp == 0);
+    len = build_v4(IPPROTO_TCP, 51000, 443, 0, 1400, SERVER, 0x0B00007F);
+    run_pkt(len, 1);
+    struct user_state *wup = bpf_map_lookup_elem(&user_state_map_up, &kw);
+    check("отдача тоже считается", wup != NULL && wup->total_bytes > 0);
 
     struct penalty pen = { .rate_bytes_per_sec = 1 * 125000,
                            .until_ns = fake_now + 60000000000ULL };

@@ -124,7 +124,9 @@ chmod 600 "$ETC_DIR/config.json" "$ETC_DIR/penalties.json" 2>/dev/null || true
 IFACE=""
 EOF
 [[ -f "$ETC_DIR/whitelist.txt" ]] || cat > "$ETC_DIR/whitelist.txt" <<'EOF'
-# IP, которые полностью минуют шейпер. По одному в строке.
+# IP, к которым не применяется лимит. По одному в строке.
+# Их трафик по-прежнему виден в мониторе и статистике — считаем всех,
+# ограничиваем не всех.
 # 203.0.113.10
 EOF
 chmod 600 "$ETC_DIR/shaper.conf" 2>/dev/null || true

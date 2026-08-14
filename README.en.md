@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.3-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.4-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.3
+# Shape v3.4
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -141,14 +141,15 @@ address has been holding the load:
    Channel now     ↓   54.1   ↑  10.4 Mbit/s   ▂▃▄▅▅▆▇█████  last minute
    Limit per address  10 Mbit/s   for every IP    loading 58 of 377
   ────────────────────────────────────────────────────────────────────────────
-   IP                         now    upload   1-min avg   share of limit
-   92.255.180.20              7.3       0.4         3.7   ████████▉···  73%
- ▪ 94.77.7.203                6.4       0.3         1.8   ███████▊····  64%
-   88.151.91.251              4.9       0.2         1.1   ██████······  49%
-   91.79.15.94                1.4       2.7         1.7   █▊··········  14%
- ⊘ 89.253.46.46               1.0       0.0         4.3   █▎··········  10%
+   IP                        now   upload      avg  holding  share of limit
+ ▪ 109.248.47.99            10.1      0.1      3.1   12 min  ████████████ 101%
+ ▪ 91.78.0.72                9.8      0.2      9.6   44 min  ███████████▉  98%
+   91.79.7.124               6.4      0.2      1.1        —  ███████▊····  64%
+ ✓ 203.0.113.40              5.1      0.4      4.8    5 min  ██████▏·····  51%
+   91.79.15.94               1.4      2.7      1.7        —  █▊··········  14%
+ ⊘ 89.253.46.46              1.0      0.0      4.3        —  █▎··········  10%
   ────────────────────────────────────────────────────────────────────────────
-   showing 20 of 58   ▪ holding over 30 s   ⊘ limited
+   showing 20 of 68   ▪ holding over 30 s   ✓ whitelisted   ⊘ limited
 ```
 
 **Row colour is the share of the limit:** grey up to 20%, green to half, yellow
@@ -157,9 +158,17 @@ narrow uplink, so noticeable upload is the first sign of seeding. In the sample
 above 91.79.15.94 downloads only 1.4 Mbit/s but uploads 2.7 — that is what a
 torrent looks like.
 
-**The mark on the left:** ▪ the address has been holding load for over 30
-seconds, ⊘ the address is already limited. The sparkline in the header is the
-channel over the last minute.
+The **avg** column is the average speed over roughly a minute, **holding** is
+how long the address has stayed above half the limit. Together they separate a
+steady multi-hour load from a short burst.
+
+**The mark on the left:** ▪ holding load for over 30 seconds, ✓ the address is
+whitelisted, ⊘ the address is already limited. The sparkline in the header is
+the channel over the last minute.
+
+Whitelisted addresses are shown alongside the rest: the limit does not apply to
+them, but the load they create is just as real and worth knowing about. They
+used to be invisible everywhere.
 
 That is usually enough to spot a downloader without any auto-limiting at all.
 

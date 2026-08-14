@@ -230,7 +230,7 @@ MSG = {
         "mon_channel": "Канал сейчас", "mon_limit": "Лимит {s:g} Мбит/с на IP",
         "mon_nolimit": "Лимит не задан", "mon_loading": "нагружают канал",
         "mon_of": "из", "mon_idle": "сейчас никто не качает",
-        "mon_up": "отдача", "mon_avg": "мин.средн", "mon_hold": "держит",
+        "mon_up": "отдача", "mon_avg": "средн", "mon_hold": "держит",
         "mon_bar": "загрузка", "mon_more": "… ещё {n} активных",
         "mon_share": "доля лимита",
         "mon_minute": "за минуту",
@@ -238,6 +238,7 @@ MSG = {
         "mon_per_ip": "на каждый IP",
         "mon_shown": "показано {a} из {b}",
         "mon_leg_hold": "держит больше 30 с",
+        "mon_leg_wl": "белый список",
         "mon_leg_limited": "ограничен",
         "mon_legend": "жёлтым — держит нагрузку больше 30 с, красным — упёрся в лимит",
     },
@@ -386,7 +387,7 @@ MSG = {
         "mon_channel": "Channel now", "mon_limit": "Limit {s:g} Mbit/s per IP",
         "mon_nolimit": "No limit set", "mon_loading": "loading the channel",
         "mon_of": "of", "mon_idle": "nobody is downloading right now",
-        "mon_up": "upload", "mon_avg": "1-min avg", "mon_hold": "holding",
+        "mon_up": "upload", "mon_avg": "avg", "mon_hold": "holding",
         "mon_bar": "load", "mon_more": "… {n} more active",
         "mon_share": "share of limit",
         "mon_minute": "last minute",
@@ -394,6 +395,7 @@ MSG = {
         "mon_per_ip": "for every IP",
         "mon_shown": "showing {a} of {b}",
         "mon_leg_hold": "holding over 30 s",
+        "mon_leg_wl": "whitelisted",
         "mon_leg_limited": "limited",
         "mon_legend": "yellow — holding load over 30 s, red — hitting the limit",
     },
@@ -922,7 +924,8 @@ def cmd_monitor(a):
     history, since, chan = {}, {}, []
     prev, prev_t = read_users(), time.monotonic()
     pens, pens_at = load_penalties(), 0.0
-    width = 76
+    wl = whitelist_ips()
+    width = 78
 
     print("\033[?25l", end="", flush=True)   # спрятать курсор
     try:
@@ -937,6 +940,7 @@ def cmd_monitor(a):
             # Список штрафов меняется редко — перечитываем раз в пять секунд.
             if now_t - pens_at > 5:
                 pens, pens_at = load_penalties(), now_t
+                wl = whitelist_ips()
 
             rows = []
             for ip, (dl, ul) in rt.items():
@@ -978,8 +982,8 @@ def cmd_monitor(a):
                            f"          {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
                            f" {t('mon_of')} {len(rows)}")
             out.append(f"  {C['gry']}{'─' * width}{C['r']}")
-            out.append(f"{C['gry']}   {'IP':<22}{t('now'):>8}{t('mon_up'):>10}"
-                       f"{t('mon_avg'):>11}   {t('mon_share')}{C['r']}")
+            out.append(f"{C['gry']}   {'IP':<21}{t('now'):>8}{t('mon_up'):>9}"
+                       f"{t('mon_avg'):>9}{t('mon_hold'):>8}  {t('mon_share')}{C['r']}")
 
             if not active:
                 out.append(f"\n   {C['gry']}{t('mon_idle')}{C['r']}")
@@ -991,6 +995,11 @@ def cmd_monitor(a):
                 # была сплошь из прочерков и занимала девять знаков впустую.
                 if ip in pens:
                     mark = f"{C['bred']}⊘{C['r']}"
+                elif ip in wl:
+                    # Адрес из белого списка: считаем, но не ограничиваем.
+                    # Видеть его нагрузку важнее всего — именно он может
+                    # незаметно съесть канал, оставаясь вне лимита.
+                    mark = f"{C['cyan']}✓{C['r']}"
                 elif hold >= 30:
                     mark = f"{C['byel']}▪{C['r']}"
                 else:
@@ -1001,15 +1010,22 @@ def cmd_monitor(a):
                 ul_col = C["gry"]
                 if limit > 0 and ul >= limit * 0.15:
                     ul_col = C["bred"] if ul >= limit * 0.4 else C["byel"]
-                out.append(f" {mark} {ip:<22}{col}{dl:>8.1f}{C['r']}"
-                           f"{ul_col}{ul:>10.1f}{C['r']}"
-                           f"{C['gry']}{avg:>11.1f}{C['r']}"
-                           f"   {col}{bar(dl, scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}")
+                # Время удержания вернулось отдельной колонкой: по нему
+                # видно разницу между всплеском и постоянной нагрузкой,
+                # а значок слева этого не показывает.
+                hold_txt = fmt_hold(hold) if hold >= 1 else "—"
+                hold_col = C["byel"] if hold >= 30 else C["gry"]
+                out.append(f" {mark} {ip:<21}{col}{dl:>8.1f}{C['r']}"
+                           f"{ul_col}{ul:>9.1f}{C['r']}"
+                           f"{C['gry']}{avg:>9.1f}{C['r']}"
+                           f"{hold_col}{hold_txt:>8}{C['r']}"
+                           f"  {col}{bar(dl, scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}")
 
             out.append(f"  {C['gry']}{'─' * width}{C['r']}")
             shown = min(len(active), a.top)
             out.append(f"   {C['gry']}{t('mon_shown', a=shown, b=len(active))}"
-                       f"   ▪ {t('mon_leg_hold')}   ⊘ {t('mon_leg_limited')}{C['r']}")
+                       f"   ▪ {t('mon_leg_hold')}   ✓ {t('mon_leg_wl')}"
+                       f"   ⊘ {t('mon_leg_limited')}{C['r']}")
             print("\n".join(out), flush=True)
     except KeyboardInterrupt:
         pass

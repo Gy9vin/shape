@@ -13,6 +13,28 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.4
+
+**Holding time is back, and the whitelist became visible.**
+
+- **The "holding" column returned.** In 3.3 it became a mark on the left, and
+  the important part went with it: how many minutes in a row an address has
+  been loading the channel. The mark only says "over thirty seconds", while
+  the difference between two minutes and forty-four is the difference between
+  a burst and a torrent.
+- **Whitelisted addresses now show up in the monitor, the statistics and the
+  metrics.** The whitelist check used to sit in eBPF **before** accounting, so
+  such an address vanished everywhere: there was no way at all to tell how much
+  of the channel it was eating. And it can eat any amount — the limit does not
+  apply to it. Now everyone is counted and not everyone is limited.
+- A **✓** mark tags those addresses in the monitor so they are not mistaken for
+  ordinary ones.
+- The "1-min avg" header was shortened to "avg": next to "upload" it did not
+  fit and ran into the neighbouring column.
+
+The change touches the eBPF program, which is rebuilt automatically on update.
+Settings, penalties and the whitelist are untouched.
+
 ## 3.3
 
 **The monitor got a new look.** Rendering only — not a single extra call into
