@@ -105,8 +105,17 @@ API_DEFAULT = {
     "rate_write_per_min": 60,
     "auth_fail_per_min": 15,
     "expose_docs": True,
+    # Prometheus умеет ходить с bearer-токеном, поэтому по умолчанию метрики
+    # закрыты как и всё остальное. Открыть можно осознанно — например когда
+    # API и так виден только внутри WireGuard.
+    "metrics_public": False,
     # Токены. Генерируются установщиком, в исходниках их нет и быть не может.
-    "tokens": {"read": "", "write": ""},
+    #
+    # previous — прежняя пара, которая ещё какое-то время принимается. Без
+    # этого смена токена на 28 нодах означала бы 28 одновременных правок в
+    # центральной системе: пока обновляешь последнюю, первые уже отвечают 401.
+    "tokens": {"read": "", "write": "", "read_previous": "", "write_previous": "",
+               "previous_until": 0},
 }
 
 # Ключи, которые разрешено менять через PATCH /config. Всё, что связано с
@@ -137,7 +146,14 @@ def api_config():
     out.update({k: v for k, v in cfg.items() if k in API_DEFAULT})
     tokens = dict(API_DEFAULT["tokens"])
     if isinstance(cfg.get("tokens"), dict):
-        tokens.update({k: str(v) for k, v in cfg["tokens"].items() if k in ("read", "write")})
+        for k, v in cfg["tokens"].items():
+            if k == "previous_until":
+                try:
+                    tokens[k] = float(v)
+                except (TypeError, ValueError):
+                    tokens[k] = 0
+            elif k in tokens:
+                tokens[k] = str(v)
     out["tokens"] = tokens
     return out
 
@@ -171,6 +187,9 @@ def bad(code, message):
 # отвергнуто на границе, а не «как-нибудь обработано» внутри.
 
 REASON_RE = re.compile(r"^[\w \-.,:/()\[\]#@+*]{1,64}$", re.UNICODE)
+# Ярлык человека приходит из панели и попадает в сообщение с parse_mode=HTML.
+# Экранирование делает subject_text, но угловые скобки лучше не пускать вовсе.
+LABEL_RE = re.compile(r"^[^\x00-\x1f<>&]{1,64}$", re.UNICODE)
 
 
 def v_ip(raw, field="ip"):
@@ -321,6 +340,9 @@ def limit_view(ip, p):
         "source": p.get("source", "watchdog"),
         "type": p.get("kind", "auto"),
         "score": p.get("score"),
+        # Кто стоит за адресом. Прикрепляется в момент выдачи ограничения:
+        # позже человек отключится, и связь потеряется.
+        "subject": p.get("subject") or S.owner_of(ip),
     }
 
 
@@ -344,6 +366,9 @@ def apply_limit(ip, mbps, duration, reason, source, kind, request_id):
     entry = {"until": until, "mbps": mbps, "since": now,
              "source": source, "kind": kind, "reason": reason or None,
              "request_id": request_id}
+    who = S.owner_of(ip)
+    if who:
+        entry["subject"] = who
     try:
         S.penalty_apply(ip, mbps, until)
     except SystemExit:
@@ -358,7 +383,9 @@ def apply_limit(ip, mbps, duration, reason, source, kind, request_id):
 
 def drop_limit(ip, source, request_id):
     existing = S.load_penalties().get(ip)
-    if not existing:
+    if not existing or S.is_personal(existing):
+        # Персональную скорость снимают через /personal, чтобы её нельзя было
+        # погасить случайно, разбирая список ограничений.
         raise ApiError(404, "LIMIT_NOT_FOUND", "для этого адреса ограничения нет")
     with contextlib.suppress(SystemExit):
         S.penalty_clear(ip)
@@ -449,7 +476,9 @@ def h_node(req):
 
 
 def h_limits_list(req):
-    pens = S.load_penalties()
+    # Персональные скорости живут в той же карте, но это не наказание —
+    # у них свой endpoint /personal.
+    pens = {ip: p for ip, p in S.load_penalties().items() if not S.is_personal(p)}
     items = [limit_view(ip, p) for ip, p in
              sorted(pens.items(), key=lambda kv: -float(kv[1].get("since") or 0))]
     return 200, {"items": items, "count": len(items)}
@@ -669,6 +698,275 @@ def h_bpf_status(req):
     }
 
 
+
+def h_history(req):
+    q = req["query"]
+    try:
+        days = int(q.get("days", 30))
+    except (TypeError, ValueError):
+        raise bad("INVALID_QUERY", "days: нужно число") from None
+    rows = S.read_history(limit=max(1, min(days, S.HISTORY_MAX_DAYS)))
+    return 200, {
+        "items": rows,
+        "count": len(rows),
+        "totals": {
+            "download_bytes": sum(r.get("down", 0) for r in rows),
+            "upload_bytes": sum(r.get("up", 0) for r in rows),
+        },
+        "note": "строка появляется при смене суток; текущие сутки — в /stats",
+    }
+
+
+def h_owners_list(req):
+    owners = S.load_owners()
+    items = []
+    for ip in sorted(owners):
+        who = S.owner_of(ip, owners) or {}
+        items.append(dict(who, ip=ip, updated=owners[ip].get("updated")))
+    return 200, {"items": items, "count": len(items)}
+
+
+def _owner_record(raw):
+    """Проверка одной записи о владельце. Ничего лишнего не сохраняем."""
+    if not isinstance(raw, dict):
+        raise ApiError(422, "INVALID_OWNER", "запись должна быть объектом")
+    out = {}
+    label = raw.get("label")
+    if label is not None:
+        if not isinstance(label, str) or not LABEL_RE.match(label.strip()):
+            raise ApiError(422, "INVALID_OWNER",
+                           "label: до 64 символов, без управляющих знаков")
+        out["label"] = label.strip()
+    uid = raw.get("user_id")
+    if uid is not None:
+        uid = str(uid).strip()
+        if not re.fullmatch(r"[\w.:-]{1,64}", uid):
+            raise ApiError(422, "INVALID_OWNER", "user_id: до 64 символов [A-Za-z0-9_.:-]")
+        out["user_id"] = uid
+    tg = raw.get("telegram_id")
+    if tg is not None:
+        if isinstance(tg, bool) or not isinstance(tg, (int, str)) or \
+                not str(tg).isdigit() or not 1 <= int(tg) <= 2 ** 53:
+            raise ApiError(422, "INVALID_OWNER", "telegram_id: положительное число")
+        out["telegram_id"] = int(tg)
+    if raw.get("shared") is not None:
+        if not isinstance(raw["shared"], bool):
+            raise ApiError(422, "INVALID_OWNER", "shared: true или false")
+        out["shared"] = raw["shared"]
+    if not out:
+        raise ApiError(422, "INVALID_OWNER",
+                       "нужно хотя бы одно поле: label, user_id, telegram_id")
+    out["updated"] = round(time.time())
+    return out
+
+
+def h_owners_put(req):
+    """
+    Загрузка карты «адрес → человек» целиком или по частям.
+
+    Сюда будет писать резолвер панели, когда он появится: Shape сам никуда
+    за этими сведениями не ходит и ходить не должен.
+    """
+    body = req["body"]
+    if not isinstance(body, dict):
+        raise bad("INVALID_BODY", "тело запроса должно быть объектом JSON")
+    items = body.get("items", body)
+    if not isinstance(items, dict) or not items:
+        raise bad("INVALID_BODY", "передай {\"items\": {\"1.2.3.4\": {...}}}")
+    if len(items) > 5000:
+        raise ApiError(413, "TOO_MANY_ITEMS", "не больше 5000 адресов за раз")
+
+    prepared = {v_ip(ip): _owner_record(rec) for ip, rec in items.items()}
+    replace = bool(body.get("replace"))
+
+    def apply(owners):
+        if replace:
+            owners.clear()
+        owners.update(prepared)
+        return len(owners)
+
+    total = S.owners_update(apply)
+    S.log_event("api_action", source="api", request_id=req["request_id"],
+                message=f"owners {'replace' if replace else 'update'} "
+                        f"{len(prepared)}")
+    return 200, {"updated": len(prepared), "total": total, "replaced": replace}
+
+
+def h_owner_delete(req, ip):
+    ip = v_ip(ip)
+    if ip not in S.load_owners():
+        raise ApiError(404, "OWNER_NOT_FOUND", "для этого адреса сведений нет")
+    S.owners_update(lambda o: o.pop(ip, None))
+    S.log_event("api_action", ip=ip, source="api",
+                request_id=req["request_id"], message="owner removed")
+    return 200, {"ip": ip, "removed": True}
+
+
+def h_personal_list(req):
+    items = [S.limit_row(ip, p) for ip, p in sorted(S.personal_list().items())]
+    return 200, {"items": items, "count": len(items)}
+
+
+def h_personal_put(req, ip):
+    """Постоянная скорость для адреса — выше или ниже общего лимита."""
+    ip = v_ip(ip)
+    body = req["body"] if isinstance(req["body"], dict) else {}
+    mbps = v_speed(body.get("mbps", body.get("download_mbps")), "mbps")
+    note = v_reason(body.get("note"), "note")
+    if not engine_loaded():
+        raise ApiError(503, "ENGINE_NOT_RUNNING", "движок не запущен")
+    if ip in S.whitelist_ips():
+        raise ApiError(409, "IP_WHITELISTED",
+                       "адрес в белом списке — шейпер его не трогает")
+    existing = S.load_penalties().get(ip)
+    if existing and not S.is_personal(existing):
+        raise ApiError(409, "LIMIT_ACTIVE",
+                       "на адресе действует ограничение, сними его сначала")
+    try:
+        entry = S.personal_set(ip, mbps, note, subject=S.owner_of(ip))
+    except SystemExit:
+        raise ApiError(503, "ENGINE_ERROR", "не удалось записать в ядро") from None
+    S.log_event("api_action", ip=ip, source="api", request_id=req["request_id"],
+                message=f"personal {mbps:g}")
+    return 200, S.limit_row(ip, entry)
+
+
+def h_personal_delete(req, ip):
+    ip = v_ip(ip)
+    if S.personal_clear(ip) is None:
+        raise ApiError(404, "PERSONAL_NOT_FOUND",
+                       "у этого адреса нет персональной скорости")
+    S.log_event("api_action", ip=ip, source="api",
+                request_id=req["request_id"], message="personal off")
+    return 200, {"ip": ip, "removed": True}
+
+
+# ── метрики для Prometheus ────────────────────────────────────────────────
+def esc(v):
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def h_metrics(req):
+    """
+    Текстовый формат Prometheus. Отдаётся как есть, без JSON-обёртки —
+    поэтому обработчик возвращает готовую строку, а не словарь.
+
+    Метка node стоит у каждой метрики, а не только у shape_info: при парке
+    в сотню нод это единственный способ подписать графики человеческим
+    именем. Метка instance от Prometheus — это адрес и порт, по ней ничего
+    не поймёшь, а join по info-метрике в дашборде выглядит уродливо.
+    """
+    cfg = S.load_config()
+    pens = S.load_penalties()
+    limited = {ip: p for ip, p in pens.items() if not S.is_personal(p)}
+    personal = {ip: p for ip, p in pens.items() if S.is_personal(p)}
+    loaded = engine_loaded()
+    started = engine_started_at()
+    node = S.node_label(cfg["telegram"])
+    iface = active_iface() or ""
+
+    users, dl, ul = {}, None, None
+    if loaded:
+        snap = cached("stats_snapshot", CACHE_TTL,
+                      lambda: {"t": time.monotonic(), "users": S.read_users()})
+        users = snap["users"]
+        with _cache_lock:
+            prev = _cache.get("metrics_prev")
+        if prev and 0.5 <= snap["t"] - prev["t"] <= 300:
+            dt = snap["t"] - prev["t"]
+            dl = sum(max(0, c["down"] - prev["users"].get(ip, {}).get("down", 0))
+                     for ip, c in users.items()) * 8 / 1e6 / dt
+            ul = sum(max(0, c["up"] - prev["users"].get(ip, {}).get("up", 0))
+                     for ip, c in users.items()) * 8 / 1e6 / dt
+        if not prev or snap["t"] - prev["t"] >= CACHE_TTL:
+            with _cache_lock:
+                _cache["metrics_prev"] = snap
+
+    now_ns = S.mono_ns() if loaded else 0
+    active = sum(1 for c in users.values()
+                 if c["seen"] and (now_ns - c["seen"]) / S.NS < 60)
+
+    # События за сутки: считаем по журналу, но не чаще раза в полминуты —
+    # разбор файла не должен становиться нагрузкой от частого опроса.
+    def day_events():
+        rows, _ = S.read_events(limit=1000, since=time.time() - 86400)
+        counted = {}
+        for r in rows:
+            key = r.get("type", "unknown")
+            counted[key] = counted.get(key, 0) + 1
+        return counted
+    events = cached("metrics_events", 30.0, day_events)
+
+    out = []
+
+    def labels(extra=None):
+        pairs = [("node", node)] + sorted((extra or {}).items())
+        return "{" + ",".join(f'{k}="{esc(v)}"' for k, v in pairs) + "}"
+
+    def add(name, kind, help_text, value, extra=None):
+        out.append(f"# HELP {name} {help_text}")
+        out.append(f"# TYPE {name} {kind}")
+        out.append(f"{name}{labels(extra)} {value}")
+
+    def series(name, kind, help_text, rows):
+        """Несколько значений одной метрики с разными метками."""
+        out.append(f"# HELP {name} {help_text}")
+        out.append(f"# TYPE {name} {kind}")
+        for extra, value in rows:
+            out.append(f"{name}{labels(extra)} {value}")
+
+    add("shape_up", "gauge", "1 if the API is responding", 1)
+    add("shape_info", "gauge", "Static node information", 1,
+        {"version": shape_version(), "api_version": API_VERSION,
+         "interface": iface})
+    add("shape_engine_loaded", "gauge", "1 if eBPF maps are pinned", int(loaded))
+    add("shape_watchdog_active", "gauge", "1 if the watchdog service runs",
+        int(systemd_active("shaper-watch") == "active"))
+    add("shape_uptime_seconds", "gauge", "Seconds since the engine started",
+        round(time.time() - started) if started else 0)
+    add("shape_speed_limit_mbps", "gauge", "Shared per-IP limit in Mbit/s",
+        f"{cfg['speed_mbps']:g}")
+    add("shape_guard_enabled", "gauge", "1 if auto-limiting is on",
+        int(bool(cfg["guard"]["enabled"])))
+
+    series("shape_traffic_bytes_total", "counter",
+           "Bytes since the engine started",
+           [({"direction": "download"}, sum(c["down"] for c in users.values())),
+            ({"direction": "upload"}, sum(c["up"] for c in users.values()))])
+
+    if dl is not None:
+        series("shape_channel_mbps", "gauge",
+               "Current channel load in Mbit/s",
+               [({"direction": "download"}, f"{dl:.3f}"),
+                ({"direction": "upload"}, f"{ul:.3f}")])
+
+    add("shape_ips_known", "gauge", "Addresses seen since the engine started",
+        len(users))
+    add("shape_ips_active", "gauge", "Addresses with traffic in the last minute",
+        active)
+    add("shape_ips_limited", "gauge", "Addresses under an auto or temporary limit",
+        len(limited))
+    add("shape_ips_personal", "gauge", "Addresses with a personal speed",
+        len(personal))
+    add("shape_ips_whitelisted", "gauge", "Addresses on the whitelist",
+        len(S.whitelist_ips()))
+    add("shape_owners_known", "gauge", "Addresses with a known owner",
+        len(S.load_owners()))
+
+    series("shape_events_24h", "gauge", "Events written in the last 24 hours",
+           [({"type": etype}, events.get(etype, 0))
+            for etype in sorted(S.EVENT_TYPES)])
+
+    hist = S.read_history(limit=1)
+    if hist:
+        series("shape_last_day_bytes", "gauge",
+               "Traffic of the last closed day",
+               [({"direction": "download"}, hist[-1].get("down", 0)),
+                ({"direction": "upload"}, hist[-1].get("up", 0))])
+
+    return 200, "\n".join(out) + "\n"
+
+
 # ── OpenAPI ───────────────────────────────────────────────────────────────
 def openapi_spec():
     def resp(code, desc):
@@ -759,6 +1057,53 @@ def openapi_spec():
                                    for k, v in CONFIG_WRITABLE.items()}}),
             },
             "/bpf/status": {"get": op("Состояние eBPF и карт", "чтения")},
+            "/history": {"get": op("Трафик по суткам", "чтения", [
+                {"name": "days", "in": "query", "schema": {"type": "integer"},
+                 "description": "сколько последних суток вернуть, по умолчанию 30"},
+            ])},
+            "/owners": {
+                "get": op("Кто стоит за адресами", "чтения"),
+                "put": op("Загрузить карту «адрес → человек»", "записи", body={
+                    "type": "object",
+                    "properties": {
+                        "items": {"type": "object", "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "maxLength": 64},
+                                "user_id": {"type": "string", "maxLength": 64},
+                                "telegram_id": {"type": "integer"},
+                                "shared": {"type": "boolean",
+                                           "description": "за адресом несколько человек"},
+                            }}},
+                        "replace": {"type": "boolean",
+                                    "description": "true — заменить карту целиком"},
+                    }}),
+            },
+            "/owners/{ip}": {"delete": op("Забыть владельца адреса", "записи",
+                                          ip_param)},
+            "/personal": {"get": op("Постоянные персональные скорости", "чтения")},
+            "/personal/{ip}": {
+                "put": op("Назначить адресу постоянную скорость", "записи",
+                          ip_param, {
+                              "type": "object",
+                              "required": ["mbps"],
+                              "properties": {
+                                  "mbps": {"type": "number", "example": 25,
+                                           "description": "выше или ниже общего лимита"},
+                                  "note": {"type": "string", "maxLength": 64},
+                              }}),
+                "delete": op("Снять персональную скорость", "записи", ip_param),
+            },
+            "/metrics": {"get": {
+                "summary": "Метрики в формате Prometheus",
+                "description": "Текст, не JSON. Доступен также по /metrics без "
+                               "префикса /api/v1. Требует токен чтения, если в "
+                               "настройках не включён metrics_public.",
+                "tags": ["shape"],
+                "security": [{"bearerAuth": []}],
+                "responses": {"200": {"description": "Метрики",
+                                      "content": {"text/plain": {}}}},
+            }},
         },
     }
 
@@ -791,6 +1136,16 @@ ROUTES = [
     ("GET",    r"^/api/v1/config$",                    "read",  h_config_get),
     ("PATCH",  r"^/api/v1/config$",                    "write", h_config_patch),
     ("GET",    r"^/api/v1/bpf/status$",                "read",  h_bpf_status),
+    ("GET",    r"^/api/v1/history$",                   "read",  h_history),
+    ("GET",    r"^/api/v1/owners$",                    "read",  h_owners_list),
+    ("PUT",    r"^/api/v1/owners$",                    "write", h_owners_put),
+    ("DELETE", r"^/api/v1/owners/([^/]{1,45})$",       "write", h_owner_delete),
+    ("GET",    r"^/api/v1/personal$",                  "read",  h_personal_list),
+    ("PUT",    r"^/api/v1/personal/([^/]{1,45})$",     "write", h_personal_put),
+    ("DELETE", r"^/api/v1/personal/([^/]{1,45})$",     "write", h_personal_delete),
+    # Метрики отдаются и по короткому пути: так их ждёт Prometheus по умолчанию.
+    ("GET",    r"^/api/v1/metrics$",                   "read",  h_metrics),
+    ("GET",    r"^/metrics$",                          "read",  h_metrics),
 ]
 COMPILED = [(m, re.compile(p), scope, fn) for m, p, scope, fn in ROUTES]
 WRITE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
@@ -871,6 +1226,19 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _send_text(self, status, text, request_id=None):
+        body = text.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if request_id:
+            self.send_header("X-Request-Id", request_id)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
     def _error(self, err, request_id):
         # Тело запроса при ошибке мы обычно не читаем (например, отказали по
         # токену или по размеру). Оставлять такое соединение живым нельзя:
@@ -924,10 +1292,16 @@ class Handler(BaseHTTPRequestHandler):
         tokens = cfg["tokens"]
         # compare_digest, а не ==: сравнение по первому различию выдаёт токен
         # по времени ответа. Проверяем оба, чтобы время не зависело от роли.
-        is_write = bool(tokens.get("write")) and \
-            hmac.compare_digest(token, tokens["write"])
-        is_read = bool(tokens.get("read")) and \
-            hmac.compare_digest(token, tokens["read"])
+        accept_old = float(tokens.get("previous_until") or 0) > time.time()
+
+        def match(role):
+            if bool(tokens.get(role)) and hmac.compare_digest(token, tokens[role]):
+                return True
+            prev = tokens.get(role + "_previous")
+            return accept_old and bool(prev) and hmac.compare_digest(token, prev)
+
+        is_write = match("write")
+        is_read = match("read")
         if is_write:
             return "write"
         if is_read and scope == "read":
@@ -986,6 +1360,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(404, "NOT_FOUND", "нет такого метода API")
 
             scope, fn = match
+            if fn is h_metrics and cfg.get("metrics_public"):
+                scope = None
             scope_used = self._authorize(scope, cfg, client, request_id)
 
             if scope is None:
@@ -1015,7 +1391,11 @@ class Handler(BaseHTTPRequestHandler):
             req = {"body": body, "query": query, "request_id": request_id,
                    "client": client, "scope": scope_used}
             status, payload = fn(req, *args)
-            self._send(status, payload, request_id)
+            if isinstance(payload, str):
+                # метрики Prometheus — простой текст, не JSON
+                self._send_text(status, payload, request_id)
+            else:
+                self._send(status, payload, request_id)
 
         except ApiError as e:
             status = e.status

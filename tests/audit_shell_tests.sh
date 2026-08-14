@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Проверки shell-части Shape после аудита.
+set -uo pipefail
+SRC="${SHAPE_SRC:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+TMP="$(mktemp -d)"; CONF="$TMP/shaper.conf"
+ok=0; fail=0
+G='\033[32m'; R='\033[31m'; B='\033[1m'; N='\033[0m'
+check() { if eval "$2"; then ok=$((ok+1)); echo -e "  ${G}✓${N} $1"
+          else fail=$((fail+1)); echo -e "  ${R}✗ $1${N}"; fi; }
+
+# Берём функции прямо из menu.sh, чтобы проверять живой код, а не копию.
+{ sed -n '/^conf_safe()/,/^}/p' "$SRC/menu.sh"
+  sed -n '/^conf_set()/,/^}/p'  "$SRC/menu.sh"; } > "$TMP/fn.sh"
+# shellcheck disable=SC1090
+source "$TMP/fn.sh"
+
+echo -e "\n${B}1. Запись в shaper.conf — файл потом выполняется через source${N}"
+: > "$CONF"
+conf_set UI_LANG ru
+check "нормальное значение записано" '[[ "$(grep -c "^UI_LANG=\"ru\"" "$CONF")" == 1 ]]'
+conf_set UI_LANG en
+check "повторная запись заменяет, а не дублирует" \
+      '[[ "$(grep -c "^UI_LANG=" "$CONF")" == 1 ]] && grep -q "UI_LANG=\"en\"" "$CONF"'
+
+for bad in 'x"; touch /tmp/shell_pwned; #' '$(touch /tmp/shell_pwned)' \
+           '`touch /tmp/shell_pwned`' 'a b; id' 'v'$'\n''touch /tmp/shell_pwned' \
+           'x&&id' 'x|id'; do
+    conf_set TUNNEL_HOST "$bad" 2>/dev/null
+    check "отвергнуто: ${bad:0:22}" '! grep -q "TUNNEL_HOST" "$CONF"'
+done
+check "ключ с мусором отвергнут" '! conf_set "A=1; id" v 2>/dev/null'
+
+# Главная проверка: получившийся файл безопасно скормить source
+conf_set TUNNEL_HOST "de.example.com"; conf_set TUNNEL_PORT 22
+( set -e; source "$CONF" ) >/dev/null 2>&1
+check "конфиг корректно читается через source" '[[ $? -eq 0 ]]'
+check "команда из значения не выполнилась" '[[ ! -e /tmp/shell_pwned ]]'
+check "права на конфиг 600" '[[ "$(stat -c %a "$CONF")" == 600 ]]'
+
+echo -e "\n${B}2. Параметры SSH-туннеля${N}"
+# Регулярные выражения берём из самого menu.sh — тест не должен расходиться с кодом.
+HOST_RE="$(grep -o '\^\[A-Za-z0-9\.:_-\]{1,253}\$' "$SRC/menu.sh" | head -1)"
+USER_RE="$(grep -o '\^\[A-Za-z_\]\[A-Za-z0-9_-\]{0,31}\$' "$SRC/menu.sh" | head -1)"
+check "regexp хоста найден в menu.sh" '[[ -n "$HOST_RE" ]]'
+check "regexp пользователя найден в menu.sh" '[[ -n "$USER_RE" ]]'
+
+for bad in 'h.com -o ProxyCommand=id' 'h.com'$'\n''ExecStartPre=/bin/sh -c id' \
+           'h.com;id' '$(id)' 'h.com|id' 'h com'; do
+    check "хост отвергнут: ${bad:0:26}" '! [[ "$bad" =~ $HOST_RE ]]'
+done
+for good in 'de.example.com' '203.0.113.10' '2001:db8::1'; do
+    check "хост принят: $good" '[[ "$good" =~ $HOST_RE ]]'
+done
+for bad in 'root -oProxyCommand=id' 'a;id' '$(id)' 'root'$'\n''x'; do
+    check "пользователь отвергнут: ${bad:0:22}" '! [[ "$bad" =~ $USER_RE ]]'
+done
+check "пользователь root принят" '[[ "root" =~ $USER_RE ]]'
+check "пользователь shape-vpn принят" '[[ "shape-vpn" =~ $USER_RE ]]'
+
+echo -e "\n${B}3. Имя интерфейса в engine.sh${N}"
+source <(grep -m1 "^iface_ok()" "$SRC/engine.sh")
+for bad in 'eth0; rm -rf /' '$(id)' 'a/../../etc' 'очень-длинное-имя-интерфейса' ''; do
+    check "интерфейс отвергнут: ${bad:0:24}" '! iface_ok "$bad"'
+done
+for good in eth0 ens3 enp0s3 eth0.100 br-lan; do
+    check "интерфейс принят: $good" 'iface_ok "$good"'
+done
+
+echo -e "\n${B}4. Синтаксис и целостность${N}"
+for f in menu.sh lang.sh engine.sh install.sh; do
+    check "bash -n $f" "bash -n '$SRC/$f'"
+done
+check "shaperctl.py компилируется" "python3 -m py_compile '$SRC/shaperctl.py'"
+# каждая функция, которую вызывает меню, должна быть определена
+missing="$(python3 - "$SRC/menu.sh" <<'PY'
+import re, sys
+s = open(sys.argv[1]).read()
+d = set(re.findall(r'^([a-z_]+)\(\)\s*\{', s, re.M))
+u = set(re.findall(r'\b(screen_[a-z_]+|tunnel_[a-z_]+|guard_[a-z_]+|conf_set|conf_safe|limited_count|read_state|tg_read|doctor|banner|status_line|installed_version|show_listening|tn_bad)\b', s))
+print(",".join(sorted(u - d)))
+PY
+)"
+check "все функции меню определены (${missing:-нет пропусков})" '[[ -z "$missing" ]]'
+
+# в systemd-юнитах не должно быть опций, создающих пространство монтирования,
+# для сервиса, который монтирует /sys/fs/bpf
+check "shaper.service без PrivateTmp/ProtectHome" \
+      '! grep -qE "^(PrivateTmp|ProtectHome|ProtectSystem)=" "$SRC/systemd/shaper.service"'
+check "shaper-watch.service имеет ReadWritePaths=/etc/shaper" \
+      'grep -q "^ReadWritePaths=/etc/shaper" "$SRC/systemd/shaper-watch.service"'
+check "ни один юнит не запрещает запись в /sys" \
+      '! grep -q "ProtectKernelTunables=yes" "$SRC"/systemd/*.service'
+
+rm -rf "$TMP"
+echo -e "\n${B}Итог: $ok пройдено, $fail провалено${N}"
+[[ $fail -eq 0 ]]

@@ -41,6 +41,13 @@ DIGEST_FILE = os.path.join(ETC_DIR, "digest.json")
 VAR_DIR     = "/var/lib/shape"
 EVENT_FILE  = os.path.join(VAR_DIR, "events.jsonl")
 EVENT_SEQ   = os.path.join(VAR_DIR, "events.seq")
+# Кто стоит за адресом. Заполняется извне — сейчас руками или через API,
+# позже сюда будет складывать карту резолвер панели. Shape сам никуда за
+# этими данными не ходит: его дело — подставить ярлык в сообщение.
+OWNERS_FILE = os.path.join(VAR_DIR, "owners.json")
+# По строке JSON на прошедшие сутки. За год ~40 КБ.
+HISTORY_FILE = os.path.join(VAR_DIR, "history.jsonl")
+HISTORY_MAX_DAYS = 400
 
 NS = 1_000_000_000
 # Мбит/с -> байт/с. Мегабит десятичный: 1 Мбит = 1 000 000 бит = 125 000 байт.
@@ -84,6 +91,7 @@ MSG = {
         "tg_sent": "сообщение отправлено",
         "tg_test_text": "Проверка связи прошла успешно.",
         "tg_limited": "Ограничен",
+        "tg_shared": "за адресом может стоять несколько человек",
         "bad_ip": "«{ip}» — это не IP-адрес",
         "tg_bad_token_fmt": "токен выглядит как 123456789:AAF… — возьми его у @BotFather",
         "tg_bad_chat_fmt": "chat_id — это число (часто со знаком минус) или @имя",
@@ -158,6 +166,23 @@ MSG = {
         "h_json": "вывод в JSON",
         "h_whitelist": "белый список IP",
         "h_event": "записать событие в журнал",
+        "h_personal": "постоянная скорость для адреса",
+        "h_pers_speed": "Мбит/с, выше или ниже общего лимита",
+        "h_owners": "кто стоит за адресом",
+        "h_history": "трафик по суткам",
+        "pers_none": "персональных скоростей нет",
+        "pers_set": "{ip}: персональная скорость {s:g} Мбит/с",
+        "pers_removed": "{ip}: персональная скорость снята",
+        "pers_absent": "у {ip} нет персональной скорости",
+        "pers_need_speed": "укажи скорость: --speed 25",
+        "pers_range": "скорость от {lo} до {hi} Мбит/с",
+        "own_none": "владельцы адресов не заданы",
+        "own_set": "{ip}: сведения сохранены",
+        "own_removed": "{ip}: сведения удалены",
+        "own_bad_tg": "telegram_id — это число",
+        "hist_none": "история пока пуста, первая запись появится в полночь",
+        "hist_day": "Дата", "hist_limited": "ограничений",
+        "hist_total": "всего за {n} сут",
         "no_engine": "движок не запущен — карты не найдены в {d}\n  запусти: systemctl start shaper",
         "cmd_fail": "команда не выполнилась: {c}\n  {e}",
         "port_nan": "порт «{p}» не число",
@@ -211,6 +236,7 @@ MSG = {
         "tg_sent": "message sent",
         "tg_test_text": "Connection test passed.",
         "tg_limited": "Limited",
+        "tg_shared": "this address may be shared by several people",
         "bad_ip": "«{ip}» is not an IP address",
         "tg_bad_token_fmt": "a token looks like 123456789:AAF… — get it from @BotFather",
         "tg_bad_chat_fmt": "chat_id is a number (often negative) or @name",
@@ -285,6 +311,23 @@ MSG = {
         "h_json": "JSON output",
         "h_whitelist": "IP whitelist",
         "h_event": "write a line into the event log",
+        "h_personal": "permanent speed for an address",
+        "h_pers_speed": "Mbit/s, above or below the shared limit",
+        "h_owners": "who is behind an address",
+        "h_history": "traffic per day",
+        "pers_none": "no personal speeds set",
+        "pers_set": "{ip}: personal speed {s:g} Mbit/s",
+        "pers_removed": "{ip}: personal speed removed",
+        "pers_absent": "{ip} has no personal speed",
+        "pers_need_speed": "give a speed: --speed 25",
+        "pers_range": "speed from {lo} to {hi} Mbit/s",
+        "own_none": "no address owners known",
+        "own_set": "{ip}: details saved",
+        "own_removed": "{ip}: details removed",
+        "own_bad_tg": "telegram_id must be a number",
+        "hist_none": "history is empty, the first row appears at midnight",
+        "hist_day": "Date", "hist_limited": "limits",
+        "hist_total": "total over {n} days",
         "no_engine": "engine is not running — no maps in {d}\n  start it: systemctl start shaper",
         "cmd_fail": "command failed: {c}\n  {e}",
         "port_nan": "port \u00ab{p}\u00bb is not a number",
@@ -1044,6 +1087,138 @@ def read_events(after=0, limit=100, etype=None, ip=None, since=None, until=None)
     return out[:limit], False
 
 
+
+# ─────────────────────────── владельцы адресов ───────────────────────────
+# За IP-адресом стоит человек, но шейпер об этом знать не может: он работает
+# на сетевом уровне. Зато об этом знает панель. Здесь лежит готовое место,
+# куда эти сведения складываются, и одна функция, которой пользуются
+# уведомления, журнал событий и API.
+#
+# Формат: {"1.2.3.4": {"label": "Александр", "user_id": "42",
+#                      "telegram_id": 123456789, "updated": 1755100000}}
+
+OWNER_FIELDS = ("label", "user_id", "telegram_id")
+
+
+def load_owners():
+    try:
+        with open(OWNERS_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_owners(owners):
+    os.makedirs(VAR_DIR, exist_ok=True)
+    tmp = OWNERS_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    with os.fdopen(fd, "w") as f:
+        json.dump(owners, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, OWNERS_FILE)
+
+
+def owners_update(fn):
+    """Атомарная правка карты владельцев: её пишут и API, и CLI."""
+    with file_lock(OWNERS_FILE + ".lock"):
+        owners = load_owners()
+        result = fn(owners)
+        save_owners(owners)
+    return result
+
+
+def owner_of(ip, owners=None):
+    """Сведения о владельце адреса или None. Никогда не бросает исключение."""
+    try:
+        rec = (owners if owners is not None else load_owners()).get(ip)
+        if not isinstance(rec, dict):
+            return None
+        out = {k: rec[k] for k in OWNER_FIELDS if rec.get(k) not in (None, "")}
+        return out or None
+    except Exception:
+        return None
+
+
+def subject_text(subject, ip):
+    """
+    Как назвать нарушителя в сообщении.
+
+    Ссылка делается через tg://user?id=…, а не через @username: имя
+    пользователя есть далеко не у всех, а telegram_id панель знает всегда.
+    """
+    if not subject:
+        return f"<code>{ip}</code>"
+    label = html.escape(str(subject.get("label") or "")).strip()
+    tg_id = subject.get("telegram_id")
+    if label and tg_id:
+        return f'<a href="tg://user?id={int(tg_id)}">{label}</a> · <code>{ip}</code>'
+    if label:
+        return f"{label} · <code>{ip}</code>"
+    if tg_id:
+        return f'<a href="tg://user?id={int(tg_id)}">id {int(tg_id)}</a> · <code>{ip}</code>'
+    return f"<code>{ip}</code>"
+
+
+# ──────────────────────────── история по суткам ───────────────────────────
+# Суточные счётчики обнуляются в полночь, и до сих пор от них не оставалось
+# ничего. Одна строка в день стоит около сотни байт — зато появляется ответ
+# на вопрос «сколько мы отдали за прошлый месяц», который рано или поздно
+# задаёт хостер.
+
+def history_append(day, snapshot, limited=0):
+    try:
+        if not snapshot:
+            return
+        owners = load_owners()
+        top = sorted(snapshot.items(), key=lambda kv: -kv[1].get("down", 0))[:5]
+        rec = {
+            "day": day,
+            "down": int(sum(v.get("down", 0) for v in snapshot.values())),
+            "up": int(sum(v.get("up", 0) for v in snapshot.values())),
+            "ips": len(snapshot),
+            "limited": int(limited),
+            "top": [{"ip": ip,
+                     "down": int(v.get("down", 0)),
+                     "label": (owner_of(ip, owners) or {}).get("label")}
+                    for ip, v in top],
+        }
+        os.makedirs(VAR_DIR, exist_ok=True)
+        with file_lock(HISTORY_FILE + ".lock"):
+            rows = read_history(limit=HISTORY_MAX_DAYS)
+            rows = [r for r in rows if r.get("day") != day]
+            rows.append(rec)
+            rows.sort(key=lambda r: r.get("day", ""))
+            rows = rows[-HISTORY_MAX_DAYS:]
+            tmp = HISTORY_FILE + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+            with os.fdopen(fd, "w") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            os.replace(tmp, HISTORY_FILE)
+    except Exception:
+        pass
+
+
+def read_history(limit=30):
+    """Свежие сутки в конце списка."""
+    try:
+        with open(HISTORY_FILE) as f:
+            rows = []
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("day"):
+                    rows.append(rec)
+        return rows[-max(1, int(limit)):]
+    except Exception:
+        return []
+
+
 def penalty_apply(ip, mbps, until_epoch):
     """Пишет штраф в BPF-карту. until пересчитывается в шкалу ядра."""
     left = max(1.0, until_epoch - time.time())
@@ -1054,6 +1229,53 @@ def penalty_apply(ip, mbps, until_epoch):
 
 def penalty_clear(ip):
     map_delete("penalty_map", ip_key(ip))
+
+
+
+# ───────────────────────── персональные скорости ─────────────────────────
+# Карта штрафов в ядре хранит «этому адресу такая-то скорость до такого-то
+# времени» и не проверяет, ниже она общей или выше. Значит тем же механизмом
+# выдаётся и постоянная персональная скорость: сотруднику с рабочей системой
+# больше общего лимита, проблемному адресу — меньше. Отдельного кода в ядре
+# для этого не нужно.
+#
+# Отличаются такие записи полем kind: "personal". Срок им ставится далёкий и
+# продлевается сторожем — бессрочных записей в ядре не бывает.
+
+PERSONAL_TTL = 30 * 24 * 3600      # на сколько вперёд ставится срок в ядре
+PERSONAL_RENEW = 3600              # как часто сторож его продлевает
+
+
+def is_personal(entry):
+    return isinstance(entry, dict) and entry.get("kind") == "personal"
+
+
+def personal_set(ip, mbps, note="", subject=None):
+    """Назначить адресу постоянную скорость. Возвращает запись."""
+    now = time.time()
+    entry = {"until": now + PERSONAL_TTL, "mbps": float(mbps), "since": now,
+             "kind": "personal", "source": "manual", "reason": note or None}
+    if subject:
+        entry["subject"] = subject
+    penalty_apply(ip, mbps, entry["until"])
+    penalties_update(lambda pens: pens.__setitem__(ip, entry))
+    log_event("config_changed", ip=ip, source="manual",
+              message=f"personal {mbps:g} Mbit/s")
+    return entry
+
+
+def personal_clear(ip):
+    existing = load_penalties().get(ip)
+    if not is_personal(existing):
+        return None
+    penalty_clear(ip)
+    penalties_update(lambda pens: pens.pop(ip, None))
+    log_event("config_changed", ip=ip, source="manual", message="personal off")
+    return existing
+
+
+def personal_list():
+    return {ip: p for ip, p in load_penalties().items() if is_personal(p)}
 
 
 def restore_penalties():
@@ -1069,7 +1291,8 @@ def restore_penalties():
 
 
 def cmd_limited(a):
-    pens = load_penalties()
+    # Персональные скорости — не наказание, им место в своём списке.
+    pens = {ip: p for ip, p in load_penalties().items() if not is_personal(p)}
     if a.json:
         print(json.dumps([{"ip": ip, "mbps": p["mbps"],
                            "since": p.get("since"),
@@ -1287,6 +1510,7 @@ def cmd_watch(a):
     today = time.strftime("%Y-%m-%d")
     prev, prev_t = read_users(), time.monotonic()
     last_daily_save = time.time()
+    last_personal_renew = 0.0
     interval = load_config()["guard"].get("watch_interval", WATCH_INTERVAL)
 
     while True:
@@ -1301,10 +1525,25 @@ def cmd_watch(a):
             day_now = time.strftime("%Y-%m-%d")
             if day_now != today:
                 digest_stash(today, daily)
+                # Та же точка — единственная, где сутки видны целиком.
+                history_append(today, daily,
+                               limited=len([p for p in load_penalties().values()
+                                            if not is_personal(p)]))
                 daily = {}
                 save_daily(daily)
                 today = day_now
             digest_due(cfg)
+
+            # Персональные скорости живут в ядре с далёким, но конечным
+            # сроком. Продлеваем раз в час, чтобы они не истекли молча.
+            if time.time() - last_personal_renew > PERSONAL_RENEW:
+                last_personal_renew = time.time()
+                for pip, pentry in personal_list().items():
+                    try:
+                        penalty_apply(pip, pentry["mbps"],
+                                      time.time() + PERSONAL_TTL)
+                    except Exception:
+                        pass
 
             cur = read_users()
             now_t = time.monotonic()
@@ -1351,6 +1590,8 @@ def cmd_watch(a):
                 if s["dl_bytes"]:
                     hourly_add(hourly, ip, s["dl_bytes"], time.time())
 
+                # Адрес с персональной скоростью автоограничению не подлежит:
+                # решение по нему уже принято человеком.
                 if not guard_on or ip in pens or ip in wl:
                     continue
 
@@ -1371,12 +1612,19 @@ def cmd_watch(a):
                              "since": time.time(), "source": "watchdog",
                              "kind": "auto", "reason": ",".join(reasons),
                              "score": score, "reasons": reasons}
+                    # Ярлык владельца прикрепляем в момент выдачи: позже
+                    # человек может отключиться, и связь потеряется.
+                    who = owner_of(ip)
+                    if who:
+                        entry["subject"] = who
                     # Под замком: файл теперь правит ещё и API.
                     penalties_update(lambda p, i=ip, e=entry: p.__setitem__(i, e))
                     pens[ip] = entry
                     log_event("guard_triggered", ip=ip, source="watchdog",
                               mbps=g["penalty_mbps"], minutes=g["penalty_min"],
-                              score=score, reason=",".join(reasons))
+                              score=score, reason=",".join(reasons),
+                              subject=(entry.get("subject") or {}).get("label"),
+                              telegram_id=(entry.get("subject") or {}).get("telegram_id"))
                     both_streak[ip] = peak_streak[ip] = 0
                     # Окно очищаем: иначе после снятия штрафа те же гигабайты
                     # в скользящем часе тут же уронили бы человека повторно.
@@ -1384,7 +1632,8 @@ def cmd_watch(a):
                     print(t("watch_hit", ip=ip, mbps=g["penalty_mbps"],
                             m=g["penalty_min"]) +
                           f" [{score}: {','.join(reasons)}]", flush=True)
-                    tg_penalty(cfg, ip, g["penalty_mbps"], g["penalty_min"], reasons)
+                    tg_penalty(cfg, ip, g["penalty_mbps"], g["penalty_min"],
+                               reasons, subject=entry.get("subject"))
 
             if time.time() - last_daily_save > 60:
                 # чистим тех, кто за сутки не набрал ничего заметного
@@ -1538,17 +1787,21 @@ def tg_send(text, cfg=None, force=False):
         return False, scrub(f"{e}{hint}", {"telegram": tg})
 
 
-def tg_penalty(cfg, ip, mbps, minutes, reasons):
+def tg_penalty(cfg, ip, mbps, minutes, reasons, subject=None):
     """Событие: адрес получил ограничение."""
     tg = cfg["telegram"]
     if not tg.get("enabled") or not tg.get("events"):
         return
     why = ", ".join(t("why_" + r) for r in reasons) or "—"
-    ok, err = tg_send(
-        f"🚦 <b>{node_label(tg)}</b>\n"
-        f"{t('tg_limited')} <code>{ip}</code> → {mbps:g} Mbit/s "
-        f"{t('guard_for')} {fmt_hold(minutes * 60)}\n"
-        f"<i>{why}</i>", cfg)
+    lines = [f"🚦 <b>{node_label(tg)}</b>",
+             f"{t('tg_limited')} {subject_text(subject, ip)} → {mbps:g} Mbit/s "
+             f"{t('guard_for')} {fmt_hold(minutes * 60)}",
+             f"<i>{why}</i>"]
+    # За одним адресом может сидеть несколько человек — предупреждаем прямо
+    # в сообщении, чтобы никто не обвинил не того.
+    if subject and subject.get("shared"):
+        lines.append(f"<i>{t('tg_shared')}</i>")
+    ok, err = tg_send("\n".join(lines), cfg)
     if not ok:
         print(f"telegram: {err}", flush=True)
 
@@ -1566,8 +1819,11 @@ def digest_text(cfg, day, snapshot, partial=False):
     if top:
         lines.append("")
         lines.append(t("tg_top") + ":")
+        owners = load_owners()
         for i, (ip, v) in enumerate(top, 1):
-            lines.append(f"{i}. <code>{ip}</code> — {fmt_bytes(v.get('down', 0))}")
+            who = owner_of(ip, owners)
+            name = html.escape(str(who["label"])) + " · " if who and who.get("label") else ""
+            lines.append(f"{i}. {name}<code>{ip}</code> — {fmt_bytes(v.get('down', 0))}")
     return "\n".join(lines)
 
 
@@ -1730,6 +1986,117 @@ def ip_key(ip_str):
     return ip.packed + b"\x00" * 12 if ip.version == 4 else ip.packed
 
 
+def cmd_history(a):
+    rows = read_history(limit=max(1, min(a.days, HISTORY_MAX_DAYS)))
+    if a.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    if not rows:
+        print(f"\n  {C['gry']}{t('hist_none')}{C['r']}\n")
+        return
+    print(f"\n{C['gry']}  {t('hist_day'):<12}{t('downloaded'):>12}{t('uploaded'):>12}"
+          f"{t('total_ips'):>10}{t('hist_limited'):>12}{C['r']}")
+    print("  " + "─" * 60)
+    for r in rows:
+        print(f"  {r['day']:<12}{fmt_bytes(r.get('down', 0)):>12}"
+              f"{fmt_bytes(r.get('up', 0)):>12}{r.get('ips', 0):>10}"
+              f"{r.get('limited', 0):>12}")
+    total = sum(r.get("down", 0) + r.get("up", 0) for r in rows)
+    print(f"\n  {C['gry']}{t('hist_total', n=len(rows))}: "
+          f"{fmt_bytes(total)}{C['r']}\n")
+
+
+def cmd_personal(a):
+    """Постоянная скорость для адреса — выше или ниже общего лимита."""
+    if a.action == "list":
+        items = personal_list()
+        if a.json:
+            print(json.dumps([dict(limit_row(ip, p)) for ip, p in items.items()],
+                             ensure_ascii=False, indent=2))
+            return
+        if not items:
+            print(f"\n  {C['gry']}{t('pers_none')}{C['r']}\n")
+            return
+        print(f"\n{C['gry']}  {'IP':<24}{t('speed'):>12}   {t('lim_why')}{C['r']}")
+        print("  " + "─" * 60)
+        for ip, p in sorted(items.items()):
+            who = (p.get("subject") or {}).get("label") or \
+                  (owner_of(ip) or {}).get("label") or ""
+            note = p.get("reason") or ""
+            tail = " · ".join(x for x in (who, note) if x)
+            print(f"  {C['b']}{ip:<24}{C['r']}{p['mbps']:>9g} Mbit/s   "
+                  f"{C['gry']}{tail}{C['r']}")
+        print()
+        return
+
+    ip = valid_ip(a.ip)
+    if ip is None:
+        die(t("bad_ip", ip=str(a.ip)[:60]))
+
+    if a.action == "del":
+        if personal_clear(ip) is None:
+            die(t("pers_absent", ip=ip))
+        print(f"{C['grn']}✓ {t('pers_removed', ip=ip)}{C['r']}")
+        return
+
+    require_engine()
+    if a.speed is None:
+        die(t("pers_need_speed"))
+    if a.speed != a.speed or a.speed in (float("inf"), float("-inf")):
+        die(t("neg_speed"))
+    if not 0.05 <= a.speed <= MAX_MBPS:
+        die(t("pers_range", lo=0.05, hi=MAX_MBPS))
+    personal_set(ip, a.speed, a.note or "")
+    print(f"{C['grn']}✓ {t('pers_set', ip=ip, s=a.speed)}{C['r']}")
+
+
+def cmd_owners(a):
+    """Кто стоит за адресом. Наполняется вручную или извне через API."""
+    if a.action == "list":
+        owners = load_owners()
+        if a.json:
+            print(json.dumps(owners, ensure_ascii=False, indent=2))
+            return
+        if not owners:
+            print(f"\n  {C['gry']}{t('own_none')}{C['r']}\n")
+            return
+        print()
+        for ip, _rec in sorted(owners.items()):
+            who = owner_of(ip, owners) or {}
+            print(f"  {ip:<24}{who.get('label', '—')}"
+                  f"{'  tg:' + str(who['telegram_id']) if who.get('telegram_id') else ''}")
+        print()
+        return
+
+    ip = valid_ip(a.ip)
+    if ip is None:
+        die(t("bad_ip", ip=str(a.ip)[:60]))
+    if a.action == "del":
+        owners_update(lambda o: o.pop(ip, None))
+        print(f"{C['grn']}✓ {t('own_removed', ip=ip)}{C['r']}")
+        return
+
+    rec = {"updated": round(time.time())}
+    if a.label:
+        rec["label"] = a.label.strip()[:64]
+    if a.user_id:
+        rec["user_id"] = a.user_id.strip()[:64]
+    if a.telegram_id:
+        if not str(a.telegram_id).isdigit():
+            die(t("own_bad_tg"))
+        rec["telegram_id"] = int(a.telegram_id)
+    owners_update(lambda o: o.__setitem__(ip, rec))
+    print(f"{C['grn']}✓ {t('own_set', ip=ip)}{C['r']}")
+
+
+def limit_row(ip, p):
+    """Одна запись в машинном виде. Используется и CLI, и API."""
+    return {"ip": ip, "mbps": float(p.get("mbps", 0)),
+            "kind": p.get("kind", "auto"), "source": p.get("source", "watchdog"),
+            "since": p.get("since"), "until": p.get("until"),
+            "reason": p.get("reason"), "subject": p.get("subject")}
+
+
 def cmd_event(a):
     """Записать событие в журнал. Вызывается из engine.sh при старте и стопе."""
     ip = valid_ip(a.ip) if a.ip else None
@@ -1869,6 +2236,28 @@ def build_parser():
     tg.add_argument("--daily", choices=["on", "off"], default=None)
     tg.add_argument("--quiet", action="store_true")
     tg.set_defaults(func=cmd_telegram)
+
+    pr = sub.add_parser("personal", help=t("h_personal"))
+    pr.add_argument("action", choices=["set", "del", "list"])
+    pr.add_argument("ip", nargs="?", default="")
+    pr.add_argument("--speed", type=float, default=None, help=t("h_pers_speed"))
+    pr.add_argument("--note", default=None)
+    pr.add_argument("--json", action="store_true")
+    pr.set_defaults(func=cmd_personal)
+
+    ow = sub.add_parser("owners", help=t("h_owners"))
+    ow.add_argument("action", choices=["set", "del", "list"])
+    ow.add_argument("ip", nargs="?", default="")
+    ow.add_argument("--label", default=None)
+    ow.add_argument("--user-id", dest="user_id", default=None)
+    ow.add_argument("--telegram-id", dest="telegram_id", default=None)
+    ow.add_argument("--json", action="store_true")
+    ow.set_defaults(func=cmd_owners)
+
+    hs = sub.add_parser("history", help=t("h_history"))
+    hs.add_argument("--days", type=int, default=30)
+    hs.add_argument("--json", action="store_true")
+    hs.set_defaults(func=cmd_history)
 
     ev = sub.add_parser("event", help=t("h_event"))
     ev.add_argument("type", choices=sorted(EVENT_TYPES))

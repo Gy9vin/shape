@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.0-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.1-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.0
+# Shape v3.1
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -615,6 +615,79 @@ through the shaper.
 
 `/etc/shaper` is root-only (750) and `config.json` is 600: it holds the bot
 token.
+
+---
+
+## Monitoring
+
+The API serves Prometheus metrics at `/metrics`, with a `node` label on every
+metric so graphs are labelled by node name rather than by address. A ready
+Grafana dashboard for the whole fleet lives in [grafana/](grafana/), together
+with a sample `scrape_configs` and a description of every metric.
+
+```bash
+curl -H "Authorization: Bearer $READ_TOKEN" http://127.0.0.1:8765/metrics
+```
+
+Scraping costs next to nothing: heavy reads are cached — map dumps for two
+seconds, the event log for thirty.
+
+---
+
+## History by day
+
+Daily counters reset at midnight, but now a row is written to
+`/var/lib/shape/history.jsonl` first: date, downloaded, uploaded, address
+count, limits issued and the five heaviest addresses. About a hundred bytes a
+day, forty kilobytes a year.
+
+Menu → **Statistics → 📅 History by day**, or `shaperctl.py history --days 30`,
+or `GET /api/v1/history`. This is the answer to the hoster's "how much did you
+push last month".
+
+---
+
+## Personal speeds
+
+The penalty map in the kernel does not check whether a personal speed is below
+the shared limit or above it. So the same mechanism grants a permanent speed:
+more than the shared limit for a colleague with a work system, less for a
+problem address. No kernel changes were needed.
+
+Menu → **Statistics → 🎯 Personal speeds**. Auto-limiting leaves such addresses
+alone — a human has already decided about them. They are not shown in the
+limited list and are not counted on the main screen.
+
+---
+
+## Who is behind an address
+
+Shape works at the network layer and only knows addresses. A name reads better
+in a message though, so there is an owner map at
+`/var/lib/shape/owners.json`:
+
+```json
+{"91.79.27.87": {"label": "Alexandr", "telegram_id": 123456789,
+                 "user_id": "42", "shared": false}}
+```
+
+Filled in by hand (`shaperctl.py owners set 91.79.27.87 --label Alexandr
+--telegram-id 123456789`) or in bulk through `PUT /api/v1/owners` — that is
+where a panel resolver will write once it exists. Shape itself never goes
+looking for this data, and it should not.
+
+The label is attached to a limit **at the moment it is issued**: later the
+person disconnects and the link is lost. Notifications then carry a name with a
+`tg://user?id=…` link, which works even for people without a username:
+
+```
+🚦 RU Manassas
+Limited Alexandr · 91.79.27.87 → 1 Mbit/s for 4.0 h
+downloaded gigabytes within an hour
+```
+
+If an address is marked `"shared": true`, the message says so. Better a warning
+than blaming the wrong person one day.
 
 ---
 

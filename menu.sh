@@ -681,7 +681,8 @@ import json, time
 try: p = json.load(open('$ETC_DIR/penalties.json'))
 except Exception: p = {}
 now = time.time()
-print(sum(1 for v in p.values() if isinstance(v, dict) and v.get('until', 0) > now))
+print(sum(1 for v in p.values() if isinstance(v, dict)
+          and v.get('until', 0) > now and v.get('kind') != 'personal'))
 " 2>/dev/null || echo 0
 }
 
@@ -714,11 +715,15 @@ screen_stats() {
         echo
         echo "  [1] ${T[stats_top]}"
         echo "  [2] ${T[stats_full]}"
+        echo "  [3] 📅 ${T[hist_title]}"
+        echo "  [4] 🎯 ${T[pers_title]}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
             1) title "${T[stats_title]}"; "$CTL" status; pause ;;
             2) title "${T[stats_title]}"; "$CTL" status --full; pause ;;
+            3) screen_history ;;
+            4) screen_personal ;;
             0|"") return ;;
         esac
     done
@@ -745,6 +750,53 @@ screen_whitelist() {
             0|"") return ;;
         esac
     done
+}
+
+# ── Персональные скорости ─────────────────────────────────────────────
+# Карта штрафов в ядре не проверяет, ниже персональная скорость общей или
+# выше. Значит тем же механизмом выдаётся и постоянная скорость: сотруднику
+# с рабочей системой больше общего лимита, проблемному адресу — меньше.
+screen_personal() {
+    local ip speed note
+    while :; do
+        title "${T[pers_title]}"
+        echo -e "  ${D}${T[pers_h1]}${N}"
+        echo -e "  ${D}${T[pers_h2]}${N}"
+        "$CTL" personal list
+        hr
+        echo "  [1] ${T[pers_add]}"
+        echo "  [2] ${T[pers_del]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) ip="$(ask "${T[wl_ask]}")"
+               [[ -z "$ip" ]] && continue
+               speed="$(ask "${T[pers_speed]}")"
+               if [[ ! "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+                   echo -e "  ${R}${T[need_num]}${N}"; pause; continue
+               fi
+               note="$(ask "${T[pers_note]}")"
+               echo
+               "$CTL" personal set "$ip" --speed "$speed" --note "$note"
+               pause ;;
+            2) ip="$(ask "${T[wl_ask]}")"
+               [[ -n "$ip" ]] && { "$CTL" personal del "$ip"; sleep 1; } ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+# ── История по суткам ─────────────────────────────────────────────────
+screen_history() {
+    local d
+    title "${T[hist_title]}"
+    echo -e "  ${D}${T[hist_h1]}${N}"
+    echo
+    d="$(ask "${T[hist_days]}" 30)"
+    [[ "$d" =~ ^[0-9]+$ ]] || d=30
+    title "${T[hist_title]}"
+    "$CTL" history --days "$d"
+    pause
 }
 
 # ── Обновление из GitHub ──────────────────────────────────────────────
@@ -977,14 +1029,20 @@ PYAPI
 
 api_rotate() {
     python3 - <<'PYAPI'
-import json, os, secrets
+import json, os, secrets, time
 path = "/etc/shaper/api.json"
 try:
     cfg = json.load(open(path))
 except Exception:
     cfg = {}
+old = cfg.get("tokens") or {}
+# Прежняя пара принимается ещё сутки: иначе смена токена на десятках нод
+# означала бы, что часть из них отвечает 401, пока обновляешь остальные.
 cfg["tokens"] = {"read": secrets.token_urlsafe(32),
-                 "write": secrets.token_urlsafe(32)}
+                 "write": secrets.token_urlsafe(32),
+                 "read_previous": old.get("read", ""),
+                 "write_previous": old.get("write", ""),
+                 "previous_until": time.time() + 86400}
 tmp = path + ".tmp"
 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as f:
