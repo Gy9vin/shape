@@ -72,8 +72,12 @@ PEN_FMT = "<2Q"             # struct penalty: rate_bytes_per_sec, until_ns
 USER_FMT, USER_SIZE = "<4Q", 32   # struct user_state
 
 C = {
-    "r": "\033[0m", "b": "\033[1m",
+    "r": "\033[0m", "b": "\033[1m", "dim": "\033[2m",
     "red": "\033[31m", "grn": "\033[32m", "yel": "\033[33m", "gry": "\033[90m",
+    # Яркие оттенки для монитора: на тёмной теме обычный красный сливается
+    # с фоном, а на светлой жёлтый становится нечитаемым.
+    "cyan": "\033[36m", "bred": "\033[91m", "bgrn": "\033[92m",
+    "byel": "\033[93m",
 }
 
 
@@ -222,12 +226,19 @@ MSG = {
         "wl_loaded": "загружено в белый список: {n}",
         "wl_bad": "пропущен неверный адрес: {ip}",
         "wl_empty": "белый список пуст",
-        "mon_title": "Монитор", "mon_hint": "· обновление каждые {i} с · Ctrl+C — выход",
+        "mon_title": "Монитор", "mon_hint": "обновление {i} с · Ctrl+C — выход",
         "mon_channel": "Канал сейчас", "mon_limit": "Лимит {s:g} Мбит/с на IP",
         "mon_nolimit": "Лимит не задан", "mon_loading": "нагружают канал",
         "mon_of": "из", "mon_idle": "сейчас никто не качает",
         "mon_up": "отдача", "mon_avg": "мин.средн", "mon_hold": "держит",
         "mon_bar": "загрузка", "mon_more": "… ещё {n} активных",
+        "mon_share": "доля лимита",
+        "mon_minute": "за минуту",
+        "mon_limit_row": "Лимит на адрес",
+        "mon_per_ip": "на каждый IP",
+        "mon_shown": "показано {a} из {b}",
+        "mon_leg_hold": "держит больше 30 с",
+        "mon_leg_limited": "ограничен",
         "mon_legend": "жёлтым — держит нагрузку больше 30 с, красным — упёрся в лимит",
     },
     "en": {
@@ -371,12 +382,19 @@ MSG = {
         "wl_loaded": "loaded into the whitelist: {n}",
         "wl_bad": "skipped invalid address: {ip}",
         "wl_empty": "whitelist is empty",
-        "mon_title": "Monitor", "mon_hint": "· refresh every {i} s · Ctrl+C to exit",
+        "mon_title": "Monitor", "mon_hint": "refresh every {i} s · Ctrl+C to exit",
         "mon_channel": "Channel now", "mon_limit": "Limit {s:g} Mbit/s per IP",
         "mon_nolimit": "No limit set", "mon_loading": "loading the channel",
         "mon_of": "of", "mon_idle": "nobody is downloading right now",
         "mon_up": "upload", "mon_avg": "1-min avg", "mon_hold": "holding",
         "mon_bar": "load", "mon_more": "… {n} more active",
+        "mon_share": "share of limit",
+        "mon_minute": "last minute",
+        "mon_limit_row": "Limit per address",
+        "mon_per_ip": "for every IP",
+        "mon_shown": "showing {a} of {b}",
+        "mon_leg_hold": "holding over 30 s",
+        "mon_leg_limited": "limited",
         "mon_legend": "yellow — holding load over 30 s, red — hitting the limit",
     },
 }
@@ -847,11 +865,49 @@ def fmt_hold(sec):
     return f"{sec / 3600:.1f} {t('hour')}"
 
 
+# Дробные блоки: восьмушки ширины символа. Обычная полоса из целых блоков
+# при ширине 12 различает всего двенадцать уровней — разница между 7.3 и 7.4
+# на ней не видна вовсе. С восьмушками уровней 96 при той же ширине.
+EIGHTHS = "▏▎▍▌▋▊▉█"
+SPARK = "▁▂▃▄▅▆▇█"
+
+
 def bar(value, scale, width=14):
     if scale <= 0:
         return ""
-    filled = min(width, int(round(value / scale * width)))
-    return "█" * filled + "·" * (width - filled)
+    units = max(0.0, min(1.0, value / scale)) * width
+    full = int(units)
+    rest = units - full
+    out = "█" * full
+    if full < width and rest > 0.06:
+        out += EIGHTHS[min(7, int(rest * 8))]
+    return out + "·" * max(0, width - len(out))
+
+
+def spark(values, width=12):
+    """Мини-график последних значений. Пусто, если рисовать нечего."""
+    vals = [v for v in values if v is not None][-width:]
+    if len(vals) < 2:
+        return ""
+    top = max(vals)
+    if top <= 0:
+        return "▁" * len(vals)
+    return "".join(SPARK[min(7, int(v / top * 7.999))] for v in vals)
+
+
+def load_color(share):
+    """
+    Цвет по доле от лимита. Раньше цвет зависел от того, «держит» ли адрес
+    нагрузку дольше тридцати секунд, и на спокойной ноде экран был
+    одноцветным — глазу не за что зацепиться.
+    """
+    if share >= 0.8:
+        return C["bred"]
+    if share >= 0.5:
+        return C["byel"]
+    if share >= 0.2:
+        return C["bgrn"]
+    return C["gry"]
 
 
 def cmd_monitor(a):
@@ -861,9 +917,12 @@ def cmd_monitor(a):
     # «Держит нагрузку» — выше половины лимита. Без лимита берём 5 Мбит/с.
     busy_at = max(1.0, limit * 0.5) if limit > 0 else 5.0
     keep = max(3, int(60 / a.interval))     # усреднение примерно за минуту
+    spark_keep = max(8, int(60 / a.interval))
 
-    history, since = {}, {}
+    history, since, chan = {}, {}, []
     prev, prev_t = read_users(), time.monotonic()
+    pens, pens_at = load_penalties(), 0.0
+    width = 76
 
     print("\033[?25l", end="", flush=True)   # спрятать курсор
     try:
@@ -874,6 +933,10 @@ def cmd_monitor(a):
             dt = max(0.1, now_t - prev_t)
             rt = rates(prev, cur, dt)
             prev, prev_t = cur, now_t
+
+            # Список штрафов меняется редко — перечитываем раз в пять секунд.
+            if now_t - pens_at > 5:
+                pens, pens_at = load_penalties(), now_t
 
             rows = []
             for ip, (dl, ul) in rt.items():
@@ -891,32 +954,63 @@ def cmd_monitor(a):
             active.sort(key=lambda r: r[1] + r[2], reverse=True)
             total_dl = sum(r[1] for r in rows)
             total_ul = sum(r[2] for r in rows)
+            chan.append(total_dl)
+            del chan[:-spark_keep]
             scale = limit if limit > 0 else max([r[1] for r in active] + [10])
 
-            head = (t("mon_limit", s=limit) if limit > 0 else t("mon_nolimit"))
-            print("\033[H\033[2J", end="")
-            print(f"\n  {C['b']}{t('mon_title')}{C['r']} "
-                  f"{C['gry']}{t('mon_hint', i=a.interval)}{C['r']}\n")
-            print(f"  {t('mon_channel')} : {C['b']}↓ {total_dl:.1f}{C['r']} · "
-                  f"↑ {total_ul:.1f} Mbit/s")
-            print(f"  {head} · {t('mon_loading')}: {C['b']}{len(active)}{C['r']} "
-                  f"{t('mon_of')} {len(rows)}\n")
-            print(f"{C['gry']}  {'IP':<24}{t('now'):>9}{t('mon_up'):>9}"
-                  f"{t('mon_avg'):>11}{t('mon_hold'):>9}   {t('mon_bar')}{C['r']}")
-            print("  " + "─" * 76)
+            out = ["\033[H\033[2J"]
+            out.append(f"\n  {C['b']}{t('mon_title')}{C['r']}"
+                       f"{C['gry']}{t('mon_hint', i=a.interval):>{width - 8}}{C['r']}")
+            out.append(f"  {C['gry']}{'─' * width}{C['r']}")
+
+            line = spark(chan)
+            out.append(f"   {t('mon_channel'):<16}"
+                       f"{C['b']}↓ {total_dl:>6.1f}{C['r']}   ↑ {total_ul:>5.1f} Mbit/s"
+                       f"   {C['cyan']}{line}{C['r']}"
+                       f"{('  ' + t('mon_minute')) if line else ''}")
+            if limit > 0:
+                out.append(f"   {t('mon_limit_row'):<16}{C['b']}{limit:g} Mbit/s{C['r']}"
+                           f"   {C['gry']}{t('mon_per_ip')}{C['r']}"
+                           f"      {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
+                           f" {t('mon_of')} {len(rows)}")
+            else:
+                out.append(f"   {t('mon_limit_row'):<16}{C['yel']}{t('mon_nolimit')}{C['r']}"
+                           f"          {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
+                           f" {t('mon_of')} {len(rows)}")
+            out.append(f"  {C['gry']}{'─' * width}{C['r']}")
+            out.append(f"{C['gry']}   {'IP':<22}{t('now'):>8}{t('mon_up'):>10}"
+                       f"{t('mon_avg'):>11}   {t('mon_share')}{C['r']}")
 
             if not active:
-                print(f"  {C['gry']}{t('mon_idle')}{C['r']}")
-            for ip, dl, ul, avg, hold in active[:a.top]:
-                # красным — те, кто уткнулся в лимит и держит его долго
-                hot = limit > 0 and dl >= limit * 0.9 and hold >= 30
-                color = C["red"] if hot else (C["yel"] if hold >= 30 else "")
-                print(f"  {color}{ip:<24}{dl:>9.1f}{ul:>9.1f}{avg:>11.1f}"
-                      f"{fmt_hold(hold):>9}{C['r']}   {bar(dl, scale)}")
+                out.append(f"\n   {C['gry']}{t('mon_idle')}{C['r']}")
 
-            if len(active) > a.top:
-                print(f"  {C['gry']}{t('mon_more', n=len(active) - a.top)}{C['r']}")
-            print(f"\n  {C['gry']}{t('mon_legend')}{C['r']}")
+            for ip, dl, ul, avg, hold in active[:a.top]:
+                share = dl / scale if scale > 0 else 0
+                col = load_color(share)
+                # Значок слева вместо колонки «держит»: в спокойный час она
+                # была сплошь из прочерков и занимала девять знаков впустую.
+                if ip in pens:
+                    mark = f"{C['bred']}⊘{C['r']}"
+                elif hold >= 30:
+                    mark = f"{C['byel']}▪{C['r']}"
+                else:
+                    mark = " "
+                pct = f"{share * 100:>3.0f}%" if limit > 0 else "   "
+                # Отдачу красим по своей шкале: у мобильных операторов канал
+                # вверх узкий, и заметная отдача — первый признак раздачи.
+                ul_col = C["gry"]
+                if limit > 0 and ul >= limit * 0.15:
+                    ul_col = C["bred"] if ul >= limit * 0.4 else C["byel"]
+                out.append(f" {mark} {ip:<22}{col}{dl:>8.1f}{C['r']}"
+                           f"{ul_col}{ul:>10.1f}{C['r']}"
+                           f"{C['gry']}{avg:>11.1f}{C['r']}"
+                           f"   {col}{bar(dl, scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}")
+
+            out.append(f"  {C['gry']}{'─' * width}{C['r']}")
+            shown = min(len(active), a.top)
+            out.append(f"   {C['gry']}{t('mon_shown', a=shown, b=len(active))}"
+                       f"   ▪ {t('mon_leg_hold')}   ⊘ {t('mon_leg_limited')}{C['r']}")
+            print("\n".join(out), flush=True)
     except KeyboardInterrupt:
         pass
     finally:

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.2-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.3-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.2
+# Shape v3.3
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -29,7 +29,7 @@ limit. The other way round, one person on a phone and a laptop on different
 networks gets two independent limits. Your panel knows about accounts, the
 shaper does not — it works at the network layer and only sees addresses.
 
-Version history lives in [CHANGELOG.md](CHANGELOG.md).
+Version history lives in [CHANGELOG.en.md](CHANGELOG.en.md) ([Русский](CHANGELOG.md)).
 
 There is an optional [Node API](#node-api) for external systems — installed
 separately, and Shape runs perfectly well without it.
@@ -136,15 +136,32 @@ Menu → **📡 Monitor**. Live per-IP speeds, a one-minute average and how long
 address has been holding the load:
 
 ```
-  IP                        now   upload   1-min avg  holding   load
-  ────────────────────────────────────────────────────────────────────
-  185.12.34.56             14.9      1.2        14.6    12 min   ██████████████
-  91.79.27.87               9.8      0.1         6.2     2 min   █████████·····
+  Monitor                                      refresh 2 s · Ctrl+C to exit
+  ────────────────────────────────────────────────────────────────────────────
+   Channel now     ↓   54.1   ↑  10.4 Mbit/s   ▂▃▄▅▅▆▇█████  last minute
+   Limit per address  10 Mbit/s   for every IP    loading 58 of 377
+  ────────────────────────────────────────────────────────────────────────────
+   IP                         now    upload   1-min avg   share of limit
+   92.255.180.20              7.3       0.4         3.7   ████████▉···  73%
+ ▪ 94.77.7.203                6.4       0.3         1.8   ███████▊····  64%
+   88.151.91.251              4.9       0.2         1.1   ██████······  49%
+   91.79.15.94                1.4       2.7         1.7   █▊··········  14%
+ ⊘ 89.253.46.46               1.0       0.0         4.3   █▎··········  10%
+  ────────────────────────────────────────────────────────────────────────────
+   showing 20 of 58   ▪ holding over 30 s   ⊘ limited
 ```
 
-Yellow means the address has been loading the channel for over 30 seconds, red
-means it is pinned at the limit. That is usually enough to spot a downloader
-without any auto-limiting at all.
+**Row colour is the share of the limit:** grey up to 20%, green to half, yellow
+to 80%, red above. The upload column has its own scale: mobile carriers give a
+narrow uplink, so noticeable upload is the first sign of seeding. In the sample
+above 91.79.15.94 downloads only 1.4 Mbit/s but uploads 2.7 — that is what a
+torrent looks like.
+
+**The mark on the left:** ▪ the address has been holding load for over 30
+seconds, ⊘ the address is already limited. The sparkline in the header is the
+channel over the last minute.
+
+That is usually enough to spot a downloader without any auto-limiting at all.
 
 ---
 
@@ -711,6 +728,14 @@ downloaded gigabytes within an hour
 
 If an address is marked `"shared": true`, the message says so. Better a warning
 than blaming the wrong person one day.
+
+---
+
+## How a release is made
+
+The project's rules live in [RELEASING.md](RELEASING.md): two languages with
+Russian as the primary one, the version section in `CHANGELOG.md` doubles as
+the release notes, and CI checks the version number across five files at once.
 
 ---
 
