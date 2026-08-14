@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.1-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.2-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
@@ -13,7 +13,7 @@
   <b>Русский</b> · <a href="README.en.md">English</a>
 </p>
 
-# Shape v3.1
+# Shape v3.2
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -674,17 +674,40 @@ curl -X POST http://127.0.0.1:8765/api/v1/limits \
 
 ## Мониторинг
 
-API отдаёт метрики в формате Prometheus по `/metrics` — с меткой `node`
-у каждой метрики, чтобы графики подписывались именем ноды, а не адресом.
-Готовый дашборд Grafana на весь парк лежит в [grafana/](grafana/), там же
-пример `scrape_configs` и описание всех метрик.
+Метрики Prometheus отдаются **двумя путями**, и API для этого не обязателен.
+Настраивается в меню: **Сервис → 📈 Мониторинг**.
+
+**Через файл — если на ноде уже есть node_exporter.** Мастер сам находит его
+каталог textfile, ставит systemd-таймер и раз в минуту пишет туда
+`shape.prom`. Ни открытых портов, ни токенов, ни API:
+
+```bash
+shaperctl.py metrics                       # посмотреть глазами
+shaperctl.py metrics --out /var/lib/node_exporter/textfile_collector/shape.prom
+```
+
+**Через API — если он установлен** и виден мониторингу:
 
 ```bash
 curl -H "Authorization: Bearer $READ_TOKEN" http://127.0.0.1:8765/metrics
 ```
 
+Текст в обоих случаях собирается одним и тем же кодом в `shaperctl.py`,
+поэтому расходиться ему не с чем. У API поверх общего набора есть две своих
+метрики — `shape_api_up` и `shape_api_uptime_seconds`.
+
+У каждой метрики стоит метка `node`, чтобы графики подписывались именем ноды,
+а не адресом. Готовый дашборд Grafana на весь парк лежит в
+[grafana/](grafana/), там же примеры `scrape_configs` и описание всех метрик.
+
 Стоимость сбора близка к нулю: тяжёлые чтения кэшируются, дамп карт на две
-секунды, разбор журнала событий на тридцать.
+секунды, разбор журнала событий на тридцать. Скорость канала считается по
+разнице с прошлым замером, а сам замер лежит в файле — поэтому её видно и
+при одноразовом запуске из CLI.
+
+Если запустить `shaperctl.py metrics` без root, карты BPF прочитать не
+удастся. Тогда метрика `shape_metrics_complete` станет нулём: мониторинг
+увидит «данные неполные», а не «трафика нет».
 
 ---
 

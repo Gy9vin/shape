@@ -1080,6 +1080,158 @@ except Exception: print('')" 2>/dev/null)"
                            || echo -e "  ${R}✗ ${T[api_t_bad]} → ${code}${N}"
 }
 
+# ── Мониторинг ────────────────────────────────────────────────────────
+# Метрики Prometheus можно отдавать двумя путями. Через API — если он
+# установлен и виден мониторингу. Через textfile collector node_exporter —
+# если node_exporter на ноде уже есть; тогда ни API, ни открытых портов не
+# нужно вовсе, файл заберёт сам node_exporter.
+MET_ENV="$ETC_DIR/metrics.env"
+MET_TIMER="/etc/systemd/system/shape-metrics.timer"
+
+# Каталоги, куда разные сборки node_exporter кладут *.prom
+met_guess_dir() {
+    local d
+    for d in /var/lib/node_exporter/textfile_collector \
+             /var/lib/prometheus/node-exporter \
+             /var/lib/node_exporter/textfile \
+             /var/lib/prometheus/textfile_collector; do
+        [[ -d "$d" ]] && { echo "$d"; return; }
+    done
+    # каталога нет — смотрим, с каким аргументом запущен сам node_exporter
+    d="$(ps -eo args 2>/dev/null | grep -o -- '--collector.textfile.directory[= ][^ ]*' |
+         head -1 | sed 's/.*[= ]//')"
+    [[ -n "$d" ]] && echo "$d"
+}
+
+met_current_dir() {
+    sed -n 's/^SHAPE_TEXTFILE=\(.*\)\/shape\.prom$/\1/p' "$MET_ENV" 2>/dev/null | head -1
+}
+
+screen_metrics() {
+    local dir guess ans have_ne
+    while :; do
+        title "${T[met_title]}"
+        echo -e "  ${D}${T[met_h1]}${N}"
+        echo -e "  ${D}${T[met_h2]}${N}"
+        echo
+
+        have_ne=0
+        pgrep -x node_exporter >/dev/null 2>&1 && have_ne=1
+        dir="$(met_current_dir)"
+
+        if [[ -f "$API_UNIT" ]] && systemctl is-active shape-api >/dev/null 2>&1; then
+            echo -e "  ${T[met_via_api]} : ${G}${T[g_on]}${N}"
+        else
+            echo -e "  ${T[met_via_api]} : ${D}${T[met_no_api]}${N}"
+        fi
+
+        if [[ -f "$MET_TIMER" ]] && systemctl is-active shape-metrics.timer >/dev/null 2>&1; then
+            echo -e "  ${T[met_via_file]}: ${G}${T[g_on]}${N}   ${D}${dir:-?}${N}"
+            if [[ -n "$dir" && -f "$dir/shape.prom" ]]; then
+                echo -e "  ${T[met_file]}   : ${D}$(wc -l < "$dir/shape.prom" 2>/dev/null) ${T[met_lines]}," \
+                        "$(date -r "$dir/shape.prom" '+%H:%M:%S' 2>/dev/null)${N}"
+            fi
+        else
+            echo -e "  ${T[met_via_file]}: ${D}${T[g_off]}${N}"
+        fi
+
+        if (( have_ne )); then
+            echo -e "  node_exporter : ${G}${T[met_found]}${N}"
+        else
+            echo -e "  node_exporter : ${D}${T[met_notfound]}${N}"
+        fi
+        hr
+        echo "  [1] ${T[met_show]}"
+        if [[ -f "$MET_TIMER" ]]; then
+            echo "  [2] ${T[met_off]}"
+            echo "  [3] ${T[met_now]}"
+        else
+            echo "  [2] ${T[met_on]}"
+        fi
+        echo "  [4] ${T[met_scrape]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) title "${T[met_title]}"
+               "$CTL" metrics | head -40
+               echo -e "\n  ${D}${T[met_more]}${N}"; pause ;;
+            2) if [[ -f "$MET_TIMER" ]]; then
+                   systemctl disable --now shape-metrics.timer >/dev/null 2>&1
+                   rm -f "$MET_TIMER" /etc/systemd/system/shape-metrics.service
+                   [[ -n "$dir" ]] && rm -f "$dir/shape.prom"
+                   systemctl daemon-reload
+                   echo -e "  ${G}✓ ${T[met_removed]}${N}"; sleep 2
+               else
+                   met_enable
+               fi ;;
+            3) [[ -f "$MET_TIMER" ]] && { systemctl start shape-metrics.service
+                   sleep 1; echo -e "  ${G}✓${N}"; sleep 1; } ;;
+            4) title "${T[met_scrape]}"; met_scrape_example; pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+met_enable() {
+    local dir guess
+    guess="$(met_guess_dir)"
+    echo
+    if [[ -z "$guess" ]]; then
+        echo -e "  ${Y}${T[met_nodir]}${N}"
+        echo -e "  ${D}${T[met_nodir2]}${N}"
+        echo
+    fi
+    dir="$(ask "${T[met_ask_dir]}" "${guess:-/var/lib/node_exporter/textfile_collector}")"
+    # Путь уходит в systemd-юнит: пробелы и кавычки здесь недопустимы.
+    if [[ ! "$dir" =~ ^/[A-Za-z0-9._/-]{1,120}$ ]]; then
+        echo -e "  ${R}${T[met_bad_dir]}${N}"; pause; return
+    fi
+    mkdir -p "$dir" || { echo -e "  ${R}${T[met_mkdir_fail]}${N}"; pause; return; }
+
+    printf 'SHAPE_TEXTFILE=%s/shape.prom\n' "$dir" > "$MET_ENV"
+    chmod 644 "$MET_ENV"
+    install -m 644 "$APP_DIR/systemd/shape-metrics.service" /etc/systemd/system/ 2>/dev/null ||
+        cp "$APP_DIR/systemd/shape-metrics.service" /etc/systemd/system/
+    install -m 644 "$APP_DIR/systemd/shape-metrics.timer" /etc/systemd/system/ 2>/dev/null ||
+        cp "$APP_DIR/systemd/shape-metrics.timer" /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable --now shape-metrics.timer >/dev/null 2>&1
+    systemctl start shape-metrics.service >/dev/null 2>&1
+    sleep 1
+    if [[ -s "$dir/shape.prom" ]]; then
+        echo -e "  ${G}✓ ${T[met_enabled]}${N}"
+        echo -e "  ${D}$dir/shape.prom${N}"
+    else
+        echo -e "  ${R}✗ ${T[met_failed]}${N}"
+        echo -e "  ${D}journalctl -u shape-metrics -n 20${N}"
+    fi
+    pause
+}
+
+met_scrape_example() {
+    local bind port
+    IFS='|' read -r bind port _ _ <<< "$(api_read)"
+    echo -e "  ${D}${T[met_sc1]}${N}"
+    echo
+    echo -e "${C}  scrape_configs:"
+    echo "    - job_name: shape"
+    echo "      static_configs:"
+    echo "        - targets: ['${bind}:${port}']"
+    echo "      authorization:"
+    echo "        type: Bearer"
+    echo "        credentials: \"<${T[met_read_token]}>\"${N}"
+    echo
+    hr
+    echo -e "  ${D}${T[met_sc2]}${N}"
+    echo
+    echo -e "${C}  scrape_configs:"
+    echo "    - job_name: node"
+    echo "      static_configs:"
+    echo "        - targets: ['10.100.0.7:9100']${N}"
+    echo
+    echo -e "  ${D}${T[met_sc3]}${N}"
+}
+
 # ── Сервис ────────────────────────────────────────────────────────────
 doctor() {
     local k ifc
@@ -1121,14 +1273,20 @@ screen_service() {
         echo -e "  [6] 🩺 ${T[sv_doctor]}"
         echo -e "  [7] ⬆️  ${T[sv_update]} ${D}(${T[sv_version]} $(installed_version))${N}"
         echo -e "  [8] 🌐 ${T[sv_lang]}"
+        if [[ -f "$MET_TIMER" ]] || { [[ -f "$API_UNIT" ]] &&
+             systemctl is-active shape-api >/dev/null 2>&1; }; then
+            echo -e "  [9] 📈 ${T[met_title]} ${G}${T[tg_on]}${N}"
+        else
+            echo -e "  [9] 📈 ${T[met_title]} ${D}${T[g_off]}${N}"
+        fi
         if [[ -f "$API_UNIT" ]]; then
             if systemctl is-active shape-api >/dev/null 2>&1; then
-                echo -e "  [9] 🔗 ${T[api_menu]} ${G}${T[tg_on]}${N}"
+                echo -e " [10] 🔗 ${T[api_menu]} ${G}${T[tg_on]}${N}"
             else
-                echo -e "  [9] 🔗 ${T[api_menu]} ${R}${T[dr_stopped]}${N}"
+                echo -e " [10] 🔗 ${T[api_menu]} ${R}${T[dr_stopped]}${N}"
             fi
         else
-            echo -e "  [9] 🔗 ${T[api_menu]} ${D}${T[api_none]}${N}"
+            echo -e " [10] 🔗 ${T[api_menu]} ${D}${T[api_none]}${N}"
         fi
         echo -e "  [0] ← ${T[m0]}"
         echo
@@ -1151,7 +1309,8 @@ screen_service() {
             6) title "${T[dr_title]}"; doctor; pause ;;
             7) screen_update ;;
             8) screen_lang ;;
-            9) screen_api ;;
+            9) screen_metrics ;;
+           10) screen_api ;;
             0|"") return ;;
         esac
     done

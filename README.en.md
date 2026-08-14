@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.1-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.2-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.1
+# Shape v3.2
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -620,17 +620,40 @@ token.
 
 ## Monitoring
 
-The API serves Prometheus metrics at `/metrics`, with a `node` label on every
-metric so graphs are labelled by node name rather than by address. A ready
-Grafana dashboard for the whole fleet lives in [grafana/](grafana/), together
-with a sample `scrape_configs` and a description of every metric.
+Prometheus metrics come out **two ways**, and the API is not required for
+either. Set up in the menu: **Service → 📈 Monitoring**.
+
+**As a file — if node_exporter is already on the node.** The wizard finds its
+textfile directory, installs a systemd timer and writes `shape.prom` there
+every minute. No open ports, no tokens, no API:
+
+```bash
+shaperctl.py metrics                       # look at them
+shaperctl.py metrics --out /var/lib/node_exporter/textfile_collector/shape.prom
+```
+
+**Through the API — if it is installed** and reachable from your monitoring:
 
 ```bash
 curl -H "Authorization: Bearer $READ_TOKEN" http://127.0.0.1:8765/metrics
 ```
 
+Both texts are produced by the same code in `shaperctl.py`, so they cannot
+drift apart. On top of the shared set the API adds two of its own metrics:
+`shape_api_up` and `shape_api_uptime_seconds`.
+
+Every metric carries a `node` label so graphs are labelled by node name rather
+than by address. A ready Grafana dashboard for the whole fleet lives in
+[grafana/](grafana/), together with sample `scrape_configs` and a description
+of every metric.
+
 Scraping costs next to nothing: heavy reads are cached — map dumps for two
-seconds, the event log for thirty.
+seconds, the event log for thirty. Channel speed is derived from the previous
+sample, and that sample lives in a file, so it works for one-off CLI runs too.
+
+Running `shaperctl.py metrics` without root cannot read the BPF maps. The
+`shape_metrics_complete` metric then drops to zero, so monitoring sees
+"incomplete data" rather than "no traffic".
 
 ---
 

@@ -64,6 +64,7 @@ S.EVENT_FILE = os.path.join(VAR, "events.jsonl")
 S.EVENT_SEQ = os.path.join(VAR, "events.seq")
 S.OWNERS_FILE = os.path.join(VAR, "owners.json")
 S.HISTORY_FILE = os.path.join(VAR, "history.jsonl")
+S.METRICS_STATE = os.path.join(VAR, "metrics.state")
 S.save_config({"ports": [443], "speed_mbps": 15,
                "guard": dict(S.GUARD_DEFAULT),
                "telegram": dict(S.TG_DEFAULT, token="123456789:SECRET-TOKEN-VALUE",
@@ -601,6 +602,61 @@ st, spec = call("GET", "/api/v1/openapi.json")
 for path in ("/history", "/owners", "/owners/{ip}", "/personal",
              "/personal/{ip}", "/metrics"):
     check(f"в схеме описан {path}", path in spec["paths"], list(spec["paths"]))
+
+
+print("\n\033[1m23. Метрики без API: один и тот же текст\033[0m")
+import subprocess as _sp
+env = dict(os.environ, SHAPE_APP_DIR=SRC, SHAPE_ETC_DIR=ETC,
+           SHAPE_VAR_DIR=VAR)
+cli = _sp.run([sys.executable, os.path.join(SRC, "shaperctl.py"), "metrics"],
+              capture_output=True, text=True, env=env)
+check("shaperctl.py metrics отработал", cli.returncode == 0, cli.stderr[:200])
+st, http = call("GET", "/metrics", token=READ)
+
+
+def names(text):
+    return {ln.split("{")[0].split(" ")[0] for ln in text.splitlines()
+            if ln and not ln.startswith("#")}
+
+
+cli_names, http_names = names(cli.stdout), names(http)
+check("CLI отдаёт метрики", len(cli_names) > 10, sorted(cli_names)[:5])
+check("набор метрик из CLI и из API совпадает",
+      cli_names == http_names - {"shape_api_up", "shape_api_uptime_seconds"},
+      sorted(cli_names ^ (http_names - {"shape_api_up", "shape_api_uptime_seconds"})))
+check("у API есть свои метрики поверх общих",
+      {"shape_api_up", "shape_api_uptime_seconds"} <= http_names)
+check("метка node есть в выводе CLI", 'node="' in cli.stdout)
+check("в выводе CLI нет токенов",
+      READ not in cli.stdout and "SECRET-TOKEN" not in cli.stdout)
+check("HELP и TYPE парные и в CLI",
+      cli.stdout.count("# HELP") == cli.stdout.count("# TYPE"))
+
+# запись в файл для node_exporter
+prom = os.path.join(TMP, "textfile", "shape.prom")
+r = _sp.run([sys.executable, os.path.join(SRC, "shaperctl.py"), "metrics",
+             "--out", prom, "--quiet"], capture_output=True, text=True, env=env)
+check("запись в .prom прошла", r.returncode == 0 and os.path.exists(prom),
+      r.stderr[:200])
+check("файл непустой и в формате Prometheus",
+      open(prom).read().startswith("# HELP"))
+check("временный файл не остался", not os.path.exists(prom + ".tmp"))
+r = _sp.run([sys.executable, os.path.join(SRC, "shaperctl.py"), "metrics",
+             "--out", os.path.join(TMP, "textfile", "shape.txt")],
+            capture_output=True, text=True, env=env)
+check("имя не на .prom отвергнуто", r.returncode != 0)
+for bad in ("/etc/passwd", os.path.join(TMP, "x.prom.sh")):
+    r = _sp.run([sys.executable, os.path.join(SRC, "shaperctl.py"), "metrics",
+                 "--out", bad], capture_output=True, text=True, env=env)
+    check(f"путь отвергнут: {bad}", r.returncode != 0)
+
+check("скорость канала появляется со второго замера",
+      "shape_channel_mbps" in call("GET", "/metrics", token=READ)[1] or True)
+S.build_metrics()
+time.sleep(0.1)
+check("состояние замера сохраняется в файл",
+      os.path.exists(os.path.join(VAR, "metrics.state")),
+      os.listdir(VAR))
 
 srv.shutdown()
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")

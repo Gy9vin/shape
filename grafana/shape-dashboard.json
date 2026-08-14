@@ -434,13 +434,77 @@
       }
     },
     {
+      "type": "stat",
+      "title": "Неполные метрики",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(shape_metrics_complete == 0) or vector(0)",
+          "legendFormat": "{{node}}",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "type": "row",
       "title": "Канал",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 8
       },
       "collapsed": false,
       "panels": []
@@ -457,7 +521,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 9
       },
       "targets": [
         {
@@ -525,7 +589,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 9
       },
       "targets": [
         {
@@ -593,7 +657,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 17
       },
       "targets": [
         {
@@ -661,7 +725,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 17
       },
       "targets": [
         {
@@ -735,7 +799,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 25
       },
       "collapsed": false,
       "panels": []
@@ -752,7 +816,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 23
+        "y": 26
       },
       "targets": [
         {
@@ -820,7 +884,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 23
+        "y": 26
       },
       "targets": [
         {
@@ -888,7 +952,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 23
+        "y": 26
       },
       "targets": [
         {
@@ -967,7 +1031,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 31
+        "y": 34
       },
       "targets": [
         {
@@ -1035,7 +1099,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 31
+        "y": 34
       },
       "targets": [
         {
@@ -1098,7 +1162,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 42
       },
       "collapsed": false,
       "panels": []
@@ -1114,7 +1178,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 43
       },
       "description": "Одна строка на ноду. Версия берётся из метрики shape_info.",
       "targets": [

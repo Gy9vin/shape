@@ -254,59 +254,20 @@ def cached(key, ttl, producer):
 
 
 # ── состояние Shape ───────────────────────────────────────────────────────
-def engine_loaded():
-    return os.path.exists(S.map_path("config_map"))
+# Факты о ноде живут в shaperctl: ими пользуются и метрики из CLI, и API.
+# Здесь только кэш — HTTP-запросов бывает много, а systemctl и разбор
+# журнала событий стоят заметно дороже, чем чтение файла.
+engine_loaded = S.engine_loaded
+shape_version = S.shape_version
+active_iface = S.active_iface
 
 
 def systemd_active(unit):
-    """Только фиксированные имена юнитов — параметр не приходит извне."""
-    if unit not in ("shaper", "shaper-watch", "shape-api"):
-        return "unknown"
-    return cached("unit:" + unit, 5.0, lambda: _systemd_active(unit))
-
-
-def _systemd_active(unit):
-    try:
-        p = subprocess.run(["systemctl", "is-active", unit],
-                           capture_output=True, text=True, timeout=5)
-        return p.stdout.strip() or "unknown"
-    except Exception:
-        return "unknown"
-
-
-def shape_version():
-    try:
-        with open(os.path.join(APP_DIR, "VERSION")) as f:
-            return f.read().strip()
-    except Exception:
-        return "unknown"
-
-
-def active_iface():
-    try:
-        with open(os.path.join(ETC_DIR, ".active_iface")) as f:
-            m = re.search(r'IFACE="([A-Za-z0-9._@-]{1,15})"', f.read())
-            if m:
-                return m.group(1)
-    except Exception:
-        pass
-    return None
+    return cached("unit:" + unit, 5.0, lambda: S.systemd_active(unit))
 
 
 def engine_started_at():
-    """Когда движок поднялся. Берём из журнала событий, иначе из карт."""
-    return cached("engine_started", 15.0, _engine_started_at)
-
-
-def _engine_started_at():
-    # Чтение журнала стоит дорого при большом файле, поэтому только под кэшем.
-    events, _ = S.read_events(limit=1, etype="engine_started")
-    if events:
-        return events[0].get("ts")
-    try:
-        return os.path.getmtime(S.map_path("config_map"))
-    except OSError:
-        return None
+    return cached("engine_started", 15.0, S.engine_started_at)
 
 
 PROC_STARTED = time.time()
@@ -842,52 +803,19 @@ def h_personal_delete(req, ip):
 
 
 # ── метрики для Prometheus ────────────────────────────────────────────────
-def esc(v):
-    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
-
-
 def h_metrics(req):
     """
-    Текстовый формат Prometheus. Отдаётся как есть, без JSON-обёртки —
-    поэтому обработчик возвращает готовую строку, а не словарь.
+    Тот же текст, что печатает `shaperctl.py metrics`. Сборка живёт в общем
+    слое, здесь только подстановка уже прочитанного: у API есть свой кэш
+    тяжёлых чтений, и дважды дампить карты на каждый запрос незачем.
 
-    Метка node стоит у каждой метрики, а не только у shape_info: при парке
-    в сотню нод это единственный способ подписать графики человеческим
-    именем. Метка instance от Prometheus — это адрес и порт, по ней ничего
-    не поймёшь, а join по info-метрике в дашборде выглядит уродливо.
+    Возвращает строку, а не словарь — отдаётся как text/plain.
     """
-    cfg = S.load_config()
-    pens = S.load_penalties()
-    limited = {ip: p for ip, p in pens.items() if not S.is_personal(p)}
-    personal = {ip: p for ip, p in pens.items() if S.is_personal(p)}
-    loaded = engine_loaded()
-    started = engine_started_at()
-    node = S.node_label(cfg["telegram"])
-    iface = active_iface() or ""
+    users = {}
+    if engine_loaded():
+        users = cached("stats_snapshot", CACHE_TTL,
+                       lambda: {"t": time.monotonic(), "users": S.read_users()})["users"]
 
-    users, dl, ul = {}, None, None
-    if loaded:
-        snap = cached("stats_snapshot", CACHE_TTL,
-                      lambda: {"t": time.monotonic(), "users": S.read_users()})
-        users = snap["users"]
-        with _cache_lock:
-            prev = _cache.get("metrics_prev")
-        if prev and 0.5 <= snap["t"] - prev["t"] <= 300:
-            dt = snap["t"] - prev["t"]
-            dl = sum(max(0, c["down"] - prev["users"].get(ip, {}).get("down", 0))
-                     for ip, c in users.items()) * 8 / 1e6 / dt
-            ul = sum(max(0, c["up"] - prev["users"].get(ip, {}).get("up", 0))
-                     for ip, c in users.items()) * 8 / 1e6 / dt
-        if not prev or snap["t"] - prev["t"] >= CACHE_TTL:
-            with _cache_lock:
-                _cache["metrics_prev"] = snap
-
-    now_ns = S.mono_ns() if loaded else 0
-    active = sum(1 for c in users.values()
-                 if c["seen"] and (now_ns - c["seen"]) / S.NS < 60)
-
-    # События за сутки: считаем по журналу, но не чаще раза в полминуты —
-    # разбор файла не должен становиться нагрузкой от частого опроса.
     def day_events():
         rows, _ = S.read_events(limit=1000, since=time.time() - 86400)
         counted = {}
@@ -895,76 +823,25 @@ def h_metrics(req):
             key = r.get("type", "unknown")
             counted[key] = counted.get(key, 0) + 1
         return counted
-    events = cached("metrics_events", 30.0, day_events)
 
-    out = []
-
-    def labels(extra=None):
-        pairs = [("node", node)] + sorted((extra or {}).items())
-        return "{" + ",".join(f'{k}="{esc(v)}"' for k, v in pairs) + "}"
-
-    def add(name, kind, help_text, value, extra=None):
-        out.append(f"# HELP {name} {help_text}")
-        out.append(f"# TYPE {name} {kind}")
-        out.append(f"{name}{labels(extra)} {value}")
-
-    def series(name, kind, help_text, rows):
-        """Несколько значений одной метрики с разными метками."""
-        out.append(f"# HELP {name} {help_text}")
-        out.append(f"# TYPE {name} {kind}")
-        for extra, value in rows:
-            out.append(f"{name}{labels(extra)} {value}")
-
-    add("shape_up", "gauge", "1 if the API is responding", 1)
-    add("shape_info", "gauge", "Static node information", 1,
-        {"version": shape_version(), "api_version": API_VERSION,
-         "interface": iface})
-    add("shape_engine_loaded", "gauge", "1 if eBPF maps are pinned", int(loaded))
-    add("shape_watchdog_active", "gauge", "1 if the watchdog service runs",
-        int(systemd_active("shaper-watch") == "active"))
-    add("shape_uptime_seconds", "gauge", "Seconds since the engine started",
-        round(time.time() - started) if started else 0)
-    add("shape_speed_limit_mbps", "gauge", "Shared per-IP limit in Mbit/s",
-        f"{cfg['speed_mbps']:g}")
-    add("shape_guard_enabled", "gauge", "1 if auto-limiting is on",
-        int(bool(cfg["guard"]["enabled"])))
-
-    series("shape_traffic_bytes_total", "counter",
-           "Bytes since the engine started",
-           [({"direction": "download"}, sum(c["down"] for c in users.values())),
-            ({"direction": "upload"}, sum(c["up"] for c in users.values()))])
-
-    if dl is not None:
-        series("shape_channel_mbps", "gauge",
-               "Current channel load in Mbit/s",
-               [({"direction": "download"}, f"{dl:.3f}"),
-                ({"direction": "upload"}, f"{ul:.3f}")])
-
-    add("shape_ips_known", "gauge", "Addresses seen since the engine started",
-        len(users))
-    add("shape_ips_active", "gauge", "Addresses with traffic in the last minute",
-        active)
-    add("shape_ips_limited", "gauge", "Addresses under an auto or temporary limit",
-        len(limited))
-    add("shape_ips_personal", "gauge", "Addresses with a personal speed",
-        len(personal))
-    add("shape_ips_whitelisted", "gauge", "Addresses on the whitelist",
-        len(S.whitelist_ips()))
-    add("shape_owners_known", "gauge", "Addresses with a known owner",
-        len(S.load_owners()))
-
-    series("shape_events_24h", "gauge", "Events written in the last 24 hours",
-           [({"type": etype}, events.get(etype, 0))
-            for etype in sorted(S.EVENT_TYPES)])
-
-    hist = S.read_history(limit=1)
-    if hist:
-        series("shape_last_day_bytes", "gauge",
-               "Traffic of the last closed day",
-               [({"direction": "download"}, hist[-1].get("down", 0)),
-                ({"direction": "upload"}, hist[-1].get("up", 0))])
-
-    return 200, "\n".join(out) + "\n"
+    text = S.build_metrics(
+        users=users,
+        unit_state=systemd_active("shaper-watch"),
+        started=engine_started_at(),
+        events=cached("metrics_events", 30.0, day_events),
+    )
+    # Метрика самого API: её нет в общем слое, потому что без API её просто
+    # не существует. Дописываем к общему тексту перед последней пустой строкой.
+    node = S.node_label(S.load_config()["telegram"])
+    extra = (f"# HELP shape_api_up 1 if the node API is running\n"
+             f"# TYPE shape_api_up gauge\n"
+             f'shape_api_up{{node="{S.metrics_escape(node)}",'
+             f'version="{API_VERSION}"}} 1\n'
+             f"# HELP shape_api_uptime_seconds Seconds since the API started\n"
+             f"# TYPE shape_api_uptime_seconds gauge\n"
+             f'shape_api_uptime_seconds{{node="{S.metrics_escape(node)}"}} '
+             f"{round(time.time() - PROC_STARTED)}\n")
+    return 200, text + extra
 
 
 # ── OpenAPI ───────────────────────────────────────────────────────────────

@@ -23,3 +23,6 @@ gcc -O1 -Wno-unknown-pragmas -I stub -o /tmp/h bpf_harness.c && /tmp/h
 `VERSION`, обоих README и `CHANGELOG.md`.
 
 Корень проекта тесты находят сами; переопределяется переменной `SHAPE_SRC`.
+
+Метрики проверяются отдельно: набор из `shaperctl.py metrics` и из
+`GET /metrics` должен совпадать — кроме двух метрик самого API.

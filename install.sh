@@ -51,6 +51,9 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         ok "SSH-туннель убран (ключ /root/.ssh/shape_tunnel оставлен)"
     fi
     api_remove
+    systemctl disable --now shape-metrics.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/shape-metrics.service \
+          /etc/systemd/system/shape-metrics.timer
     rm -f /etc/systemd/system/shaper.service \
           /etc/systemd/system/shaper-watch.service /usr/local/bin/shaper
     rm -rf "$APP_DIR"
@@ -170,6 +173,11 @@ fi
 mkdir -p "$APP_DIR/api"
 install -m 750 "$SRC/api/server.py" "$APP_DIR/api/server.py"
 install -m 644 "$SRC/systemd/shape-api.service" "$APP_DIR/api/shape-api.service"
+# Юниты для метрик кладём всегда: мастер мониторинга из меню берёт их отсюда,
+# а сам мониторинг может понадобиться и без API.
+mkdir -p "$APP_DIR/systemd"
+install -m 644 "$SRC/systemd/shape-metrics.service" "$APP_DIR/systemd/"
+install -m 644 "$SRC/systemd/shape-metrics.timer"   "$APP_DIR/systemd/"
 
 if (( WITH_API )); then
     step "Установка API"

@@ -30,7 +30,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 PIN_DIR     = os.environ.get("SHAPER_PIN_DIR", "/sys/fs/bpf/shaper/maps")
-ETC_DIR     = "/etc/shaper"
+ETC_DIR     = os.environ.get("SHAPE_ETC_DIR", "/etc/shaper")
 CONFIG_FILE = os.path.join(ETC_DIR, "config.json")
 WL_FILE     = os.path.join(ETC_DIR, "whitelist.txt")
 PEN_FILE    = os.path.join(ETC_DIR, "penalties.json")
@@ -38,7 +38,9 @@ DAILY_FILE  = os.path.join(ETC_DIR, "daily.json")
 DIGEST_FILE = os.path.join(ETC_DIR, "digest.json")
 # Изменчивое состояние — отдельно от настроек: журнал событий пухнет,
 # а /etc принято держать маленьким и бэкапить целиком.
-VAR_DIR     = "/var/lib/shape"
+# Каталог изменчивого состояния. Переопределяется переменной окружения —
+# это нужно тестам, чтобы гонять настоящий CLI, не трогая систему.
+VAR_DIR     = os.environ.get("SHAPE_VAR_DIR", "/var/lib/shape")
 EVENT_FILE  = os.path.join(VAR_DIR, "events.jsonl")
 EVENT_SEQ   = os.path.join(VAR_DIR, "events.seq")
 # Кто стоит за адресом. Заполняется извне — сейчас руками или через API,
@@ -48,6 +50,16 @@ OWNERS_FILE = os.path.join(VAR_DIR, "owners.json")
 # По строке JSON на прошедшие сутки. За год ~40 КБ.
 HISTORY_FILE = os.path.join(VAR_DIR, "history.jsonl")
 HISTORY_MAX_DAYS = 400
+# Три числа для расчёта текущей скорости канала: когда мерили и сколько
+# было всего. Файл общий для CLI и API — кто бы ни собирал метрики,
+# разница считается от последнего замера.
+METRICS_STATE = os.path.join(VAR_DIR, "metrics.state")
+METRICS_MIN_GAP = 10        # чаще этого замер не обновляем
+METRICS_MAX_GAP = 300       # старше этого — считать скорость бессмысленно
+
+# Версия схемы метрик. Меняется, если поменяются имена или смысл значений;
+# по ней центральная система поймёт, что дашборд пора обновить.
+METRICS_VERSION = "1"
 
 NS = 1_000_000_000
 # Мбит/с -> байт/с. Мегабит десятичный: 1 Мбит = 1 000 000 бит = 125 000 байт.
@@ -170,6 +182,10 @@ MSG = {
         "h_pers_speed": "Мбит/с, выше или ниже общего лимита",
         "h_owners": "кто стоит за адресом",
         "h_history": "трафик по суткам",
+        "h_metrics": "метрики в формате Prometheus",
+        "h_met_out": "записать в файл для node_exporter (*.prom)",
+        "met_need_prom": "имя файла должно оканчиваться на .prom — так его ищет node_exporter",
+        "met_written": "метрики записаны: {p} ({n} строк)",
         "pers_none": "персональных скоростей нет",
         "pers_set": "{ip}: персональная скорость {s:g} Мбит/с",
         "pers_removed": "{ip}: персональная скорость снята",
@@ -315,6 +331,10 @@ MSG = {
         "h_pers_speed": "Mbit/s, above or below the shared limit",
         "h_owners": "who is behind an address",
         "h_history": "traffic per day",
+        "h_metrics": "metrics in Prometheus format",
+        "h_met_out": "write to a file for node_exporter (*.prom)",
+        "met_need_prom": "the file name must end with .prom — that is what node_exporter looks for",
+        "met_written": "metrics written: {p} ({n} lines)",
         "pers_none": "no personal speeds set",
         "pers_set": "{ip}: personal speed {s:g} Mbit/s",
         "pers_removed": "{ip}: personal speed removed",
@@ -1986,6 +2006,247 @@ def ip_key(ip_str):
     return ip.packed + b"\x00" * 12 if ip.version == 4 else ip.packed
 
 
+
+# ────────────────────────── факты о ноде ──────────────────────────
+# Ими пользуются и метрики, и API: имя интерфейса, версия, состояние
+# движка и сервисов. Здесь они без кэша — кэширует тот, кому это нужно.
+
+def app_dir():
+    return os.environ.get("SHAPE_APP_DIR", "/opt/shaper")
+
+
+def engine_loaded():
+    return os.path.exists(map_path("config_map"))
+
+
+def shape_version():
+    try:
+        with open(os.path.join(app_dir(), "VERSION")) as f:
+            return f.read().strip()
+    except Exception:
+        return "unknown"
+
+
+def active_iface():
+    try:
+        with open(os.path.join(ETC_DIR, ".active_iface")) as f:
+            m = re.search(r'IFACE="([A-Za-z0-9._@-]{1,15})"', f.read())
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def systemd_active(unit):
+    """Только заранее известные имена юнитов — параметр не приходит извне."""
+    if unit not in ("shaper", "shaper-watch", "shape-api"):
+        return "unknown"
+    try:
+        p = subprocess.run(["systemctl", "is-active", unit],
+                           capture_output=True, text=True, timeout=5)
+        return p.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def engine_started_at():
+    """Когда движок поднялся: из журнала событий, иначе по времени карт."""
+    events, _ = read_events(limit=1, etype="engine_started")
+    if events:
+        return events[0].get("ts")
+    try:
+        return os.path.getmtime(map_path("config_map"))
+    except OSError:
+        return None
+
+
+# ─────────────────────────── метрики Prometheus ───────────────────────────
+# Текст собирается здесь, а не в API: без API метрики тоже должны быть
+# доступны — через `shaperctl.py metrics` и textfile collector node_exporter.
+
+def _metrics_rate(down_total, up_total):
+    """
+    Текущая скорость канала по разнице с прошлым замером.
+
+    Замер лежит в файле, а не в памяти процесса: иначе одноразовый запуск
+    из CLI никогда бы не смог посчитать скорость. Файл общий, поэтому
+    неважно, кто мерил в прошлый раз — API или таймер.
+    """
+    now = time.time()
+    prev = None
+    try:
+        with open(METRICS_STATE) as f:
+            prev = json.load(f)
+        if not isinstance(prev, dict):
+            prev = None
+    except Exception:
+        prev = None
+
+    dl = ul = None
+    if prev:
+        dt = now - float(prev.get("t", 0))
+        # Счётчики обнуляются при перезапуске движка: отрицательная разница
+        # означает не отрицательную скорость, а новый отсчёт.
+        if METRICS_MIN_GAP / 4 <= dt <= METRICS_MAX_GAP \
+                and down_total >= prev.get("down", 0) \
+                and up_total >= prev.get("up", 0):
+            dl = (down_total - prev["down"]) * 8 / 1e6 / dt
+            ul = (up_total - prev["up"]) * 8 / 1e6 / dt
+
+    if not prev or now - float(prev.get("t", 0)) >= METRICS_MIN_GAP:
+        try:
+            os.makedirs(VAR_DIR, exist_ok=True)
+            tmp = METRICS_STATE + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"t": now, "down": down_total, "up": up_total}, f)
+            os.replace(tmp, METRICS_STATE)
+        except Exception:
+            pass
+    return dl, ul
+
+
+def metrics_escape(v):
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def build_metrics(users=None, unit_state=None, started=None, events=None):
+    """
+    Текст в формате Prometheus.
+
+    Аргументы нужны только API: он держит собственный кэш тяжёлых чтений и
+    передаёт готовое. При вызове из CLI всё читается на месте.
+    """
+    cfg = load_config()
+    pens = load_penalties()
+    limited = {ip: p for ip, p in pens.items() if not is_personal(p)}
+    personal = {ip: p for ip, p in pens.items() if is_personal(p)}
+    loaded = engine_loaded()
+    node = node_label(cfg["telegram"])
+    iface = active_iface() or ""
+
+    # Без root карты не прочитать. Тогда честно поднимаем флаг, а не выдаём
+    # нули за правду: «ноль трафика» и «мы не смогли посмотреть» — разные вещи.
+    complete = 1
+    if users is None:
+        if loaded and os.geteuid() != 0:
+            users, complete = {}, 0
+        else:
+            users = read_users() if loaded else {}
+    if started is None:
+        started = engine_started_at()
+    if unit_state is None:
+        unit_state = systemd_active("shaper-watch")
+    if events is None:
+        rows, _ = read_events(limit=1000, since=time.time() - 86400)
+        events = {}
+        for r in rows:
+            key = r.get("type", "unknown")
+            events[key] = events.get(key, 0) + 1
+
+    down_total = sum(c["down"] for c in users.values())
+    up_total = sum(c["up"] for c in users.values())
+    dl, ul = _metrics_rate(down_total, up_total)
+
+    now_ns = mono_ns() if loaded else 0
+    active = sum(1 for c in users.values()
+                 if c["seen"] and (now_ns - c["seen"]) / NS < 60)
+
+    out = []
+
+    def labels(extra=None):
+        pairs = [("node", node)] + sorted((extra or {}).items())
+        return "{" + ",".join(f'{k}="{metrics_escape(v)}"' for k, v in pairs) + "}"
+
+    def add(name, kind, help_text, value, extra=None):
+        out.append(f"# HELP {name} {help_text}")
+        out.append(f"# TYPE {name} {kind}")
+        out.append(f"{name}{labels(extra)} {value}")
+
+    def series(name, kind, help_text, rows):
+        out.append(f"# HELP {name} {help_text}")
+        out.append(f"# TYPE {name} {kind}")
+        for extra, value in rows:
+            out.append(f"{name}{labels(extra)} {value}")
+
+    add("shape_up", "gauge", "1 if metrics were produced", 1)
+    add("shape_metrics_complete", "gauge",
+        "1 if BPF maps could be read; 0 means the numbers are incomplete",
+        complete)
+    add("shape_info", "gauge", "Static node information", 1,
+        {"version": shape_version(), "metrics_version": METRICS_VERSION,
+         "interface": iface})
+    add("shape_engine_loaded", "gauge", "1 if eBPF maps are pinned", int(loaded))
+    add("shape_watchdog_active", "gauge", "1 if the watchdog service runs",
+        int(unit_state == "active"))
+    add("shape_uptime_seconds", "gauge", "Seconds since the engine started",
+        round(time.time() - started) if started else 0)
+    add("shape_speed_limit_mbps", "gauge", "Shared per-IP limit in Mbit/s",
+        f"{cfg['speed_mbps']:g}")
+    add("shape_guard_enabled", "gauge", "1 if auto-limiting is on",
+        int(bool(cfg["guard"]["enabled"])))
+
+    series("shape_traffic_bytes_total", "counter",
+           "Bytes since the engine started",
+           [({"direction": "download"}, down_total),
+            ({"direction": "upload"}, up_total)])
+
+    if dl is not None:
+        series("shape_channel_mbps", "gauge", "Current channel load in Mbit/s",
+               [({"direction": "download"}, f"{dl:.3f}"),
+                ({"direction": "upload"}, f"{ul:.3f}")])
+
+    add("shape_ips_known", "gauge", "Addresses seen since the engine started",
+        len(users))
+    add("shape_ips_active", "gauge", "Addresses with traffic in the last minute",
+        active)
+    add("shape_ips_limited", "gauge", "Addresses under an auto or temporary limit",
+        len(limited))
+    add("shape_ips_personal", "gauge", "Addresses with a personal speed",
+        len(personal))
+    add("shape_ips_whitelisted", "gauge", "Addresses on the whitelist",
+        len(whitelist_ips()))
+    add("shape_owners_known", "gauge", "Addresses with a known owner",
+        len(load_owners()))
+
+    series("shape_events_24h", "gauge", "Events written in the last 24 hours",
+           [({"type": etype}, events.get(etype, 0))
+            for etype in sorted(EVENT_TYPES)])
+
+    hist = read_history(limit=1)
+    if hist:
+        series("shape_last_day_bytes", "gauge", "Traffic of the last closed day",
+               [({"direction": "download"}, hist[-1].get("down", 0)),
+                ({"direction": "upload"}, hist[-1].get("up", 0))])
+
+    return "\n".join(out) + "\n"
+
+
+def cmd_metrics(a):
+    """
+    Метрики в stdout или в файл для textfile collector node_exporter.
+
+    Запись в файл — обязательно через временный и переименование: иначе
+    node_exporter однажды прочитает половину файла и отдаст мусор.
+    """
+    text = build_metrics()
+    if not a.out:
+        sys.stdout.write(text)
+        return
+    path = os.path.abspath(a.out)
+    if not path.endswith(".prom"):
+        die(t("met_need_prom"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+    if not a.quiet:
+        print(t("met_written", p=path, n=text.count("\n")))
+
+
 def cmd_history(a):
     rows = read_history(limit=max(1, min(a.days, HISTORY_MAX_DAYS)))
     if a.json:
@@ -2254,6 +2515,11 @@ def build_parser():
     ow.add_argument("--json", action="store_true")
     ow.set_defaults(func=cmd_owners)
 
+    mt = sub.add_parser("metrics", help=t("h_metrics"))
+    mt.add_argument("--out", default=None, help=t("h_met_out"))
+    mt.add_argument("--quiet", action="store_true")
+    mt.set_defaults(func=cmd_metrics)
+
     hs = sub.add_parser("history", help=t("h_history"))
     hs.add_argument("--days", type=int, default=30)
     hs.add_argument("--json", action="store_true")
@@ -2274,10 +2540,17 @@ def build_parser():
     return p
 
 
+# Команды, которым root не обязателен. Карты BPF без него не прочитать, но
+# метрики всё равно стоит отдать: в них есть shape_metrics_complete, по
+# которому мониторинг увидит, что цифры неполные. Иначе таймер пришлось бы
+# гонять от root ради одного чтения.
+NO_ROOT_OK = {"metrics", "history"}
+
+
 def main():
-    if os.geteuid() != 0:
-        die(t("root"))
     args = build_parser().parse_args()
+    if os.geteuid() != 0 and args.cmd not in NO_ROOT_OK:
+        die(t("root"))
     args.func(args)
 
 
