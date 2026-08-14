@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.5-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.6-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.5
+# Shape v3.6
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -393,6 +393,10 @@ shaperctl.py export --out /root/node.json --with-secrets   # token included
 shaperctl.py import /root/node.json --dry-run              # what would change
 shaperctl.py import /root/node.json                        # restore
 shaperctl.py import /root/node.json --only whitelist,owners
+
+shaperctl.py telegram backup                # send a backup right now
+shaperctl.py telegram set --backup on --backup-day 1
+shaperctl.py telegram set --backup-thread 777
 ```
 
 The `status --json` format:
@@ -806,6 +810,45 @@ maps. If not, they apply on the next service start.
 
 The event log, metrics and the current day's counters are deliberately left
 out: the first is a log rather than state, the rest are recomputed.
+
+---
+
+### Backups over Telegram
+
+A copy sitting on the same disk that will one day die is not a copy. Standing
+up a separate server for 200 kilobytes is not worth it, and Telegram is
+already configured on the node — proxy included, which Russian nodes need
+anyway.
+
+```bash
+shaperctl.py telegram set --backup on --backup-day 1
+shaperctl.py telegram backup        # send it right now
+```
+
+Menu: **Service → 💾 Backup and restore**, items [4]–[7].
+
+The file is uploaded once a week, on the chosen day, at the same time as the
+daily digest. The topic can be separate from the reports (`--backup-thread`);
+without one, the copy goes wherever ordinary messages go.
+
+**The bot token never ends up in such a copy — under any setting.** The bot
+posts into the very topic it uploads the file to: anyone in that topic, now
+or added six months later, would gain control of the bot and its whole
+history along with the token. The payload is checked for secrets one more
+time right before sending, and a match cancels the upload entirely — even if
+the code were changed badly at some point.
+
+Restoring works as usual: `shaperctl.py import file`. The bot on a new node is
+configured once by hand, everything else arrives from the file — the token is
+not wiped on import.
+
+⚠️ **The file holds client IP addresses**, and names and telegram_id values if
+owners are filled in. That is personal data, and in Telegram it stays forever,
+visible to everyone in the topic. Keep the topic private.
+
+If there is no connectivity, the next attempt happens in an hour rather than
+every ten seconds. A missed day is not caught up: the state sent is the
+current one, not what it was on Monday.
 
 ---
 

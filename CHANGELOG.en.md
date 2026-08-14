@@ -13,6 +13,67 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.6
+
+**Backups go to Telegram.**
+
+A copy sitting on the same disk that will one day die is not a copy. Shape now
+uploads node state as a file to Telegram once a week — to the same place the
+reports arrive, or to a separate topic.
+
+### Added
+
+* Weekly backup upload: `telegram set --backup on --backup-day 1`. The weekday
+  is configurable; the time is the same as the daily digest.
+* A separate topic for backups: `--backup-thread`. Empty means the copy goes
+  wherever ordinary messages go.
+* `shaperctl.py telegram backup` — send a copy right now.
+* Items [4]–[7] on the **Service → 💾 Backup and restore** screen.
+* File upload via `sendDocument` with `multipart/form-data` assembled on the
+  standard library — works both directly and through the SOCKS5 proxy that
+  Russian nodes rely on.
+* 43 new checks in `tests/export_tests.py`, 128 in the suite overall.
+
+### What is not in the copy, and never will be
+
+**The bot token does not go into a copy uploaded to Telegram under any
+setting.** The bot posts into the very topic it uploads the file to: anyone in
+that topic — now or added six months later — would gain control of the bot and
+its whole history along with the token.
+
+The check does not rest on a flag alone: right before sending, the payload is
+compared against the configured secrets once more, and a match cancels the
+upload entirely. That is insurance against the code being changed badly some
+day — it should fail before the token reaches the chat, not after.
+
+A copy with secrets is still possible, but only as a file on disk:
+`export --with-secrets`, for moving a node.
+
+### Worth remembering
+
+The file holds client IP addresses, and names and telegram_id values when
+owners are filled in. That is personal data, and in Telegram it stays forever,
+visible to everyone in the topic. The menu warns about this when you enable it
+and asks for confirmation.
+
+### Behaviour on failure
+
+* No connectivity — the next attempt is in an hour, not every ten seconds.
+* A missed day is not caught up: the state sent is the current one, not what
+  it was on Monday.
+* A malformed weekday, a corrupted state file and an unreachable API do not
+  bring the watchdog down — each is covered by its own test.
+
+### Upgrading
+
+The setting is off by default and shaper behaviour is unchanged. To turn it
+on:
+
+```bash
+shaperctl.py telegram set --backup on --backup-day 1
+shaperctl.py telegram backup        # check it straight away
+```
+
 ## 3.5
 
 **Node state backup.**

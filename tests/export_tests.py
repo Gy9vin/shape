@@ -14,6 +14,7 @@ import re
 import stat
 import sys
 import tempfile
+import time
 
 SRC = os.environ.get("SHAPE_SRC") or os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))
@@ -404,6 +405,219 @@ check("все новые ключи есть по-английски", not missi
 check("русский и английский наборы совпадают по размеру",
       len(S.MSG["ru"]) == len(S.MSG["en"]),
       f"ru={len(S.MSG['ru'])} en={len(S.MSG['en'])}")
+
+# ─────────────── отправка копии в Telegram ───────────────
+# Сеть не трогаем: подменяем _post и смотрим, что именно ушло бы в API.
+
+def with_tg(**over):
+    """Настраивает Telegram в песочнице и возвращает конфиг."""
+    tg = dict(S.TG_DEFAULT, enabled=True, token=TOKEN, chat_id="-1001234567890",
+              proxy=PROXY, digest_at="09:00")
+    tg.update(over)
+    S.save_config({"speed_mbps": 25, "ports": [443], "telegram": tg})
+    return S.load_config()
+
+
+class Captured:
+    """Перехватывает _post: запоминает вызов и возвращает заданный код."""
+
+    def __init__(self, status=200, raise_exc=None):
+        self.status, self.raise_exc, self.calls = status, raise_exc, []
+
+    def __enter__(self):
+        self.real = S._post
+
+        def fake(url, data, proxy="", content_type="application/x-www-form-urlencoded"):
+            self.calls.append({"url": url, "data": data, "proxy": proxy,
+                               "ctype": content_type})
+            if self.raise_exc:
+                raise self.raise_exc
+            return self.status
+
+        S._post = fake
+        return self
+
+    def __exit__(self, *a):
+        S._post = self.real
+        return False
+
+    @property
+    def body(self):
+        return self.calls[-1]["data"].decode("utf-8", "replace")
+
+
+def field_of(body, name):
+    m = re.search(r'name="%s"\r\n\r\n(.*?)\r\n--' % re.escape(name), body, re.S)
+    return m.group(1) if m else None
+
+
+print("\n\033[1m18. Отправка копии в Telegram: что уходит в API\033[0m")
+seed()
+cfg = with_tg(backup=True, backup_thread_id="777")
+with Captured() as cap:
+    okk, err = S.tg_backup(cfg, force=True)
+check("отправка прошла", okk is True, str(err))
+check("метод sendDocument", cap.calls[-1]["url"].endswith("/sendDocument"))
+check("токен в пути, а не в теле", "/bot" + TOKEN + "/" in cap.calls[-1]["url"])
+check("прокси проброшен как есть", cap.calls[-1]["proxy"] == PROXY)
+check("тип содержимого multipart",
+      cap.calls[-1]["ctype"].startswith("multipart/form-data; boundary="))
+check("граница из тела совпадает с заголовком",
+      cap.body.startswith("--" + cap.calls[-1]["ctype"].split("boundary=")[1]))
+check("чат указан", field_of(cap.body, "chat_id") == "-1001234567890")
+check("тема копий отдельная", field_of(cap.body, "message_thread_id") == "777")
+check("подпись есть", "💾" in (field_of(cap.body, "caption") or ""))
+check("имя файла с датой и нодой",
+      re.search(r'filename="shape-[A-Za-z0-9._-]+-\d{4}-\d{2}-\d{2}\.json"', cap.body)
+      is not None,
+      re.search(r'filename="[^"]*"', cap.body).group(0))
+check("вложение — разобранный JSON выгрузки",
+      json.loads(cap.body.split("\r\n\r\n")[-1].rsplit("\r\n--", 1)[0]
+                 )["kind"] == "shape-node-state")
+
+print("\n\033[1m19. Секреты в Telegram не уходят ни при каких настройках\033[0m")
+check("токена бота нет в теле запроса", TOKEN not in cap.body)
+check("пароля прокси нет в теле запроса", "secretpass" not in cap.body)
+check("флаг secrets_included во вложении false",
+      json.loads(cap.body.split("\r\n\r\n")[-1].rsplit("\r\n--", 1)[0]
+                 )["secrets_included"] is False)
+
+
+# Ломаем выгрузку так, будто кто-то однажды включил секреты в этот путь.
+real_build = S.build_export
+
+
+def leaky(with_secrets=False):
+    return real_build(with_secrets=True)
+
+
+S.build_export = leaky
+try:
+    with Captured() as cap2:
+        okk, err = S.tg_backup(with_tg(backup=True), force=True)
+    check("выгрузка с секретом не отправляется", okk is False)
+    check("в API не ушло ни одного запроса", cap2.calls == [])
+    check("причина названа явно", "секрет" in err or "secret" in err, err)
+finally:
+    S.build_export = real_build
+
+print("\n\033[1m20. Когда отправка не должна происходить\033[0m")
+with Captured() as cap3:
+    okk, err = S.tg_backup(with_tg(backup=False), force=False)
+check("выключенная отправка молчит", okk is False and cap3.calls == [])
+with Captured() as cap4:
+    okk, _ = S.tg_backup(with_tg(backup=True, enabled=False), force=False)
+check("выключенный Telegram молчит", okk is False and cap4.calls == [])
+with Captured() as cap5:
+    okk, err = S.tg_backup(with_tg(backup=True, token=""), force=True)
+check("без токена не отправляем", okk is False and cap5.calls == [])
+with Captured() as cap6:
+    okk, err = S.tg_backup(with_tg(backup=True, chat_id=""), force=True)
+check("без чата не отправляем", okk is False and cap6.calls == [])
+with Captured() as cap7:
+    okk, _ = S.tg_backup(with_tg(backup=False), force=True)
+check("кнопка «сейчас» работает и при выключенном расписании",
+      okk is True and len(cap7.calls) == 1)
+
+print("\n\033[1m21. Тема по умолчанию — та же, что у отчётов\033[0m")
+with Captured() as cap8:
+    S.tg_backup(with_tg(backup=True, thread_id="42", backup_thread_id=""), force=True)
+check("без своей темы копия идёт в тему отчётов",
+      field_of(cap8.body, "message_thread_id") == "42")
+with Captured() as cap9:
+    S.tg_backup(with_tg(backup=True, thread_id="", backup_thread_id=""), force=True)
+check("без тем вообще поле не отправляется",
+      field_of(cap9.body, "message_thread_id") is None)
+
+print("\n\033[1m22. Недельное расписание\033[0m")
+
+
+def at(day, hh, mm):
+    """Момент времени: 2026-08-10 — понедельник."""
+    return time.mktime((2026, 8, 9 + day, hh, mm, 0, 0, 0, -1))
+
+
+for p in (S.BACKUP_STATE,):
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+
+cfg = with_tg(backup=True, backup_day=1, digest_at="09:00")
+with Captured() as c:
+    fired = S.backup_due(cfg, now=at(1, 8, 59))
+check("до назначенного часа не отправляем", fired is False and c.calls == [])
+with Captured() as c:
+    fired = S.backup_due(cfg, now=at(2, 12, 0))
+check("в другой день недели не отправляем", fired is False and c.calls == [])
+with Captured() as c:
+    fired = S.backup_due(cfg, now=at(1, 9, 0))
+check("в назначенный день и час отправляем", fired is True and len(c.calls) == 1)
+with Captured() as c:
+    fired = S.backup_due(cfg, now=at(1, 18, 0))
+check("второй раз за те же сутки не отправляем", fired is False and c.calls == [])
+
+os.remove(S.BACKUP_STATE)
+cfg = with_tg(backup=True, backup_day=6, digest_at="21:30")
+with Captured() as c:
+    check("суббота в 21:29 — рано",
+          S.backup_due(cfg, now=at(6, 21, 29)) is False and c.calls == [])
+with Captured() as c:
+    check("суббота в 21:30 — пора", S.backup_due(cfg, now=at(6, 21, 30)) is True)
+
+os.remove(S.BACKUP_STATE)
+cfg = with_tg(backup=True, backup_day=1)
+with Captured(raise_exc=OSError("сеть недоступна")) as c:
+    fired = quiet(S.backup_due, cfg, at(1, 9, 0))
+check("при обрыве связи отправка не считается удачной", fired is False)
+state = json.load(open(S.BACKUP_STATE))
+check("назначен повтор, а не бесконечные попытки",
+      state.get("retry_at", 0) > at(1, 9, 0) and "last_sent" not in state)
+with Captured() as c:
+    fired = quiet(S.backup_due, cfg, at(1, 9, 5))
+check("до срока повтора в API не лезем", fired is False and c.calls == [])
+with Captured() as c:
+    fired = S.backup_due(cfg, now=at(1, 9, 0) + S.BACKUP_RETRY + 1)
+check("после срока повтора пробуем снова", fired is True)
+
+os.remove(S.BACKUP_STATE)
+with Captured() as c:
+    check("кривой день недели не роняет сторожа",
+          S.backup_due(with_tg(backup=True, backup_day="понедельник"),
+                       now=at(1, 9, 0)) is True)
+os.remove(S.BACKUP_STATE)
+with open(S.BACKUP_STATE, "w") as f:
+    f.write("{это не json")
+with Captured() as c:
+    check("испорченный файл состояния не роняет сторожа",
+          S.backup_due(with_tg(backup=True, backup_day=1), now=at(1, 9, 0)) is True)
+
+print("\n\033[1m23. Сборка multipart\033[0m")
+body, ctype = S._multipart({"a": "1", "b": "два"}, "x.json", b'{"k":1}')
+check("границы уникальны при каждом вызове",
+      S._multipart({}, "x", b"")[1] != S._multipart({}, "x", b"")[1])
+check("тело заканчивается закрывающей границей",
+      body.endswith(("--" + ctype.split("boundary=")[1] + "--\r\n").encode()))
+check("текстовые поля на месте",
+      b'name="a"' in body and "два".encode() in body)
+check("бинарное вложение не искажено", b'{"k":1}' in body)
+check("опасное имя файла обеззаражено",
+      'filename="a-b-c.json"' in S._multipart({}, 'a"b/c.json', b"")[0]
+      .decode("utf-8", "replace"),
+      re.search(r'filename="[^"]*"',
+                S._multipart({}, 'a"b/c.json', b"")[0].decode("utf-8", "replace")).group(0))
+check("пустое имя ноды не даёт пустое имя файла",
+      S.backup_filename("///").startswith("shape-node-"),
+      S.backup_filename("///"))
+
+print("\n\033[1m24. Отправка копии не меняет состояние ноды\033[0m")
+seed()
+before_state = semantic(S.build_export(with_secrets=True)["state"])
+with Captured():
+    S.tg_backup(with_tg(backup=True), force=True)
+seed_cfg_gone = semantic(S.build_export(with_secrets=True)["state"])
+check("состояние после отправки прежнее",
+      json.loads(before_state)["whitelist"] == json.loads(seed_cfg_gone)["whitelist"])
 
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)

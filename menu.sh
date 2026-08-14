@@ -1253,13 +1253,37 @@ doctor() {
         echo -e "${G}✓${N}" || echo -e "${D}${T[dr_nosvc]}${N}")"
 }
 
+# Настройки отправки копии: включена, тема, день, готов ли Telegram вообще.
+bk_read() {
+    python3 - <<'PY' 2>/dev/null || echo "0|—|1|0"
+import json
+try:
+    g = json.load(open("/etc/shaper/config.json")).get("telegram", {})
+except Exception:
+    g = {}
+day = g.get("backup_day", 1)
+try:
+    day = int(day)
+except (TypeError, ValueError):
+    day = 1
+if not 1 <= day <= 7:
+    day = 1
+print("|".join([
+    "1" if g.get("backup") else "0",
+    str(g.get("backup_thread_id") or "") or "—",
+    str(day),
+    "1" if (g.get("token") and g.get("chat_id")) else "0",
+]))
+PY
+}
+
 # ── Резервная копия состояния ─────────────────────────────────────────
 # Копия по умолчанию идёт без токена бота: файл почти всегда уезжает с
 # сервера — в загрузки, в переписку, иногда в репозиторий. Токен включается
 # отдельным пунктом, чтобы это было осознанным действием, а не побочным
 # эффектом нажатия «сохранить».
 screen_backup() {
-    local f ans def
+    local f ans def bk_on bk_topic bk_day bk_ready
     def="/root/shape-$(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d).json"
     while :; do
         title "${T[bk_title]}"
@@ -1268,9 +1292,21 @@ screen_backup() {
         echo -e "  ${D}${T[bk_h3]}${N}"
         echo -e "  ${D}${T[bk_h4]}${N}"
         hr
+        IFS='|' read -r bk_on bk_topic bk_day bk_ready <<< "$(bk_read)"
         echo "  [1] ${T[bk_save]}"
         echo "  [2] ${T[bk_load]}"
         echo "  [3] ${T[bk_check]}"
+        hr
+        if [[ "$bk_ready" != "1" ]]; then
+            echo -e "  ${D}${T[bk_tg_need]}${N}"
+        elif [[ "$bk_on" == "1" ]]; then
+            echo -e "  [4] ${T[bk_tg_on]}: ${G}${T[tg_on]}${N} ${D}${T[tg_press]}${N}"
+            echo -e "  [5] ${T[bk_tg_day]}: ${B}${T[dow$bk_day]}${N}"
+            echo -e "  [6] ${T[bk_tg_topic]}: ${B}${bk_topic}${N}"
+        else
+            echo -e "  [4] ${T[bk_tg_on]}: ${Y}${T[tg_off]}${N} ${D}${T[tg_press]}${N}"
+        fi
+        [[ "$bk_ready" == "1" ]] && echo "  [7] ${T[bk_tg_now]}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -1305,6 +1341,36 @@ screen_backup() {
                    echo -e "  ${R}${T[bk_missing]}${N}"; pause; continue
                fi
                "$CTL" import "$f" --dry-run
+               pause ;;
+            4) [[ "$bk_ready" != "1" ]] && continue
+               if [[ "$bk_on" == "1" ]]; then
+                   "$CTL" telegram set --backup off --quiet
+               else
+                   echo
+                   echo -e "  ${D}${T[bk_tg_w1]}${N}"
+                   echo -e "  ${D}${T[bk_tg_w2]}${N}"
+                   echo -e "  ${D}${T[bk_tg_w3]}${N}"
+                   echo -e "  ${Y}${T[bk_tg_w4]}${N}"
+                   echo
+                   ans="$(ask "${T[bk_confirm]}")"
+                   [[ "$ans" =~ ^[YyДд]$ ]] || continue
+                   "$CTL" telegram set --backup on --quiet
+               fi ;;
+            5) [[ "$bk_on" == "1" ]] || continue
+               echo -e "  ${D}${T[bk_tg_day_h]}${N}"
+               ans="$(ask "${T[bk_tg_day]}" "$bk_day")"
+               if [[ "$ans" =~ ^[1-7]$ ]]; then
+                   "$CTL" telegram set --backup-day "$ans" --quiet
+               else
+                   echo -e "  ${R}${T[need_num]}${N}"; pause
+               fi ;;
+            6) [[ "$bk_on" == "1" ]] || continue
+               echo -e "  ${D}${T[bk_tg_topic_h]}${N}"
+               ans="$(ask "${T[bk_tg_topic]}")"
+               "$CTL" telegram set --backup-thread "$ans" --quiet || pause ;;
+            7) [[ "$bk_ready" != "1" ]] && continue
+               echo
+               "$CTL" telegram backup
                pause ;;
             0|"") return ;;
         esac

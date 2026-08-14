@@ -87,6 +87,29 @@ C = {
 MSG = {
     "ru": {
         "root": "нужны права root",
+        "h_tg_backup": "включить или выключить отправку копии: on/off",
+        "h_tg_bk_thread": "тема для копий, если отдельная от отчётов",
+        "h_tg_bk_day": "день недели для копии: 1 понедельник … 7 воскресенье",
+        "tg_backup": "копия",
+        "tg_bk_state": "Копия",
+        "tg_bk_when": "по {day}, в {at}",
+        "tg_bk_thread": "тема копий",
+        "bk_tg_caption": "Резервная копия состояния",
+        "bk_tg_counts": "адресов в белом списке {w}, ограничений {p}, владельцев {o}",
+        "bk_tg_nosec": "без токена бота — восстанавливать через shaperctl.py import",
+        "bk_tg_secrets": "отправка отменена: в копию попал секрет, а в Telegram такое не уходит",
+        "bk_tg_sent": "копия отправлена в Telegram",
+        "bk_tg_off": "отправка копий выключена",
+        "bk_tg_send_now": "Отправить копию в Telegram сейчас",
+        "bk_tg_toggle": "Отправка копии в Telegram",
+        "bk_tg_hint1": "Копия уходит файлом раз в неделю, в то же время, что и сводка.",
+        "bk_tg_hint2": "Токен бота в неё не попадает никогда: бот пишет в эту же тему,",
+        "bk_tg_hint3": "и любой её участник получил бы управление ботом.",
+        "bk_tg_hint4": "В файле есть IP-адреса клиентов — тему держите закрытой.",
+        "dow1": "понедельникам", "dow2": "вторникам", "dow3": "средам",
+        "dow4": "четвергам", "dow5": "пятницам", "dow6": "субботам",
+        "dow7": "воскресеньям",
+        "tg_bad_day": "день недели: от 1 (понедельник) до 7 (воскресенье)",
         "h_export": "выгрузить состояние ноды в файл",
         "h_import": "восстановить состояние ноды из файла",
         "h_exp_out": "куда писать; по умолчанию на экран",
@@ -286,6 +309,29 @@ MSG = {
     },
     "en": {
         "root": "root privileges required",
+        "h_tg_backup": "turn the backup upload on or off: on/off",
+        "h_tg_bk_thread": "topic for backups, if separate from reports",
+        "h_tg_bk_day": "weekday for the backup: 1 Monday … 7 Sunday",
+        "tg_backup": "backup",
+        "tg_bk_state": "Backup",
+        "tg_bk_when": "on {day}, at {at}",
+        "tg_bk_thread": "backup topic",
+        "bk_tg_caption": "Node state backup",
+        "bk_tg_counts": "whitelisted {w}, limits {p}, owners {o}",
+        "bk_tg_nosec": "no bot token inside — restore with shaperctl.py import",
+        "bk_tg_secrets": "upload cancelled: a secret ended up in the copy, and those do not go to Telegram",
+        "bk_tg_sent": "backup sent to Telegram",
+        "bk_tg_off": "backup upload is off",
+        "bk_tg_send_now": "Send a backup to Telegram now",
+        "bk_tg_toggle": "Backup upload to Telegram",
+        "bk_tg_hint1": "The copy is uploaded as a file once a week, at the digest time.",
+        "bk_tg_hint2": "The bot token never goes into it: the bot posts to that same topic,",
+        "bk_tg_hint3": "so anyone in it would gain control of the bot.",
+        "bk_tg_hint4": "The file holds client IP addresses — keep the topic private.",
+        "dow1": "Mondays", "dow2": "Tuesdays", "dow3": "Wednesdays",
+        "dow4": "Thursdays", "dow5": "Fridays", "dow6": "Saturdays",
+        "dow7": "Sundays",
+        "tg_bad_day": "weekday: from 1 (Monday) to 7 (Sunday)",
         "h_export": "export node state to a file",
         "h_import": "restore node state from a file",
         "h_exp_out": "where to write; prints to screen by default",
@@ -710,6 +756,13 @@ TG_DEFAULT = {
     "daily": True,        # сводка за прошедшие сутки
     "digest_at": "09:00", # во сколько её присылать, местное время ноды
     "proxy": "",          # socks5://… или http://… — нужен на российских нодах
+
+    # Резервная копия состояния файлом. По умолчанию выключена; включённая
+    # уходит раз в неделю в digest_at того же дня. Своей темы может не иметь —
+    # тогда идёт туда же, куда отчёты.
+    "backup": False,
+    "backup_thread_id": "",
+    "backup_day": 1,      # 1 понедельник … 7 воскресенье
 }
 
 
@@ -1747,6 +1800,7 @@ def cmd_watch(a):
                 save_daily(daily)
                 today = day_now
             digest_due(cfg)
+            backup_due(cfg)
 
             # Персональные скорости живут в ядре с далёким, но конечным
             # сроком. Продлеваем раз в час, чтобы они не истекли молча.
@@ -1909,7 +1963,7 @@ def _socks5(sock, host, port, user=None, pwd=None):
     _recvn(sock, (4 if atyp == 1 else 16 if atyp == 4 else _recvn(sock, 1)[0]) + 2)
 
 
-def _post(url, data, proxy=""):
+def _post(url, data, proxy="", content_type="application/x-www-form-urlencoded"):
     u = urllib.parse.urlsplit(url)
     if proxy.startswith(("socks5://", "socks5h://")):
         p = urllib.parse.urlsplit(proxy)
@@ -1920,7 +1974,7 @@ def _post(url, data, proxy=""):
             conn = http.client.HTTPSConnection(u.hostname, 443, timeout=15, context=ctx)
             conn.sock = ctx.wrap_socket(sock, server_hostname=u.hostname)
             conn.request("POST", u.path, body=data, headers={
-                "Host": u.hostname, "Content-Type": "application/x-www-form-urlencoded",
+                "Host": u.hostname, "Content-Type": content_type,
                 "Content-Length": str(len(data))})
             r = conn.getresponse()
             body = r.read()
@@ -1934,7 +1988,8 @@ def _post(url, data, proxy=""):
             except Exception:
                 pass
 
-    req = urllib.request.Request(url, data=data)
+    req = urllib.request.Request(url, data=data,
+                                 headers={"Content-Type": content_type})
     opener = (urllib.request.build_opener(
         urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
         if proxy else urllib.request)
@@ -2104,6 +2159,166 @@ def digest_due(cfg):
         pass
 
 
+
+# ──────────────── резервная копия в Telegram ────────────────
+# Копия, лежащая на том же диске, который однажды умрёт, копией не является.
+# Отдельный сервер под 200 килобайт заводить незачем, а Telegram на ноде уже
+# настроен — вместе с прокси, который на российских нодах всё равно нужен.
+#
+# Жёсткое правило: секреты сюда не уходят никогда. Токен бота в чате, куда
+# этот же бот пишет, означает, что любой участник темы — сейчас или добавленный
+# через полгода — забирает управление ботом и всю переписку разом. Копия с
+# токеном существует только как файл на диске, для переноса ноды.
+
+BACKUP_STATE = os.path.join(VAR_DIR, "backup.state")
+BACKUP_RETRY = 3600        # связи нет — пробуем через час, а не каждый цикл
+
+
+def _safe_name(s, fallback="node"):
+    """Имя файла без сюрпризов: только буквы, цифры, точка, дефис."""
+    s = re.sub(r"[^A-Za-z0-9._-]", "-", str(s))[:40].strip("-.")
+    return s or fallback
+
+
+def _multipart(fields, filename, content, field="document",
+               mime="application/json"):
+    """
+    Собирает multipart/form-data. Возвращает (тело, значение Content-Type).
+
+    Своими руками, потому что весь Shape живёт на стандартной библиотеке, а
+    в ней готового сборщика нет. Граница берётся из os.urandom: угадать её и
+    подсунуть в имя файла или в подпись свою секцию не выйдет.
+    """
+    boundary = "----shape" + os.urandom(16).hex()
+    out = []
+    for k, v in fields.items():
+        out.append(f"--{boundary}\r\n"
+                   f'Content-Disposition: form-data; name="{k}"\r\n\r\n'
+                   f"{v}\r\n".encode())
+    out.append(f"--{boundary}\r\n"
+               f'Content-Disposition: form-data; name="{field}"; '
+               f'filename="{_safe_name(filename, "backup.json")}"\r\n'
+               f"Content-Type: {mime}\r\n\r\n".encode())
+    out.append(content)
+    out.append(f"\r\n--{boundary}--\r\n".encode())
+    return b"".join(out), f"multipart/form-data; boundary={boundary}"
+
+
+def backup_filename(node=None):
+    node = _safe_name(node or socket.gethostname())
+    return f"shape-{node}-{time.strftime('%Y-%m-%d')}.json"
+
+
+def tg_backup(cfg=None, force=False):
+    """
+    Отправляет копию состояния файлом. Возвращает (успех, пояснение).
+
+    force — для кнопки «отправить сейчас»: она работает и когда еженедельная
+    отправка выключена, но сам Telegram должен быть настроен.
+    """
+    cfg = cfg or load_config()
+    tg = cfg["telegram"]
+    if not force and not (tg.get("enabled") and tg.get("backup")):
+        return False, t("bk_tg_off")
+    if not tg.get("token") or not tg.get("chat_id"):
+        return False, t("tg_no_creds")
+
+    data = build_export(with_secrets=False)
+    blob = json.dumps(data, ensure_ascii=False, indent=1).encode()
+
+    # Последняя проверка перед отправкой, а не вера в флаг выше. Если код
+    # когда-нибудь поменяют так, что секрет просочится в выгрузку, отправка
+    # должна сорваться здесь — а не после того, как токен уже улетел в чат.
+    text = blob.decode("utf-8", "replace")
+    for section, field in SECRET_PATHS:
+        secret = str((cfg.get(section) or {}).get(field) or "")
+        if secret and secret in text:
+            return False, t("bk_tg_secrets")
+    if data.get("secrets_included"):
+        return False, t("bk_tg_secrets")
+
+    st = data["state"]
+    caption = (f"💾 <b>{node_label(tg)}</b> · {t('bk_tg_caption')}\n"
+               f"{t('bk_tg_counts', w=len(st['whitelist']), p=len(st['penalties']), o=len(st['owners']))}\n"
+               f"<i>{t('bk_tg_nosec')}</i>")
+
+    fields = {"chat_id": tg["chat_id"], "caption": caption, "parse_mode": "HTML"}
+    thread = str(tg.get("backup_thread_id") or tg.get("thread_id") or "").strip()
+    if thread:
+        fields["message_thread_id"] = thread
+
+    body, ctype = _multipart(fields, backup_filename(data.get("node")), blob)
+    url = f"https://api.telegram.org/bot{tg['token']}/sendDocument"
+    try:
+        return _post(url, body, tg.get("proxy", ""), ctype) == 200, "ok"
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:200]
+        return False, scrub(f"HTTP {e.code}: {detail}", {"telegram": tg})
+    except Exception as e:
+        hint = "" if tg.get("proxy") else "\n  " + t("tg_need_proxy")
+        return False, scrub(f"{e}{hint}", {"telegram": tg})
+
+
+def backup_due(cfg, now=None):
+    """
+    Раз в цикл сторожа: не пора ли отправить недельную копию.
+
+    Отправляем в назначенный день недели, не раньше времени сводки, и не
+    чаще раза в сутки. Если нода была выключена и день пропущен — ждём
+    следующего: догонять пропущенную копию смысла нет, состояние всё равно
+    берётся текущее, а не то, что было в понедельник.
+    """
+    tg = cfg["telegram"]
+    if not (tg.get("enabled") and tg.get("backup")):
+        return False
+    now = now if now is not None else time.time()
+    lt = time.localtime(now)
+    try:
+        want_day = int(tg.get("backup_day", 1))
+    except (TypeError, ValueError):
+        want_day = 1
+    if not 1 <= want_day <= 7:
+        want_day = 1
+    if lt.tm_wday + 1 != want_day:
+        return False
+
+    h, m = parse_hhmm(tg.get("digest_at", "09:00"))
+    if (lt.tm_hour, lt.tm_min) < (h, m):
+        return False
+
+    today = time.strftime("%Y-%m-%d", lt)
+    state = {}
+    try:
+        with open(BACKUP_STATE) as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            state = {}
+    except Exception:
+        state = {}
+    if state.get("last_sent") == today:
+        return False
+    if now < float(state.get("retry_at") or 0):
+        return False
+
+    ok, err = tg_backup(cfg)
+    if ok:
+        state = {"last_sent": today}
+    else:
+        # Связи нет — пробуем через час, а не каждые десять секунд.
+        print(f"telegram backup: {err}", flush=True)
+        state["retry_at"] = now + BACKUP_RETRY
+    try:
+        os.makedirs(VAR_DIR, exist_ok=True)
+        tmp = BACKUP_STATE + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, BACKUP_STATE)
+    except OSError:
+        pass
+    return ok
+
+
 def cmd_telegram(a):
     cfg = load_config()
     tg = cfg["telegram"]
@@ -2117,12 +2332,27 @@ def cmd_telegram(a):
               f"{'  · ' + t('tg_thread') + ' ' + str(tg['thread_id']) if tg['thread_id'] else ''}")
         print(f"  {t('tg_proxy')}   : {tg['proxy'] or t('tg_direct')}")
         print(f"  {t('tg_at')}   : {tg.get('digest_at', '09:00')}")
+        if tg.get("backup"):
+            day = t("dow%d" % max(1, min(7, int(tg.get("backup_day", 1) or 1))))
+            extra = ""
+            if str(tg.get("backup_thread_id") or "").strip():
+                extra = f"  · {t('tg_bk_thread')} {tg['backup_thread_id']}"
+            print(f"  {t('tg_bk_state')}   : {C['grn']}"
+                  f"{t('tg_bk_when', day=day, at=tg.get('digest_at', '09:00'))}"
+                  f"{C['r']}{extra}")
+        else:
+            print(f"  {t('tg_bk_state')}   : {C['gry']}{t('guard_off')}{C['r']}")
         print()
         return
     if a.action == "test":
         ok, err = tg_send(
             f"🦨 <b>{node_label(tg)}</b>\n{t('tg_test_text')}", cfg, force=True)
         print(f"{C['grn']}✓ {t('tg_sent')}{C['r']}" if ok
+              else f"{C['red']}✗ {err}{C['r']}")
+        return
+    if a.action == "backup":
+        ok, err = tg_backup(cfg, force=True)
+        print(f"{C['grn']}✓ {t('bk_tg_sent')}{C['r']}" if ok
               else f"{C['red']}✗ {err}{C['r']}")
         return
     if a.action == "digest":
@@ -2172,13 +2402,23 @@ def cmd_telegram(a):
     if a.thread is not None and a.thread.strip() \
             and not re.fullmatch(r"\d{1,19}", a.thread.strip()):
         die(t("tg_bad_thread_fmt"))
+    if a.backup_thread is not None and a.backup_thread.strip() \
+            and not re.fullmatch(r"\d{1,19}", a.backup_thread.strip()):
+        die(t("tg_bad_thread_fmt"))
+    if a.backup_day is not None and not 1 <= a.backup_day <= 7:
+        die(t("tg_bad_day"))
     if a.name is not None and len(a.name.strip()) > 64:
         die(t("tg_name_long"))
 
     for key, val in (("token", a.token), ("chat_id", a.chat), ("thread_id", a.thread),
-                     ("node_name", a.name), ("proxy", a.proxy)):
+                     ("node_name", a.name), ("proxy", a.proxy),
+                     ("backup_thread_id", a.backup_thread)):
         if val is not None:
             tg[key] = val.strip()
+    if a.backup_day is not None:
+        tg["backup_day"] = int(a.backup_day)
+    if a.backup is not None:
+        tg["backup"] = a.backup == "on"
     if a.enable:
         tg["enabled"] = True
     if a.disable:
@@ -3128,7 +3368,7 @@ def build_parser():
     rl.set_defaults(func=cmd_release)
 
     tg = sub.add_parser("telegram", help=t("h_telegram"))
-    tg.add_argument("action", choices=["show", "set", "test", "digest"],
+    tg.add_argument("action", choices=["show", "set", "test", "digest", "backup"],
                     nargs="?", default="show")
     tg.add_argument("--at", default=None, help=t("h_tg_at"))
     tg.add_argument("--token", default=None)
@@ -3140,6 +3380,12 @@ def build_parser():
     tg.add_argument("--disable", action="store_true")
     tg.add_argument("--events", choices=["on", "off"], default=None)
     tg.add_argument("--daily", choices=["on", "off"], default=None)
+    tg.add_argument("--backup", choices=["on", "off"], default=None,
+                    help=t("h_tg_backup"))
+    tg.add_argument("--backup-thread", dest="backup_thread", default=None,
+                    help=t("h_tg_bk_thread"))
+    tg.add_argument("--backup-day", dest="backup_day", type=int, default=None,
+                    help=t("h_tg_bk_day"))
     tg.add_argument("--quiet", action="store_true")
     tg.set_defaults(func=cmd_telegram)
 

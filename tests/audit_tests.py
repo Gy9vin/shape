@@ -51,7 +51,7 @@ def guard(**kw):
 def tg(**kw):
     d = dict(action="set", at=None, token=None, chat=None, thread=None, name=None,
              proxy=None, enable=False, disable=False, events=None, daily=None,
-             quiet=True)
+             backup=None, backup_thread=None, backup_day=None, quiet=True)
     d.update(kw); return argparse.Namespace(**d)
 
 print("\n\033[1m1. Регрессия: правка автоограничения стирала настройки Telegram\033[0m")
