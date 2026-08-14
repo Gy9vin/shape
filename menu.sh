@@ -1253,6 +1253,64 @@ doctor() {
         echo -e "${G}✓${N}" || echo -e "${D}${T[dr_nosvc]}${N}")"
 }
 
+# ── Резервная копия состояния ─────────────────────────────────────────
+# Копия по умолчанию идёт без токена бота: файл почти всегда уезжает с
+# сервера — в загрузки, в переписку, иногда в репозиторий. Токен включается
+# отдельным пунктом, чтобы это было осознанным действием, а не побочным
+# эффектом нажатия «сохранить».
+screen_backup() {
+    local f ans def
+    def="/root/shape-$(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d).json"
+    while :; do
+        title "${T[bk_title]}"
+        echo -e "  ${D}${T[bk_h1]}${N}"
+        echo -e "  ${D}${T[bk_h2]}${N}"
+        echo -e "  ${D}${T[bk_h3]}${N}"
+        echo -e "  ${D}${T[bk_h4]}${N}"
+        hr
+        echo "  [1] ${T[bk_save]}"
+        echo "  [2] ${T[bk_load]}"
+        echo "  [3] ${T[bk_check]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) f="$(ask "${T[bk_where]}" "$def")"
+               [[ -z "$f" ]] && continue
+               echo
+               echo -e "  ${D}${T[bk_secret_warn]}${N}"
+               ans="$(ask "${T[bk_secret_ask]}")"
+               echo
+               if [[ "$ans" =~ ^[YyДд]$ ]]; then
+                   "$CTL" export --out "$f" --with-secrets
+               else
+                   "$CTL" export --out "$f"
+               fi
+               echo
+               echo -e "  ${D}${T[bk_hint]}${N}"
+               pause ;;
+            2) f="$(ask "${T[bk_where]}")"
+               [[ -z "$f" ]] && continue
+               if [[ ! -f "$f" ]]; then
+                   echo -e "  ${R}${T[bk_missing]}${N}"; pause; continue
+               fi
+               "$CTL" import "$f" --dry-run
+               echo
+               ans="$(ask "${T[bk_confirm]}")"
+               [[ "$ans" =~ ^[YyДд]$ ]] || continue
+               "$CTL" import "$f"
+               pause ;;
+            3) f="$(ask "${T[bk_where]}")"
+               [[ -z "$f" ]] && continue
+               if [[ ! -f "$f" ]]; then
+                   echo -e "  ${R}${T[bk_missing]}${N}"; pause; continue
+               fi
+               "$CTL" import "$f" --dry-run
+               pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 screen_service() {
     local auto_lbl
     while :; do
@@ -1288,6 +1346,7 @@ screen_service() {
         else
             echo -e " [10] 🔗 ${T[api_menu]} ${D}${T[api_none]}${N}"
         fi
+        echo -e " [11] 💾 ${T[bk_title]}"
         echo -e "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -1311,6 +1370,7 @@ screen_service() {
             8) screen_lang ;;
             9) screen_metrics ;;
            10) screen_api ;;
+           11) screen_backup ;;
             0|"") return ;;
         esac
     done

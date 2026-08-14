@@ -13,6 +13,66 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.5
+
+**Node state backup.**
+
+Node state — settings, whitelist, personal speeds, active limits, address
+owners and daily history — can now be exported to a single file and restored
+from it.
+
+The reason is plain: going from twenty-eight nodes to a hundred leaves no
+room for repeating setup by hand, and a backup sitting on a dead disk is not
+a backup.
+
+### Added
+
+* `shaperctl.py export --out FILE` — export state into a single JSON.
+* `shaperctl.py import FILE` — restore, with `--dry-run`, `--only`
+  and `--replace`.
+* A **Service → 💾 Backup and restore** screen: save, restore with a
+  mandatory parse-and-confirm step, and a separate file check.
+* A `tests/export_tests.py` suite — 85 checks, including the round trip
+  "export → wipe → restore → state matches".
+
+### How it is protected
+
+* **Secrets are not exported by default.** The bot token and proxy password
+  stay out of the file; `--with-secrets` is there for cloning a node. The
+  file is created with mode `600`, and the mode is set before writing rather
+  than after.
+* **The receiving node's token is never wiped.** Restoring from a
+  secret-free backup leaves the token configured here in place — otherwise
+  notifications would go silent without a word.
+* **The file is not trusted.** It may come from another node or have been
+  edited by hand, so every value goes through the same checks as ordinary
+  input: addresses, speeds, ports, field types in the `guard` and `telegram`
+  sections. Anything unusable is dropped with a note instead of crashing the
+  command halfway through writing.
+* **Writes go through the normal functions only** — `save_config`,
+  `penalties_update`, `owners_update`. An import writing to files directly
+  would bypass the locks that protect them from concurrent edits by the
+  watchdog.
+* The format carries a version: a file from a newer Shape is rejected with a
+  clear message rather than parsed halfway.
+
+### Fixed
+
+* The CI secret scanner matched the sample tokens in the test suites and
+  would have failed the build. The values are unchanged, but the sources no
+  longer contain a contiguous literal that looks like a real token.
+
+### Upgrading
+
+Nothing to configure; shaper behaviour is unchanged. Right after upgrading it
+is worth taking a copy:
+
+```bash
+shaperctl.py export --out /root/shape-$(hostname -s).json
+```
+
+and copying the file off the server.
+
 ## 3.4
 
 **Holding time is back, and the whitelist became visible.**

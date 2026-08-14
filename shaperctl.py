@@ -87,6 +87,48 @@ C = {
 MSG = {
     "ru": {
         "root": "нужны права root",
+        "h_export": "выгрузить состояние ноды в файл",
+        "h_import": "восстановить состояние ноды из файла",
+        "h_exp_out": "куда писать; по умолчанию на экран",
+        "h_exp_secrets": "включить токен бота и пароль прокси",
+        "h_imp_dry": "показать, что изменится, и ничего не менять",
+        "h_imp_only": "только эти разделы через запятую",
+        "h_imp_replace": "заменить белый список, а не дополнить",
+        "exp_done": "состояние выгружено: {path}",
+        "exp_counts": "белый список {w}, ограничения {p}, владельцы {o}, суток истории {h}",
+        "exp_secrets": "в файле лежит токен бота — храните его как пароль",
+        "exp_no_secrets": "токен и прокси не включены, добавьте --with-secrets при переносе ноды",
+        "sec_config": "настройки",
+        "sec_whitelist": "белый список",
+        "sec_penalties": "ограничения",
+        "sec_owners": "владельцы адресов",
+        "sec_history": "история по суткам",
+        "imp_not_object": "файл не похож на выгрузку Shape",
+        "imp_not_shape": "это не выгрузка Shape: нет метки shape-node-state",
+        "imp_no_schema": "в файле не указана версия формата",
+        "imp_newer": "файл из более новой версии Shape (формат {got}, здесь {ours}) — обновите Shape",
+        "imp_no_state": "в файле нет раздела state",
+        "imp_no_file": "файл не открывается: {path} {err}",
+        "imp_bad_json": "файл не читается как JSON: {err}",
+        "imp_bad_only": "нет такого раздела: {s}; есть: {all}",
+        "imp_bad_speed": "скорость отброшена: {v}",
+        "imp_bad_port": "порт отброшен: {v}",
+        "imp_many_ports": "портов больше {n}, лишние отброшены",
+        "imp_bad_ports": "список портов испорчен и отброшен",
+        "imp_bad_section": "раздел {s} испорчен и отброшен",
+        "imp_bad_field": "{s}.{k} — неподходящее значение, отброшено",
+        "imp_unknown_keys": "{s}: незнакомые ключи отброшены: {k}",
+        "imp_bad_ip": "адрес отброшен: {v}",
+        "imp_bad_entry": "запись для {v} отброшена",
+        "imp_from": "выгрузка с ноды {node}, Shape {v}, от {when}",
+        "imp_no_secrets": "токена в файле нет — тот, что настроен здесь, останется на месте",
+        "imp_yes": "будет применено",
+        "imp_skip": "пропущено",
+        "imp_more_problems": "и ещё {n} замечаний",
+        "imp_dry": "ничего не изменено: это была проверка",
+        "imp_done": "восстановлено: {s}",
+        "imp_live": "движок загружен — изменения уже в ядре",
+        "imp_offline": "движок не загружен — настройки применятся при следующем запуске",
         "tg_mtproto": "это MTProto-прокси из ссылки t.me/proxy",
         "tg_mtproto2": "он умеет только протокол мессенджера, Bot API через него не пройдёт",
         "tg_mtproto3": "нужен SOCKS5 или HTTP: socks5://логин:пароль@хост:1080",
@@ -244,6 +286,48 @@ MSG = {
     },
     "en": {
         "root": "root privileges required",
+        "h_export": "export node state to a file",
+        "h_import": "restore node state from a file",
+        "h_exp_out": "where to write; prints to screen by default",
+        "h_exp_secrets": "include the bot token and proxy password",
+        "h_imp_dry": "show what would change and change nothing",
+        "h_imp_only": "these sections only, comma separated",
+        "h_imp_replace": "replace the whitelist instead of merging",
+        "exp_done": "state exported: {path}",
+        "exp_counts": "whitelist {w}, limits {p}, owners {o}, days of history {h}",
+        "exp_secrets": "the file holds the bot token — keep it like a password",
+        "exp_no_secrets": "token and proxy left out; add --with-secrets when moving a node",
+        "sec_config": "settings",
+        "sec_whitelist": "whitelist",
+        "sec_penalties": "limits",
+        "sec_owners": "address owners",
+        "sec_history": "daily history",
+        "imp_not_object": "this file does not look like a Shape export",
+        "imp_not_shape": "not a Shape export: the shape-node-state marker is missing",
+        "imp_no_schema": "the file carries no format version",
+        "imp_newer": "file comes from a newer Shape (format {got}, this one reads {ours}) — update Shape",
+        "imp_no_state": "the file has no state section",
+        "imp_no_file": "cannot open the file: {path} {err}",
+        "imp_bad_json": "the file is not valid JSON: {err}",
+        "imp_bad_only": "no such section: {s}; available: {all}",
+        "imp_bad_speed": "speed dropped: {v}",
+        "imp_bad_port": "port dropped: {v}",
+        "imp_many_ports": "more than {n} ports, the extra ones were dropped",
+        "imp_bad_ports": "the port list is malformed and was dropped",
+        "imp_bad_section": "section {s} is malformed and was dropped",
+        "imp_bad_field": "{s}.{k} holds an unusable value and was dropped",
+        "imp_unknown_keys": "{s}: unknown keys dropped: {k}",
+        "imp_bad_ip": "address dropped: {v}",
+        "imp_bad_entry": "the entry for {v} was dropped",
+        "imp_from": "export from node {node}, Shape {v}, made {when}",
+        "imp_no_secrets": "no token in the file — the one configured here stays",
+        "imp_yes": "will be applied",
+        "imp_skip": "skipped",
+        "imp_more_problems": "and {n} more notes",
+        "imp_dry": "nothing changed: this was a check",
+        "imp_done": "restored: {s}",
+        "imp_live": "engine is loaded — changes are already in the kernel",
+        "imp_offline": "engine is not loaded — settings apply on the next start",
         "tg_mtproto": "this is an MTProto proxy from a t.me/proxy link",
         "tg_mtproto2": "it only speaks the messenger protocol, the Bot API will not pass",
         "tg_mtproto3": "you need SOCKS5 or HTTP: socks5://user:pass@host:1080",
@@ -2530,6 +2614,457 @@ def cmd_whitelist(a):
             print(f"  {C['gry']}{t('wl_empty')}{C['r']}")
 
 
+# ─────────────────── резервная копия состояния ноды ───────────────────
+# Всё, что делает ноду именно этой нодой, в одном файле: настройки, белый
+# список, персональные скорости и действующие ограничения, владельцы
+# адресов и суточная история.
+#
+# Зачем это нужно: перенос ноды на новый сервер, восстановление после
+# смерти диска и разворачивание новых нод из готового образца. При сотне
+# узлов третье важнее первых двух — руками повторять настройку негде.
+#
+# Чего здесь нет намеренно:
+#   • журнал событий — это лог, а не состояние, и он на четыре мегабайта;
+#   • metrics.state — пересчитается сам при первом же замере;
+#   • суточные счётчики — переносить половину дня в другой день бессмысленно.
+
+EXPORT_SCHEMA = 1
+EXPORT_KIND = "shape-node-state"
+EXPORT_SECTIONS = ("config", "whitelist", "penalties", "owners", "history")
+
+# Поля конфига, в которых лежат секреты: токен даёт полный доступ к боту,
+# а в строке прокси почти всегда есть пароль. По умолчанию не выгружаются.
+SECRET_PATHS = (("telegram", "token"), ("telegram", "proxy"))
+
+
+def _strip_secrets(cfg):
+    """Копия конфига без токена и прокси. Оригинал не трогает."""
+    out = json.loads(json.dumps(cfg))
+    for section, field in SECRET_PATHS:
+        if isinstance(out.get(section), dict) and out[section].get(field):
+            out[section][field] = ""
+    return out
+
+
+def build_export(with_secrets=False):
+    cfg = load_config()
+    if not with_secrets:
+        cfg = _strip_secrets(cfg)
+    return {
+        "kind": EXPORT_KIND,
+        "schema": EXPORT_SCHEMA,
+        "shape_version": shape_version(),
+        "node": socket.gethostname(),
+        "exported_at": int(time.time()),
+        "exported_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "secrets_included": bool(with_secrets),
+        "state": {
+            "config": cfg,
+            "whitelist": sorted(whitelist_ips()),
+            "penalties": load_penalties(),
+            "owners": load_owners(),
+            "history": read_history(limit=HISTORY_MAX_DAYS),
+        },
+    }
+
+
+def cmd_export(a):
+    data = build_export(with_secrets=a.with_secrets)
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+
+    if a.out in (None, "-"):
+        print(text)
+        return
+
+    path = os.path.abspath(a.out)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = path + ".tmp"
+    # Права до записи, а не после: с --with-secrets в файле лежит токен, и
+    # окна, в котором он доступен на чтение кому угодно, быть не должно.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text + "\n")
+    os.replace(tmp, path)
+
+    st = data["state"]
+    print(f"{C['grn']}✓ {t('exp_done', path=path)}{C['r']}")
+    print("  " + t("exp_counts", w=len(st["whitelist"]), p=len(st["penalties"]),
+                   o=len(st["owners"]), h=len(st["history"])))
+    if a.with_secrets:
+        print(f"{C['yel']}⚠ {t('exp_secrets')}{C['r']}")
+    else:
+        print(f"  {C['gry']}{t('exp_no_secrets')}{C['r']}")
+
+
+def _finite(v):
+    """Число или None. nan и inf не проходят, bool тоже не число."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def _clean_like(src, defaults, label, problems):
+    """
+    Оставляет только знакомые ключи, тип которых совпадает с умолчанием.
+
+    Разделы guard и telegram попадают из файла прямо в load_config(), где
+    ложатся поверх умолчаний. Строка вместо числа в пороге сторожа уронила
+    бы не импорт, а сторож — через час, в цикле и без внятной причины.
+    """
+    out = {}
+    for key, default in defaults.items():
+        if key not in src:
+            continue
+        val = src[key]
+        ok = False
+        if isinstance(default, bool):
+            ok = isinstance(val, bool)
+        elif isinstance(default, (int, float)):
+            ok = _finite(val) is not None
+        elif isinstance(default, str):
+            ok = isinstance(val, str) and len(val) <= 512
+        else:
+            ok = True
+        if ok:
+            out[key] = val
+        else:
+            problems.append(t("imp_bad_field", s=label, k=key))
+    unknown = sorted(k for k in src if k not in defaults)
+    if unknown:
+        problems.append(t("imp_unknown_keys", s=label,
+                          k=", ".join(unknown[:5])))
+    return out
+
+
+def validate_export(data):
+    """
+    Разбирает выгрузку и возвращает (состояние, список замечаний).
+
+    Импорт не доверяет файлу ничего: он мог прийти с чужой ноды, из другой
+    версии или быть поправлен руками. Всё, что не проходит те же проверки,
+    что и обычный ввод, отбрасывается и попадает в замечания — вместо того
+    чтобы уронить команду на середине записи, оставив половину состояния.
+    """
+    problems = []
+    if not isinstance(data, dict):
+        die(t("imp_not_object"))
+    if data.get("kind") != EXPORT_KIND:
+        die(t("imp_not_shape"))
+    try:
+        schema = int(data.get("schema", 0))
+    except (TypeError, ValueError):
+        schema = 0
+    if schema < 1:
+        die(t("imp_no_schema"))
+    if schema > EXPORT_SCHEMA:
+        die(t("imp_newer", got=schema, ours=EXPORT_SCHEMA))
+    raw = data.get("state")
+    if not isinstance(raw, dict):
+        die(t("imp_no_state"))
+
+    state = {}
+
+    # ── настройки ──
+    cfg = raw.get("config")
+    if isinstance(cfg, dict):
+        clean = {}
+        if "speed_mbps" in cfg:
+            sp = _finite(cfg["speed_mbps"])
+            if sp is None or not 0 <= sp <= MAX_MBPS:
+                problems.append(t("imp_bad_speed", v=str(cfg["speed_mbps"])[:40]))
+            else:
+                clean["speed_mbps"] = float(sp)
+        ports = cfg.get("ports")
+        if isinstance(ports, list):
+            good = []
+            for p in ports:
+                if isinstance(p, bool) or not isinstance(p, int) \
+                        or not 0 <= p <= 65535:
+                    problems.append(t("imp_bad_port", v=str(p)[:20]))
+                elif p not in good:
+                    good.append(p)
+            if len(good) > MAX_PORTS:
+                problems.append(t("imp_many_ports", n=MAX_PORTS))
+                good = good[:MAX_PORTS]
+            if good:
+                clean["ports"] = good
+        elif ports is not None:
+            problems.append(t("imp_bad_ports"))
+        for name, defaults in (("guard", GUARD_DEFAULT), ("telegram", TG_DEFAULT)):
+            sect = cfg.get(name)
+            if isinstance(sect, dict):
+                clean[name] = _clean_like(sect, defaults, name, problems)
+            elif sect is not None:
+                problems.append(t("imp_bad_section", s=name))
+        state["config"] = clean
+    elif cfg is not None:
+        problems.append(t("imp_bad_section", s="config"))
+
+    # ── белый список ──
+    wl = raw.get("whitelist")
+    if isinstance(wl, list):
+        good = []
+        for item in wl:
+            ip = valid_ip(item) if isinstance(item, str) else None
+            if ip is None:
+                problems.append(t("imp_bad_ip", v=str(item)[:60]))
+            elif ip not in good:
+                good.append(ip)
+        state["whitelist"] = good
+    elif wl is not None:
+        problems.append(t("imp_bad_section", s="whitelist"))
+
+    # ── ограничения, включая персональные скорости ──
+    pens = raw.get("penalties")
+    if isinstance(pens, dict):
+        good = {}
+        for ip_raw, rec in pens.items():
+            ip = valid_ip(ip_raw)
+            if ip is None:
+                problems.append(t("imp_bad_ip", v=str(ip_raw)[:60]))
+                continue
+            if not isinstance(rec, dict):
+                problems.append(t("imp_bad_entry", v=ip))
+                continue
+            mbps = _finite(rec.get("mbps"))
+            until = _finite(rec.get("until"))
+            if mbps is None or not 0 < mbps <= MAX_MBPS or until is None:
+                problems.append(t("imp_bad_entry", v=ip))
+                continue
+            entry = {"mbps": float(mbps), "until": float(until)}
+            for key in ("since", "kind", "source", "reason", "subject"):
+                if rec.get(key) is not None:
+                    entry[key] = rec[key]
+            good[ip] = entry
+        state["penalties"] = good
+    elif pens is not None:
+        problems.append(t("imp_bad_section", s="penalties"))
+
+    # ── владельцы адресов ──
+    owners = raw.get("owners")
+    if isinstance(owners, dict):
+        good = {}
+        for ip_raw, rec in owners.items():
+            ip = valid_ip(ip_raw)
+            if ip is None:
+                problems.append(t("imp_bad_ip", v=str(ip_raw)[:60]))
+                continue
+            if not isinstance(rec, dict):
+                problems.append(t("imp_bad_entry", v=ip))
+                continue
+            entry = {}
+            for key in OWNER_FIELDS:
+                val = rec.get(key)
+                if val in (None, ""):
+                    continue
+                entry[key] = str(val)[:200]
+            if entry:
+                entry["updated"] = int(_finite(rec.get("updated")) or time.time())
+                good[ip] = entry
+        state["owners"] = good
+    elif owners is not None:
+        problems.append(t("imp_bad_section", s="owners"))
+
+    # ── суточная история ──
+    hist = raw.get("history")
+    if isinstance(hist, list):
+        good = []
+        for rec in hist:
+            if isinstance(rec, dict) and isinstance(rec.get("day"), str) \
+                    and re.fullmatch(r"\d{4}-\d{2}-\d{2}", rec["day"]):
+                good.append(rec)
+            else:
+                problems.append(t("imp_bad_entry", v=str(rec)[:40]))
+        state["history"] = good[-HISTORY_MAX_DAYS:]
+    elif hist is not None:
+        problems.append(t("imp_bad_section", s="history"))
+
+    return state, problems
+
+
+def _write_whitelist(ips):
+    """Переписывает файл, сохраняя шапку с пояснением от установщика."""
+    head = []
+    try:
+        with open(WL_FILE) as f:
+            for line in f:
+                if line.lstrip().startswith("#"):
+                    head.append(line.rstrip("\n"))
+                elif line.strip():
+                    break
+    except OSError:
+        pass
+    os.makedirs(ETC_DIR, exist_ok=True)
+    tmp = WL_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        for line in head:
+            f.write(line + "\n")
+        for ip in ips:
+            f.write(ip + "\n")
+    os.replace(tmp, WL_FILE)
+
+
+def apply_import(state, only=None, replace_wl=False, keep_secrets=True):
+    """
+    Пишет разобранное состояние — через штатные функции записи, не в файлы.
+
+    Именно через штатные: в save_config уже есть слияние с диском, в
+    penalties_update и owners_update — блокировка файла. Импорт, пишущий
+    напрямую, обошёл бы всё, что защищает эти файлы от одновременной
+    правки сторожем, и делал бы это ровно в тот момент, когда состояние
+    меняется целиком.
+    """
+    want = set(only or EXPORT_SECTIONS)
+    done = {}
+
+    if "config" in want and "config" in state:
+        cfg = json.loads(json.dumps(state["config"]))
+        if keep_secrets:
+            # В файле секретов нет. Затирать пустой строкой то, что на этой
+            # ноде уже настроено, нельзя: уведомления молча замолчали бы.
+            current = load_config()
+            for section, field in SECRET_PATHS:
+                incoming = (cfg.get(section) or {}).get(field, "")
+                have = (current.get(section) or {}).get(field, "")
+                if not incoming and have:
+                    cfg.setdefault(section, {})[field] = have
+        save_config(cfg)
+        done["config"] = 1
+
+    if "whitelist" in want and "whitelist" in state:
+        ips = list(state["whitelist"])
+        if not replace_wl:
+            ips = sorted(set(ips) | whitelist_ips())
+        _write_whitelist(ips)
+        done["whitelist"] = len(ips)
+
+    if "penalties" in want and "penalties" in state:
+        incoming = state["penalties"]
+        penalties_update(lambda pens: pens.update(incoming))
+        done["penalties"] = len(incoming)
+
+    if "owners" in want and "owners" in state:
+        incoming = state["owners"]
+        owners_update(lambda ow: ow.update(incoming))
+        done["owners"] = len(incoming)
+
+    if "history" in want and "history" in state:
+        incoming = state["history"]
+        if incoming:
+            with file_lock(HISTORY_FILE + ".lock"):
+                by_day = {r.get("day"): r for r in read_history(limit=HISTORY_MAX_DAYS)}
+                for rec in incoming:
+                    by_day[rec["day"]] = rec
+                rows = sorted(by_day.values(), key=lambda r: r.get("day", ""))
+                rows = rows[-HISTORY_MAX_DAYS:]
+                os.makedirs(VAR_DIR, exist_ok=True)
+                tmp = HISTORY_FILE + ".tmp"
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+                with os.fdopen(fd, "w") as f:
+                    for rec in rows:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                os.replace(tmp, HISTORY_FILE)
+        done["history"] = len(incoming)
+
+    return done
+
+
+def import_to_kernel(done):
+    """
+    Доводит восстановленное до ядра, если движок сейчас загружен.
+
+    Если не загружен — ничего страшного и ничего не делаем: config.json
+    заливается в карты при старте службы, этим занимается cmd_restore.
+    """
+    if not engine_loaded():
+        return False
+    if "config" in done:
+        write_to_kernel(load_config())
+    if "whitelist" in done:
+        for k, _ in map_dump("whitelist_map"):
+            _ip, kb = parse_ip_key(k)
+            if kb:
+                map_delete("whitelist_map", kb)
+        for ip in whitelist_ips():
+            try:
+                map_update("whitelist_map", ip_key(ip), b"\x01")
+            except ValueError:
+                pass
+    if "penalties" in done:
+        restore_penalties()
+    return True
+
+
+def cmd_import(a):
+    try:
+        with open(a.file) as f:
+            data = json.load(f)
+    except OSError as e:
+        die(t("imp_no_file", path=str(a.file)[:120], err=e.strerror or ""))
+    except ValueError as e:
+        die(t("imp_bad_json", err=str(e)[:120]))
+
+    only = None
+    if a.only:
+        only = [s.strip() for s in a.only.split(",") if s.strip()]
+        bad = [s for s in only if s not in EXPORT_SECTIONS]
+        if bad:
+            die(t("imp_bad_only", s=", ".join(bad),
+                  all=", ".join(EXPORT_SECTIONS)))
+
+    state, problems = validate_export(data)
+    want = set(only or EXPORT_SECTIONS)
+
+    counts = {"config": len(state.get("config", {})),
+              "whitelist": len(state.get("whitelist", [])),
+              "penalties": len(state.get("penalties", {})),
+              "owners": len(state.get("owners", {})),
+              "history": len(state.get("history", []))}
+
+    print()
+    print("  " + t("imp_from",
+                   node=str(data.get("node", "?"))[:40],
+                   v=str(data.get("shape_version", "?"))[:20],
+                   when=str(data.get("exported_at_iso", "?"))[:20]))
+    if not data.get("secrets_included"):
+        print(f"  {C['gry']}{t('imp_no_secrets')}{C['r']}")
+    print()
+
+    for name in EXPORT_SECTIONS:
+        if name not in state:
+            continue
+        on = name in want
+        col = C["b"] if on else C["gry"]
+        flag = t("imp_yes") if on else t("imp_skip")
+        print(f"  {col}{t('sec_' + name):<20}{C['r']}"
+              f"{counts[name]:>6}   {col}{flag}{C['r']}")
+
+    if problems:
+        print()
+        for p in problems[:20]:
+            print(f"  {C['yel']}⚠ {p}{C['r']}")
+        if len(problems) > 20:
+            print(f"  {C['yel']}⚠ {t('imp_more_problems', n=len(problems) - 20)}{C['r']}")
+
+    print()
+    if a.dry_run:
+        print(f"  {C['gry']}{t('imp_dry')}{C['r']}")
+        return
+
+    done = apply_import(state, only=only, replace_wl=a.replace,
+                        keep_secrets=not data.get("secrets_included"))
+    live = import_to_kernel(done)
+    log_event("config_changed", source="cli",
+              message="import " + ",".join(sorted(done)))
+    print(f"{C['grn']}✓ {t('imp_done', s=', '.join(sorted(done)) or '—')}{C['r']}")
+    print(f"  {C['gry']}{t('imp_live') if live else t('imp_offline')}{C['r']}")
+
+
 # ──────────────────────────────── CLI ────────────────────────────────
 
 def build_parser():
@@ -2641,6 +3176,20 @@ def build_parser():
     ev.add_argument("--source", default="cli")
     ev.add_argument("--message", default=None)
     ev.set_defaults(func=cmd_event)
+
+    ex = sub.add_parser("export", help=t("h_export"))
+    ex.add_argument("--out", default=None, help=t("h_exp_out"))
+    ex.add_argument("--with-secrets", dest="with_secrets", action="store_true",
+                    help=t("h_exp_secrets"))
+    ex.set_defaults(func=cmd_export)
+
+    im = sub.add_parser("import", help=t("h_import"))
+    im.add_argument("file")
+    im.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help=t("h_imp_dry"))
+    im.add_argument("--only", default=None, help=t("h_imp_only"))
+    im.add_argument("--replace", action="store_true", help=t("h_imp_replace"))
+    im.set_defaults(func=cmd_import)
 
     w = sub.add_parser("whitelist", help=t("h_whitelist"))
     w.add_argument("action", choices=["add", "del", "sync", "list"])

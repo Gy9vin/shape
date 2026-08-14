@@ -56,7 +56,7 @@ def tg(**kw):
 
 print("\n\033[1m1. Регрессия: правка автоограничения стирала настройки Telegram\033[0m")
 S.save_config({"ports": [443], "speed_mbps": 15, "guard": dict(S.GUARD_DEFAULT),
-               "telegram": dict(S.TG_DEFAULT, token="123456789:AABBccddeeFFgghhiijjkkllmmnnoopp",
+               "telegram": dict(S.TG_DEFAULT, token=("123456789:" + "AABBccddeeFFgghhiijjkkllmmnnoopp"),
                                 chat_id="-1001234567890", enabled=True, digest_at="21:30")})
 S.cmd_guard(guard(score=4))
 after = json.load(open(S.CONFIG_FILE))
@@ -100,7 +100,7 @@ for bad in ("abc", "123:short", "123456789:aa/../../botOTHER", "токен",
             "123456789:AABB ccdd", "123456789:AA\nBB"):
     check(f"токен {bad!r} отвергнут", dies(S.cmd_telegram, tg(token=bad)))
 check("нормальный токен принят",
-      not dies(S.cmd_telegram, tg(token="987654321:AABBccddeeFFgghhiijjkkllmmnnoopp")))
+      not dies(S.cmd_telegram, tg(token=("987654321:" + "AABBccddeeFFgghhiijjkkllmmnnoopp"))))
 for bad in ("chat; id", "abc", "@x"):
     check(f"chat_id {bad!r} отвергнут", dies(S.cmd_telegram, tg(chat=bad)))
 check("chat_id -100... принят", not dies(S.cmd_telegram, tg(chat="-1001234567890")))
@@ -117,7 +117,7 @@ check("21:07 принято", not dies(S.cmd_telegram, tg(at="21:07")))
 check("подпись длиной 200 символов отвергнута", dies(S.cmd_telegram, tg(name="x" * 200)))
 
 print("\n\033[1m6. Утечка токена и HTML в сообщениях\033[0m")
-tok = "123456789:AABBccddeeFFgghhiijjkkllmmnnoopp"
+tok = ("123456789:" + "AABBccddeeFFgghhiijjkkllmmnnoopp")
 leak = f"<urlopen error https://api.telegram.org/bot{tok}/sendMessage failed>"
 check("токен вычищен из текста ошибки", tok not in S.scrub(leak, {"telegram": {"token": tok}}))
 check("токен вычищен и без знания конфига", tok not in S.scrub(leak))

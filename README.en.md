@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.4-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.5-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.4
+# Shape v3.5
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -387,6 +387,12 @@ shaperctl.py guard --disable
 shaperctl.py limited                       # who is limited right now
 shaperctl.py release 185.12.34.56          # release one
 shaperctl.py release --all                 # release everybody
+
+shaperctl.py export --out /root/node.json  # back up node state
+shaperctl.py export --out /root/node.json --with-secrets   # token included
+shaperctl.py import /root/node.json --dry-run              # what would change
+shaperctl.py import /root/node.json                        # restore
+shaperctl.py import /root/node.json --only whitelist,owners
 ```
 
 The `status --json` format:
@@ -737,6 +743,69 @@ downloaded gigabytes within an hour
 
 If an address is marked `"shared": true`, the message says so. Better a warning
 than blaming the wrong person one day.
+
+---
+
+## Backup and restore
+
+Everything that makes a node this node goes into a single file: settings,
+whitelist, personal speeds, active limits, address owners and daily history.
+
+```bash
+shaperctl.py export --out /root/node.json
+```
+
+Menu: **Service → 💾 Backup and restore**.
+
+Three reasons to have it, and with a growing fleet the third matters most:
+
+* moving a node to another server;
+* rebuilding after a dead disk;
+* rolling out new nodes from an already configured one — with a hundred
+  nodes there is nowhere to repeat the setup by hand.
+
+### The token in a backup
+
+By default **the bot token and the proxy password are left out**. The file
+almost always leaves the server — into downloads, into a chat, sometimes into
+a repository — and a token inside it would leak sooner or later.
+
+The rest of the Telegram settings are kept: `chat_id`, digest time, the
+enabled flag. Only the secrets are missing.
+
+When the copy is meant for cloning a node, add `--with-secrets`. Either way
+the file is created with mode `600`.
+
+### Restoring
+
+```bash
+shaperctl.py import /root/node.json --dry-run   # look first
+shaperctl.py import /root/node.json             # then apply
+```
+
+`--dry-run` parses the file, shows what would be restored and how much of it,
+and changes nothing. The menu always does this step first and asks for
+confirmation.
+
+Behaviour worth knowing:
+
+* **The node's own token is never wiped.** If the file carries no secrets,
+  whatever is configured here stays — otherwise notifications would go
+  silent after every restore.
+* **The whitelist is merged**, not replaced. Use `--replace` for a full swap.
+* **Expired limits do not come back**: the deadline is checked on read.
+* **History merges by day**, with no duplicates.
+* **The file is not trusted.** It may come from another node or have been
+  edited by hand, so every value goes through the same checks as ordinary
+  input. Anything unusable is dropped with a note instead of crashing the
+  command halfway through writing.
+* You can restore a subset: `--only config,whitelist`.
+
+If the engine is loaded at that moment, settings go straight into the kernel
+maps. If not, they apply on the next service start.
+
+The event log, metrics and the current day's counters are deliberately left
+out: the first is a log rather than state, the rest are recomputed.
 
 ---
 

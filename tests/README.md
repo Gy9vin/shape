@@ -8,6 +8,7 @@
 cd tests
 python3 audit_tests.py          # ядро Shape: конфиг, валидация, штрафы, сводка
 bash    audit_shell_tests.sh    # shell: инъекции, права, синтаксис, юниты
+python3 export_tests.py         # резервная копия: формат, секреты, круговой тест
 python3 api_tests.py            # API: 208 проверок по HTTP
 bash    api_independence_tests.sh   # Shape работает без API
 gcc -O1 -Wno-unknown-pragmas -I stub -o /tmp/h bpf_harness.c && /tmp/h
@@ -26,3 +27,7 @@ gcc -O1 -Wno-unknown-pragmas -I stub -o /tmp/h bpf_harness.c && /tmp/h
 
 Метрики проверяются отдельно: набор из `shaperctl.py metrics` и из
 `GET /metrics` должен совпадать — кроме двух метрик самого API.
+
+Выгрузка состояния проверяется отдельно: файл не должен содержать
+токен бота без явного `--with-secrets`, а восстановление не должно
+затирать токен, уже настроенный на принимающей ноде.
