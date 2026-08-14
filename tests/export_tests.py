@@ -619,5 +619,178 @@ seed_cfg_gone = semantic(S.build_export(with_secrets=True)["state"])
 check("состояние после отправки прежнее",
       json.loads(before_state)["whitelist"] == json.loads(seed_cfg_gone)["whitelist"])
 
+# ─────────────── транспорт ───────────────
+# Здесь _post выполняется по-настоящему, а подменяются urllib и сокеты.
+# Прежние проверки подменяли сам _post, и его собственный код не работал
+# ни разу — из-за чего отправка без прокси годами падала незамеченной.
+
+print("\n\033[1m25. Транспорт: отправка без прокси\033[0m")
+
+
+class FakeResponse:
+    def __init__(self, status=200):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return b"{}"
+
+
+class FakeOpener:
+    def __init__(self, sink):
+        self.sink = sink
+
+    def open(self, req, timeout=None):
+        self.sink.append({"req": req, "timeout": timeout})
+        return FakeResponse()
+
+
+def capture_urllib():
+    """Подменяет build_opener и возвращает список того, что ушло."""
+    sink = []
+    real = S.urllib.request.build_opener
+
+    def fake(*handlers):
+        sink.append({"handlers": handlers})
+        return FakeOpener(sink)
+
+    S.urllib.request.build_opener = fake
+    return sink, real
+
+
+sink, real_builder = capture_urllib()
+try:
+    status = S._post("https://api.telegram.org/botX/sendMessage", b"a=1")
+    check("без прокси запрос уходит, а не падает", status == 200)
+    sent = [x for x in sink if "req" in x]
+    check("запрос действительно передан", len(sent) == 1)
+    check("метод POST", sent[0]["req"].get_method() == "POST")
+    check("тело на месте", sent[0]["req"].data == b"a=1")
+    check("тип содержимого по умолчанию — форма",
+          sent[0]["req"].get_header("Content-type")
+          == "application/x-www-form-urlencoded")
+    check("таймаут задан", sent[0]["timeout"] == 15)
+    handlers = [x for x in sink if "handlers" in x][0]["handlers"]
+    check("обработчик прокси создан", len(handlers) == 1)
+    check("без прокси окружение не подхватывается",
+          handlers[0].proxies == {},
+          str(handlers[0].proxies))
+
+    sink.clear()
+    body, ctype = S._multipart({"a": "1"}, "x.json", b"{}")
+    S._post("https://api.telegram.org/botX/sendDocument", body, "", ctype)
+    sent = [x for x in sink if "req" in x][0]
+    check("свой тип содержимого доходит до запроса",
+          sent["req"].get_header("Content-type").startswith("multipart/form-data"))
+
+    sink.clear()
+    S._post("https://api.telegram.org/botX/sendMessage", b"a=1",
+            "http://proxy.example:3128")
+    handlers = [x for x in sink if "handlers" in x][0]["handlers"]
+    check("HTTP-прокси попадает в обработчик",
+          handlers[0].proxies.get("https") == "proxy.example:3128"
+          or handlers[0].proxies.get("https") == "http://proxy.example:3128",
+          str(handlers[0].proxies))
+finally:
+    S.urllib.request.build_opener = real_builder
+
+print("\n\033[1m26. Транспорт: отправка через SOCKS5\033[0m")
+
+
+class FakeConn:
+    calls = []
+
+    def __init__(self, host, port, timeout=None, context=None):
+        self.host, self.port = host, port
+        self.sock = None
+
+    def request(self, method, path, body=None, headers=None):
+        FakeConn.calls.append({"method": method, "path": path,
+                               "body": body, "headers": headers or {}})
+
+    def getresponse(self):
+        return FakeResponse()
+
+
+class FakeSock:
+    def close(self):
+        pass
+
+
+def fake_wrap(sock, server_hostname=None):
+    return sock
+
+
+class FakeCtx:
+    wrap_socket = staticmethod(fake_wrap)
+
+
+saved = (S.socket.create_connection, S._socks5, S.ssl.create_default_context,
+         S.http.client.HTTPSConnection)
+socks_args = []
+try:
+    S.socket.create_connection = lambda addr, timeout=None: FakeSock()
+    S._socks5 = lambda sock, host, port, user=None, pwd=None: \
+        socks_args.append((host, port, user, pwd))
+    S.ssl.create_default_context = lambda: FakeCtx()
+    S.http.client.HTTPSConnection = FakeConn
+    FakeConn.calls.clear()
+
+    status = S._post("https://api.telegram.org/botX/sendDocument", b"body",
+                     "socks5://user:pw@127.0.0.1:1080", "multipart/form-data; boundary=z")
+    check("через SOCKS5 запрос уходит", status == 200)
+    check("соединение открыто до Telegram, а не до прокси",
+          socks_args and socks_args[0][0] == "api.telegram.org")
+    check("порт 443", socks_args[0][1] == 443)
+    check("логин и пароль прокси переданы", socks_args[0][2:] == ("user", "pw"))
+    call = FakeConn.calls[-1]
+    check("метод POST", call["method"] == "POST")
+    check("путь без хоста", call["path"] == "/botX/sendDocument")
+    check("свой тип содержимого дошёл",
+          call["headers"]["Content-Type"] == "multipart/form-data; boundary=z")
+    check("длина тела указана", call["headers"]["Content-Length"] == str(len(b"body")))
+    check("заголовок Host выставлен", call["headers"]["Host"] == "api.telegram.org")
+finally:
+    (S.socket.create_connection, S._socks5, S.ssl.create_default_context,
+     S.http.client.HTTPSConnection) = saved
+
+print("\n\033[1m27. Отправка целиком, без подмены _post\033[0m")
+seed()
+sink, real_builder = capture_urllib()
+try:
+    okk, err = S.tg_send("проверка", with_tg(proxy=""), force=True)
+    check("сообщение без прокси отправляется", okk is True, str(err))
+    req = [x for x in sink if "req" in x][-1]["req"]
+    check("метод API sendMessage", req.full_url.endswith("/sendMessage"))
+
+    sink.clear()
+    okk, err = S.tg_backup(with_tg(backup=True, proxy=""), force=True)
+    check("копия без прокси отправляется", okk is True, str(err))
+    req = [x for x in sink if "req" in x][-1]["req"]
+    check("метод API sendDocument", req.full_url.endswith("/sendDocument"))
+    check("токена нет в теле", TOKEN.encode() not in req.data)
+finally:
+    S.urllib.request.build_opener = real_builder
+
+print("\n\033[1m28. Подсказка про прокси даётся по делу\033[0m")
+with Captured(raise_exc=OSError("Network is unreachable")) as c:
+    _okk, err = S.tg_backup(with_tg(backup=True, proxy=""), force=True)
+check("на сетевую ошибку без прокси подсказка есть",
+      "прокс" in err.lower() or "proxy" in err.lower(), err)
+with Captured(raise_exc=OSError("Network is unreachable")) as c:
+    _okk, err = S.tg_backup(with_tg(backup=True), force=True)
+check("при заданном прокси подсказки нет",
+      "прокс" not in err.lower() and "proxy" not in err.lower(), err)
+with Captured(raise_exc=AttributeError("что-то сломалось в коде")) as c:
+    _okk, err = S.tg_backup(with_tg(backup=True, proxy=""), force=True)
+check("на ошибку в коде прокси не предлагается",
+      "прокс" not in err.lower() and "proxy" not in err.lower(), err)
+check("сама ошибка при этом видна", "сломалось" in err, err)
+
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)

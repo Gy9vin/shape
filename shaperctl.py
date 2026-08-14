@@ -1990,9 +1990,16 @@ def _post(url, data, proxy="", content_type="application/x-www-form-urlencoded")
 
     req = urllib.request.Request(url, data=data,
                                  headers={"Content-Type": content_type})
-    opener = (urllib.request.build_opener(
-        urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-        if proxy else urllib.request)
+    # Открыватель строим всегда, даже без прокси. Раньше в этой ветке стоял
+    # сам модуль urllib.request: у него есть urlopen, но нет open, и отправка
+    # без прокси падала на AttributeError. На российских нодах прокси задан
+    # всегда, поэтому ветка не выполнялась и ошибка не всплывала до первой
+    # ноды, которой прокси не нужен.
+    #
+    # Пустой ProxyHandler отключает подхват http_proxy из окружения: прокси у
+    # Shape свой, в настройках, и брать его откуда-то ещё он не должен.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler(
+        {"http": proxy, "https": proxy} if proxy else {}))
     with opener.open(req, timeout=15) as r:
         return r.status
 
@@ -2052,7 +2059,12 @@ def tg_send(text, cfg=None, force=False):
         # Текст ошибки уходит в journalctl: токен из него вычищаем.
         return False, scrub(f"HTTP {e.code}: {body}{hint}", {"telegram": tg})
     except Exception as e:
-        hint = "" if tg.get("proxy") else "\n  " + t("tg_need_proxy")
+        # Подсказку про прокси даём только на сетевые ошибки. Раньше она
+        # висела на любом исключении, и ошибка в самом Shape выглядела как
+        # блокировка Telegram — диагностика уходила не туда.
+        # OSError покрывает и URLError, и SSLError, и таймаут сокета.
+        hint = "" if tg.get("proxy") or not isinstance(e, OSError) \
+            else "\n  " + t("tg_need_proxy")
         return False, scrub(f"{e}{hint}", {"telegram": tg})
 
 
@@ -2255,7 +2267,12 @@ def tg_backup(cfg=None, force=False):
         detail = e.read().decode(errors="replace")[:200]
         return False, scrub(f"HTTP {e.code}: {detail}", {"telegram": tg})
     except Exception as e:
-        hint = "" if tg.get("proxy") else "\n  " + t("tg_need_proxy")
+        # Подсказку про прокси даём только на сетевые ошибки. Раньше она
+        # висела на любом исключении, и ошибка в самом Shape выглядела как
+        # блокировка Telegram — диагностика уходила не туда.
+        # OSError покрывает и URLError, и SSLError, и таймаут сокета.
+        hint = "" if tg.get("proxy") or not isinstance(e, OSError) \
+            else "\n  " + t("tg_need_proxy")
         return False, scrub(f"{e}{hint}", {"telegram": tg})
 
 

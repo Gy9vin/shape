@@ -13,6 +13,53 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.7
+
+**Notifications work without a proxy.**
+
+On nodes that need no proxy — American, European, anything outside the
+Russian blocking — sending to Telegram always failed with
+`module 'urllib.request' has no attribute 'open'`.
+
+### Fixed
+
+* **Sending without a proxy.** In the proxy-less branch the `urllib.request`
+  module itself was used in place of an opener: it has `urlopen`, but no
+  `open`. Every send — test message, event, daily digest, backup — died on
+  `AttributeError`.
+
+  The bug survived for an understandable reason: Shape was deployed on
+  Russian nodes, where a proxy is always configured, so that branch never
+  ran. The first node without a proxy exposed it.
+
+* **The proxy hint no longer misleads.** It was appended to any error, so a
+  fault inside Shape looked like Telegram being blocked and sent diagnosis
+  down the wrong path. The hint now appears only on network errors, and only
+  when no proxy is actually configured.
+
+* **Environment variables no longer override the setting.** Without a proxy,
+  requests would have gone through `http_proxy` from the environment if one
+  was set. Shape has its own proxy setting and should not pick one up from
+  anywhere else.
+
+### Why the tests missed it
+
+Every previous Telegram check replaced `_post` wholesale — meaning the
+transport itself never ran. 33 checks were added that patch one level lower,
+at `urllib` and sockets, and exercise the real sending code both directly and
+through SOCKS5. The suite now holds 156 checks.
+
+### Upgrading
+
+Nothing to configure. On a node without a proxy, after upgrading:
+
+```bash
+shaperctl.py telegram test
+```
+
+Leave the proxy field empty — that is now a working setting rather than a
+broken one.
+
 ## 3.6
 
 **Backups go to Telegram.**
