@@ -13,6 +13,79 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.8
+
+**A node can now be recognised, and drifted settings can be seen.**
+
+Two small changes that are cheaper to make before the central system than
+after: otherwise all twenty-eight nodes would need updating for one field.
+
+### Permanent node identifier
+
+`/var/lib/shape/node_id` — sixteen hex characters, created once at install.
+It survives a Shape upgrade, a move to another server and a hostname change.
+Without it a year-long monitoring graph falls apart into two halves belonging
+to "different" nodes the moment a host gets renamed.
+
+`machine-id` will not do: nodes are rolled out from an image and clones share
+it — so it would fail in exactly the case this was built for.
+
+The identifier is **not** part of a state backup. Restoring a copy on a new
+server gives you a node with its own identifier, not a twin.
+
+### Configuration fingerprint
+
+Twelve characters derived from the speed, the ports and the auto-limiter
+settings. The same fingerprint means the same policy; a different one shows up
+in monitoring at once.
+
+With a hundred nodes someone will one day fix the speed by hand on one of
+them, and there is otherwise nowhere to learn about it — the complaint arrives
+a month later.
+
+Deliberately excluded from the fingerprint:
+
+* **the `telegram` section** — the node label and topic differ there by
+  design, and the fingerprint would become unique per node, i.e. useless;
+* **`watch_interval`** — a CPU-load knob rather than policy: on a weak VPS it
+  is routinely raised, and a permanently "drifted" node would teach you to
+  ignore the indicator altogether.
+
+### Where it shows
+
+* `shaperctl.py show` — a dimmed footer line: `node … · fingerprint …`
+* `node_id` and `config_hash` labels on the `shape_info` metric
+* `/api/v1/status` (the `node` section) and `/api/v1/node`
+
+The query that reveals drift across the fleet:
+
+```promql
+count by (config_hash) (shape_info)
+```
+
+One row in the answer means every node is configured identically.
+
+### Node independence check sharpened
+
+The `api_independence_tests.sh` suite forbade any identifier matching a name
+pattern, `node_id` included. The point of the check was different — nodes must
+not be tied together by a shared key or shared state. It has been rewritten to
+match that intent: `cluster_id`, `global_state` and shared secrets are
+forbidden, and three new checks were added — the identifier is generated
+randomly on the node itself, is not derived from `machine-id`, and does not
+travel in a state export.
+
+### Upgrading
+
+Nothing to configure. The identifier is created on the first upgrade; the
+installer never overwrites an existing one.
+
+Once the fleet is upgraded, fingerprints are easy to compare:
+
+```bash
+shaperctl.py show | tail -2
+```
+
 ## 3.7
 
 **Notifications work without a proxy.**

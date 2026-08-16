@@ -792,5 +792,104 @@ check("на ошибку в коде прокси не предлагается"
       "прокс" not in err.lower() and "proxy" not in err.lower(), err)
 check("сама ошибка при этом видна", "сломалось" in err, err)
 
+# ─────────────── идентификатор ноды и отпечаток настроек ───────────────
+
+print("\n\033[1m29. Идентификатор ноды\033[0m")
+try:
+    os.remove(S.NODE_ID_FILE)
+except OSError:
+    pass
+first = S.node_id()
+check("идентификатор создан", bool(first))
+check("шестнадцать шестнадцатеричных знаков",
+      re.fullmatch(r"[0-9a-f]{16}", first) is not None, first)
+check("повторный вызов даёт то же значение", S.node_id() == first)
+check("файл читается всеми, но пишется только владельцем",
+      stat.S_IMODE(os.stat(S.NODE_ID_FILE).st_mode) == 0o644,
+      oct(stat.S_IMODE(os.stat(S.NODE_ID_FILE).st_mode)))
+check("значение переживает перезагрузку конфига",
+      S.node_id() == open(S.NODE_ID_FILE).read().strip())
+
+with open(S.NODE_ID_FILE, "w") as f:
+    f.write("не идентификатор\n")
+second = S.node_id()
+check("испорченный файл заменяется новым значением",
+      re.fullmatch(r"[0-9a-f]{16}", second) is not None, second)
+check("и оно тоже устойчиво", S.node_id() == second)
+
+# Два независимых каталога состояния — как две разные ноды.
+keep = (S.VAR_DIR, S.NODE_ID_FILE)
+try:
+    ids = []
+    for name in ("nodeA", "nodeB"):
+        S.VAR_DIR = os.path.join(TMP, name)
+        S.NODE_ID_FILE = os.path.join(S.VAR_DIR, "node_id")
+        ids.append(S.node_id())
+    check("у разных нод идентификаторы разные", ids[0] != ids[1])
+finally:
+    S.VAR_DIR, S.NODE_ID_FILE = keep
+
+print("\n\033[1m30. Идентификатор не переезжает вместе с копией\033[0m")
+seed()
+mine = S.node_id()
+dump = S.build_export(with_secrets=True)
+check("идентификатора нет в выгрузке",
+      mine not in json.dumps(dump, ensure_ascii=False))
+check("раздела node_id в выгрузке нет", "node_id" not in dump["state"])
+state, _ = S.validate_export(dump)
+S.apply_import(state, keep_secrets=False)
+check("после восстановления идентификатор прежний", S.node_id() == mine)
+
+print("\n\033[1m31. Отпечаток настроек\033[0m")
+S.save_config({"speed_mbps": 100, "ports": [443],
+               "guard": dict(S.GUARD_DEFAULT, enabled=True)})
+base = S.config_hash()
+check("двенадцать шестнадцатеричных знаков",
+      re.fullmatch(r"[0-9a-f]{12}", base) is not None, base)
+check("одинаковые настройки дают одинаковый отпечаток", S.config_hash() == base)
+
+S.save_config({"telegram": dict(S.TG_DEFAULT, node_name="Франкфурт-3",
+                                token=TOKEN, chat_id="-100", thread_id="7")})
+check("настройки Telegram на отпечаток не влияют", S.config_hash() == base)
+
+S.save_config({"guard": dict(S.GUARD_DEFAULT, enabled=True, watch_interval=30)})
+check("период опроса на отпечаток не влияет", S.config_hash() == base)
+
+S.save_config({"speed_mbps": 50})
+check("другая скорость — другой отпечаток", S.config_hash() != base)
+S.save_config({"speed_mbps": 100})
+check("возврат скорости возвращает отпечаток", S.config_hash() == base)
+
+S.save_config({"ports": [443, 8443]})
+check("другие порты — другой отпечаток", S.config_hash() != base)
+two_ports = S.config_hash()
+S.save_config({"ports": [8443, 443]})
+check("порядок портов значения не имеет", S.config_hash() == two_ports,
+      f"{two_ports} против {S.config_hash()}")
+S.save_config({"ports": [443]})
+check("возврат портов возвращает отпечаток", S.config_hash() == base)
+
+S.save_config({"guard": dict(S.GUARD_DEFAULT, enabled=True, penalty_mbps=5)})
+check("другой штраф — другой отпечаток", S.config_hash() != base)
+S.save_config({"guard": dict(S.GUARD_DEFAULT, enabled=True)})
+check("возврат настроек сторожа возвращает отпечаток", S.config_hash() == base)
+S.save_config({"guard": dict(S.GUARD_DEFAULT, enabled=False)})
+check("выключенный сторож — другой отпечаток", S.config_hash() != base)
+
+check("переданный конфиг не читается с диска",
+      S.config_hash({"speed_mbps": 100, "ports": [443],
+                     "guard": dict(S.GUARD_DEFAULT, enabled=True)}) == base)
+check("пустой конфиг не роняет расчёт",
+      re.fullmatch(r"[0-9a-f]{12}", S.config_hash({})) is not None)
+
+print("\n\033[1m32. И то, и другое видно в метриках\033[0m")
+S.save_config({"speed_mbps": 100, "ports": [443],
+               "guard": dict(S.GUARD_DEFAULT, enabled=True)})
+line = [ln for ln in S.build_metrics().splitlines() if ln.startswith("shape_info{")][0]
+check("идентификатор в метке", f'node_id="{S.node_id()}"' in line, line)
+check("отпечаток в метке", f'config_hash="{S.config_hash()}"' in line, line)
+check("версия осталась на месте", 'version="' in line)
+check("интерфейс остался на месте", 'interface="' in line)
+
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)

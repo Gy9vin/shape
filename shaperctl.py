@@ -9,6 +9,7 @@ shaperctl — управление eBPF-шейпером через pinned BPF-�
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import html
 import http.client
 import io
@@ -48,6 +49,11 @@ EVENT_SEQ   = os.path.join(VAR_DIR, "events.seq")
 # этими данными не ходит: его дело — подставить ярлык в сообщение.
 OWNERS_FILE = os.path.join(VAR_DIR, "owners.json")
 # По строке JSON на прошедшие сутки. За год ~40 КБ.
+# Постоянный идентификатор ноды. Имя хоста и адрес для этого не годятся:
+# их меняют, а после смены метрики выглядят как метрики новой ноды и история
+# рвётся. Файл создаётся один раз — при установке или при первом обращении.
+NODE_ID_FILE = os.path.join(VAR_DIR, "node_id")
+
 HISTORY_FILE = os.path.join(VAR_DIR, "history.jsonl")
 HISTORY_MAX_DAYS = 400
 # Три числа для расчёта текущей скорости канала: когда мерили и сколько
@@ -87,6 +93,9 @@ C = {
 MSG = {
     "ru": {
         "root": "нужны права root",
+        "id_node": "нода",
+        "id_config": "отпечаток",
+        "id_none": "не создан",
         "h_tg_backup": "включить или выключить отправку копии: on/off",
         "h_tg_bk_thread": "тема для копий, если отдельная от отчётов",
         "h_tg_bk_day": "день недели для копии: 1 понедельник … 7 воскресенье",
@@ -309,6 +318,9 @@ MSG = {
     },
     "en": {
         "root": "root privileges required",
+        "id_node": "node",
+        "id_config": "fingerprint",
+        "id_none": "not created",
         "h_tg_backup": "turn the backup upload on or off: on/off",
         "h_tg_bk_thread": "topic for backups, if separate from reports",
         "h_tg_bk_day": "weekday for the backup: 1 Monday … 7 Sunday",
@@ -888,6 +900,12 @@ def cmd_show(a):
         print(f"  {t('speed'):<9}: {C['yel']}{t('unlimited')}{C['r']}")
     print(f"  {t('ports'):<9}: {ports}")
     cmd_guard_show(cfg["speed_mbps"], cfg["guard"])
+    # Строка для сверки нод между собой: одинаковый отпечаток — одинаковая
+    # политика. Держим её приглушённой, повседневной работе она не мешает.
+    nid = node_id()
+    print(f"  {C['gry']}{t('id_node')} {nid or t('id_none')}"
+          f"  ·  {t('id_config')} {config_hash(cfg)}{C['r']}")
+    print()
 
 
 def cmd_restore(a):
@@ -2462,6 +2480,78 @@ def ip_key(ip_str):
 # Ими пользуются и метрики, и API: имя интерфейса, версия, состояние
 # движка и сервисов. Здесь они без кэша — кэширует тот, кому это нужно.
 
+# ────────────── кто эта нода и чем её настройки отличаются ──────────────
+
+def node_id():
+    """
+    Постоянный идентификатор ноды. Пустая строка, если создать не удалось.
+
+    Зачем вообще: при сотне узлов ноду переносят на другой сервер, меняют ей
+    имя хоста и адрес. Всё это ломает привязку метрик к узлу, и годовой
+    график превращается в две половины от «разных» нод. Идентификатор живёт
+    в /var/lib/shape и переживает и переезд, и переустановку Shape.
+
+    Почему не machine-id: ноды разворачивают из образа, и у клонов он
+    одинаковый — то есть ровно в том случае, ради которого всё и затевалось,
+    он бы и подвёл.
+    """
+    try:
+        with open(NODE_ID_FILE) as f:
+            value = f.read().strip()
+        if re.fullmatch(r"[0-9a-f]{16}", value):
+            return value
+    except OSError:
+        pass
+
+    fresh = os.urandom(8).hex()
+    try:
+        os.makedirs(VAR_DIR, exist_ok=True)
+        tmp = NODE_ID_FILE + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(fd, "w") as f:
+            f.write(fresh + "\n")
+        os.replace(tmp, NODE_ID_FILE)
+        return fresh
+    except OSError:
+        # Записать некуда — например, метрики читают без root, а каталога ещё
+        # нет. Возвращать каждый раз новое случайное значение нельзя: в
+        # Prometheus это плодило бы новый ряд на каждый замер. Лучше честно
+        # признаться, что идентификатора нет.
+        return ""
+
+
+# Поля автоограничения, которые в отпечаток не входят. watch_interval — это
+# настройка нагрузки на процессор, а не политики: на слабой VPS его штатно
+# поднимают, и держать такую ноду вечно «разъехавшейся» значит приучить себя
+# не смотреть на этот показатель вообще.
+GUARD_HASH_SKIP = ("watch_interval",)
+
+
+def config_hash(cfg=None):
+    """
+    Двенадцать шестнадцатеричных знаков от поведенческой части настроек.
+
+    Смысл один: при сотне нод кто-нибудь однажды поправит скорость руками на
+    одной из них, и узнать об этом будет неоткуда — жалоба придёт через
+    месяц. Одинаковый отпечаток означает одинаковую политику, разный виден
+    в мониторинге сразу.
+
+    Раздел telegram сюда не входит намеренно: подпись ноды и тема там разные
+    по замыслу, и отпечаток стал бы уникальным на каждой ноде, то есть
+    бесполезным.
+    """
+    cfg = cfg if cfg is not None else load_config()
+    guard = cfg.get("guard") or {}
+    payload = {
+        "speed_mbps": float(cfg.get("speed_mbps") or 0),
+        "ports": sorted(cfg.get("ports") or []),
+        "guard": {k: guard[k] for k in sorted(guard) if k not in GUARD_HASH_SKIP},
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
 def app_dir():
     return os.environ.get("SHAPE_APP_DIR", "/opt/shaper")
 
@@ -2625,9 +2715,14 @@ def build_metrics(users=None, unit_state=None, started=None, events=None):
     add("shape_metrics_complete", "gauge",
         "1 if BPF maps could be read; 0 means the numbers are incomplete",
         complete)
+    # node_id и config_hash живут метками info-метрики, а не отдельными
+    # показателями: значение у них строковое, а Prometheus хранит числа.
+    # Запрос вида count by (config_hash) (shape_info) сразу показывает,
+    # сколько нод разъехалось по настройкам.
     add("shape_info", "gauge", "Static node information", 1,
         {"version": shape_version(), "metrics_version": METRICS_VERSION,
-         "interface": iface})
+         "interface": iface, "node_id": node_id(),
+         "config_hash": config_hash(cfg)})
     add("shape_engine_loaded", "gauge", "1 if eBPF maps are pinned", int(loaded))
     add("shape_watchdog_active", "gauge", "1 if the watchdog service runs",
         int(unit_state == "active"))

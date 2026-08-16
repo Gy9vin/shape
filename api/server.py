@@ -377,6 +377,10 @@ def h_status(req):
             "version": API_VERSION,
             "uptime_seconds": round(time.time() - PROC_STARTED),
         },
+        "node": {
+            "id": S.node_id(),
+            "config_hash": S.config_hash(cfg),
+        },
         "versions": {"shape": shape_version(), "api": API_VERSION},
         "limits": {
             "speed_mbps": cfg["speed_mbps"],
@@ -420,6 +424,10 @@ def h_node(req):
         except Exception:
             pass
         return {
+            # Идентификатор идёт первым не случайно: имя хоста меняют, а он
+            # остаётся — по нему централь и узнаёт узел после переезда.
+            "id": S.node_id(),
+            "config_hash": S.config_hash(),
             "hostname": socket.gethostname(),
             "os": os_name,
             "kernel": platform.release(),

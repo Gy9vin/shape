@@ -97,8 +97,19 @@ check "в репозитории нет ни одного токена" \
       '! grep -rqE "\"(read|write)\": \"[A-Za-z0-9_-]{20,}\"" "$SRC"'
 check "api.json в .gitignore не нужен — он живёт в /etc" \
       'grep -q "/etc/shaper" "$SRC/api/server.py"'
+# Смысл проверки — ноды не связаны общим ключом или общим состоянием.
+# Собственный идентификатор у ноды при этом быть должен: без него история
+# метрик рвётся при переезде. Важно, что он случайный и локальный.
 check "нет общих для нод идентификаторов" \
-      '! grep -qiE "cluster_id|node_id|global_state" "$SRC/api/server.py"'
+      '! grep -qiE "cluster_id|global_state|shared_secret" "$SRC/api/server.py"'
+check "идентификатор ноды генерируется случайно на самой ноде" \
+      'grep -A32 "^def node_id" "$SRC/shaperctl.py" | grep -q "os.urandom"'
+# Комментарий про machine-id в коде есть — важно, что файл не читается:
+# у нод, развёрнутых из одного образа, machine-id совпадает.
+check "идентификатор не выводится из machine-id — у клонов он одинаковый" \
+      '! grep -q "/etc/machine-id" "$SRC/shaperctl.py"'
+check "идентификатор не уезжает в выгрузку состояния" \
+      '! grep -q "node_id" <<< "$(grep -A3 "^EXPORT_SECTIONS" "$SRC/shaperctl.py")"'
 
 echo -e "\n${B}Итог: $ok пройдено, $fail провалено${N}"
 [[ $fail -eq 0 ]]

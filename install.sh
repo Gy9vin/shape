@@ -109,6 +109,15 @@ mkdir -p "$APP_DIR/bpf" "$ETC_DIR"
 chmod 750 "$ETC_DIR"
 # Изменчивое состояние: журнал событий. Отдельно от настроек.
 mkdir -p /var/lib/shape && chmod 750 /var/lib/shape
+
+# Постоянный идентификатор ноды. Создаётся один раз и переживает обновления:
+# по нему мониторинг узнаёт узел даже после переезда на другой сервер и смены
+# имени хоста. Существующий не перезаписываем — иначе история порвётся.
+if [[ ! -s /var/lib/shape/node_id ]]; then
+    head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n' > /var/lib/shape/node_id
+    echo >> /var/lib/shape/node_id
+    chmod 644 /var/lib/shape/node_id
+fi
 install -m 755 "$SRC/shaperctl.py"     "$APP_DIR/shaperctl.py"
 install -m 755 "$SRC/engine.sh"        "$APP_DIR/engine.sh"
 install -m 755 "$SRC/menu.sh"          "$APP_DIR/menu.sh"

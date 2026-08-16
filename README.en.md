@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.7-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.8-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.7
+# Shape v3.8
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -849,6 +849,75 @@ visible to everyone in the topic. Keep the topic private.
 If there is no connectivity, the next attempt happens in an hour rather than
 every ten seconds. A missed day is not caught up: the state sent is the
 current one, not what it was on Monday.
+
+---
+
+## Which node is this
+
+With twenty-eight nodes you tell them apart by name. With a hundred you no
+longer can — and hostnames get changed, nodes get moved to another server,
+addresses migrate. After that a year-long graph in monitoring falls apart into
+two halves belonging to "different" nodes.
+
+So every node carries a permanent identifier:
+
+```
+/var/lib/shape/node_id      16 hex characters, created once
+```
+
+It survives a Shape upgrade, a move to another server and a hostname change.
+Reinstalling does not touch it — the installer never overwrites an existing
+file.
+
+Worth saying why not `machine-id`: nodes are rolled out from an image, and
+clones share it — so it would fail in exactly the case this was built for. The
+Shape identifier is random, and it is **not** part of a state backup:
+restoring a copy on a new server gives you a node with its own identifier, not
+a twin.
+
+## Configuration fingerprint
+
+The second problem of a hundred nodes is drift. Someone will one day fix the
+speed by hand on a single node, and there will be nowhere to learn about it:
+the complaint arrives a month later and you end up chasing the symptom.
+
+`shaperctl.py show` prints the fingerprint in the footer:
+
+```
+  node 3248507562c6ba1b  ·  fingerprint 37026c5a46ca
+```
+
+The same fingerprint means the same policy. It is computed from the speed, the
+ports and the auto-limiter settings — that is, from what should match across
+every node.
+
+What it deliberately leaves out, and why:
+
+* **the whole `telegram` section** — the node label and topic differ there by
+  design, and the fingerprint would become unique per node, i.e. useless;
+* **`watch_interval`** — a CPU-load knob rather than policy: on a weak VPS it
+  is routinely raised, and keeping such a node permanently "drifted" teaches
+  you to ignore the indicator altogether.
+
+### In monitoring
+
+Both values arrive as `shape_info` labels:
+
+```
+shape_info{node="...",node_id="3248507562c6ba1b",config_hash="37026c5a46ca",version="3.8",...} 1
+```
+
+Finding drifted nodes is one query:
+
+```promql
+count by (config_hash) (shape_info)
+```
+
+One row in the answer means the whole fleet is configured identically. Two or
+more shows at a glance how many nodes carry which fingerprint.
+
+In the API both fields live in `/api/v1/status` (the `node` section) and in
+`/api/v1/node`.
 
 ---
 
