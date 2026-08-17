@@ -855,10 +855,16 @@ check("настройки Telegram на отпечаток не влияют", S
 S.save_config({"guard": dict(S.GUARD_DEFAULT, enabled=True, watch_interval=30)})
 check("период опроса на отпечаток не влияет", S.config_hash() == base)
 
+# Скорость в отпечаток не входит: каналы у нод разные по замыслу, и в
+# хеше она давала бы столько групп, сколько тарифов. Смотреть её нужно
+# метрикой shape_speed_limit_mbps, числом.
 S.save_config({"speed_mbps": 50})
-check("другая скорость — другой отпечаток", S.config_hash() != base)
+check("другая скорость отпечаток не меняет", S.config_hash() == base)
+S.save_config({"speed_mbps": 1000})
+check("и очень другая тоже", S.config_hash() == base)
+S.save_config({"speed_mbps": 0})
+check("снятие лимита отпечаток не меняет", S.config_hash() == base)
 S.save_config({"speed_mbps": 100})
-check("возврат скорости возвращает отпечаток", S.config_hash() == base)
 
 S.save_config({"ports": [443, 8443]})
 check("другие порты — другой отпечаток", S.config_hash() != base)
@@ -890,6 +896,18 @@ check("идентификатор в метке", f'node_id="{S.node_id()}"' in 
 check("отпечаток в метке", f'config_hash="{S.config_hash()}"' in line, line)
 check("версия осталась на месте", 'version="' in line)
 check("интерфейс остался на месте", 'interface="' in line)
+
+# Раз скорости в отпечатке нет — она обязана быть видна отдельно, иначе
+# разницу между нодами не с чем сравнить.
+S.save_config({"speed_mbps": 37})
+metrics = S.build_metrics()
+speed_line = [ln for ln in metrics.splitlines()
+              if ln.startswith("shape_speed_limit_mbps{")][0]
+check("скорость отдаётся отдельной метрикой числом",
+      speed_line.rstrip().endswith(" 37"), speed_line)
+check("при этом отпечаток прежний",
+      f'config_hash="{S.config_hash()}"' in
+      [ln for ln in metrics.splitlines() if ln.startswith("shape_info{")][0])
 
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)

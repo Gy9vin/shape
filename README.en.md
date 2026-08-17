@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.8-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.9-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.8
+# Shape v3.9
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -887,17 +887,25 @@ the complaint arrives a month later and you end up chasing the symptom.
   node 3248507562c6ba1b  ·  fingerprint 37026c5a46ca
 ```
 
-The same fingerprint means the same policy. It is computed from the speed, the
-ports and the auto-limiter settings — that is, from what should match across
-every node.
+The same fingerprint means the same policy. It is computed from the ports and
+the auto-limiter settings — that is, from what should match across every node.
 
 What it deliberately leaves out, and why:
 
+* **the speed** — every node has its own uplink and the limit is set to match
+  it. Inside the fingerprint the speed would produce as many groups as you
+  have tiers, drowning the "something drifted" signal. It reads better as a
+  number — that is what the `shape_speed_limit_mbps` metric is for;
 * **the whole `telegram` section** — the node label and topic differ there by
   design, and the fingerprint would become unique per node, i.e. useless;
 * **`watch_interval`** — a CPU-load knob rather than policy: on a weak VPS it
   is routinely raised, and keeping such a node permanently "drifted" teaches
   you to ignore the indicator altogether.
+
+You will have as many fingerprint groups as you have **policy variants**. One,
+if the auto-limiter is configured identically everywhere. Two, if — say — on a
+narrow uplink you catch an offender sooner and punish for longer. That is
+fine; what matters is knowing how many groups there should be.
 
 ### In monitoring
 
@@ -913,8 +921,14 @@ Finding drifted nodes is one query:
 count by (config_hash) (shape_info)
 ```
 
-One row in the answer means the whole fleet is configured identically. Two or
-more shows at a glance how many nodes carry which fingerprint.
+One row in the answer means the policy is the same everywhere. Two or more
+shows at a glance how many nodes fall into each group.
+
+The speed sits next to it as a plain number:
+
+```promql
+shape_speed_limit_mbps
+```
 
 In the API both fields live in `/api/v1/status` (the `node` section) and in
 `/api/v1/node`.

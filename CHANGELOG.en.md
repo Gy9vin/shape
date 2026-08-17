@@ -13,6 +13,50 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.9
+
+**The speed is out of the configuration fingerprint.**
+
+The fingerprint arrived in 3.8, and the very first check against a real fleet
+showed that deriving it from the speed was wrong.
+
+### Why
+
+Nodes have different uplinks, and the per-address limit is set to match:
+10 Mbit/s here, 100 there. That is a deliberate decision, not drift. Inside
+the fingerprint, though, the speed produced as many groups as there were
+tiers — and the question "is this intended, or did someone change something?"
+would come up every time you looked at the panel. An indicator that lights up
+for no reason stops being noticed.
+
+The fingerprint is now derived from **the ports and the auto-limiter settings
+only** — from what genuinely should match. You will have as many groups as you
+have policy variants: one if the auto-limiter is identical everywhere, two if
+on a narrow uplink you catch an offender sooner and punish for longer.
+
+The speed has not gone anywhere: it is exposed as its own metric,
+`shape_speed_limit_mbps` — a number that graphs well and shows at a glance
+where 10 is and where 100 is.
+
+### What changes in practice
+
+**Fingerprint values have changed.** If you wrote them down after upgrading to
+3.8, write them down again — the old ones will not match. Nothing breaks: the
+fingerprint is stored nowhere, it is computed on the fly on every call.
+
+Changing the speed via `apply --speed` no longer changes the fingerprint.
+Changing watchdog thresholds or ports still does, as before.
+
+### Checks
+
+Checks were added that the speed does not affect the fingerprint in any
+form — including removing the limit altogether — and that it is nonetheless
+exposed as its own metric. The backup suite now holds 188 checks.
+
+### Upgrading
+
+Nothing to configure; shaper behaviour is unchanged.
+
 ## 3.8
 
 **A node can now be recognised, and drifted settings can be seen.**
