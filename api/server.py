@@ -545,6 +545,115 @@ def h_stats(req):
     }
 
 
+# Сколько строк отдавать по умолчанию и максимум. Смысл эндпоинта в том,
+# чтобы централь не тянула все адреса: на сотне нод по три сотни строк
+# каждые полминуты — это тридцать тысяч строк на цикл ни за чем.
+TOP_DEFAULT = 20
+TOP_MAX = 200
+
+TOP_SORTS = ("download", "upload", "total")
+
+
+def h_top(req):
+    """
+    Верхушка адресов по текущей нагрузке.
+
+    Скорости берём из того же снимка, что и /stats: два чтения карт подряд
+    с разницей во времени. Отдельного замера здесь не делаем намеренно —
+    иначе два эндпоинта дёргали бы bpftool вдвое чаще без всякой пользы.
+
+    До второго обращения скоростей ещё нет, разницу считать не с чем. В этом
+    случае честно сортируем по накопленному объёму и говорим об этом в поле
+    sorted_by, а не выдаём нули за правду.
+    """
+    if not engine_loaded():
+        raise ApiError(503, "ENGINE_NOT_RUNNING", "движок не запущен")
+
+    q = req["query"]
+
+    raw_limit = q.get("limit")
+    if raw_limit in (None, ""):
+        limit = TOP_DEFAULT
+    else:
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            raise bad("INVALID_QUERY", "limit: нужно целое число") from None
+        if not 1 <= limit <= TOP_MAX:
+            raise bad("INVALID_QUERY", f"limit: от 1 до {TOP_MAX}")
+
+    sort = q.get("sort") or "download"
+    if sort not in TOP_SORTS:
+        raise bad("INVALID_QUERY",
+                  "sort: " + ", ".join(TOP_SORTS))
+
+    def snapshot():
+        return {"t": time.monotonic(), "users": S.read_users()}
+
+    cur = cached("stats_snapshot", CACHE_TTL, snapshot)
+    with _cache_lock:
+        prev = _cache.get("stats_prev")
+
+    dt = None
+    if prev and 0.5 <= cur["t"] - prev["t"] <= 120:
+        dt = cur["t"] - prev["t"]
+    if not prev or cur["t"] - prev["t"] >= CACHE_TTL:
+        with _cache_lock:
+            _cache["stats_prev"] = cur
+
+    pens = S.load_penalties()
+    wl = S.whitelist_ips()
+    owners = S.load_owners()
+    now_ns = S.mono_ns()
+
+    rows = []
+    for ip, c in cur["users"].items():
+        was = prev["users"].get(ip, {}) if dt else {}
+        dl_mbps = ul_mbps = None
+        if dt:
+            dl_mbps = round(max(0, c["down"] - was.get("down", 0)) * 8 / 1e6 / dt, 3)
+            ul_mbps = round(max(0, c["up"] - was.get("up", 0)) * 8 / 1e6 / dt, 3)
+
+        entry = pens.get(ip)
+        row = {
+            "ip": ip,
+            "download_mbps": dl_mbps,
+            "upload_mbps": ul_mbps,
+            "download_bytes": c["down"],
+            "upload_bytes": c["up"],
+            "idle_seconds": round((now_ns - c["seen"]) / S.NS, 1) if c["seen"] else None,
+            "whitelisted": ip in wl,
+            "limited": bool(entry) and not S.is_personal(entry),
+            "personal": bool(entry) and S.is_personal(entry),
+            "limit_mbps": float(entry["mbps"]) if entry else None,
+            "subject": S.owner_of(ip, owners),
+        }
+        rows.append(row)
+
+    if dt:
+        keys = {"download": lambda r: r["download_mbps"],
+                "upload": lambda r: r["upload_mbps"],
+                "total": lambda r: r["download_mbps"] + r["upload_mbps"]}
+        sorted_by = {"download": "download_mbps", "upload": "upload_mbps",
+                     "total": "download_mbps+upload_mbps"}[sort]
+    else:
+        keys = {"download": lambda r: r["download_bytes"],
+                "upload": lambda r: r["upload_bytes"],
+                "total": lambda r: r["download_bytes"] + r["upload_bytes"]}
+        sorted_by = {"download": "download_bytes", "upload": "upload_bytes",
+                     "total": "download_bytes+upload_bytes"}[sort]
+
+    rows.sort(key=keys[sort], reverse=True)
+    return 200, {
+        "items": rows[:limit],
+        "count": len(rows[:limit]),
+        "total_known": len(rows),
+        "sorted_by": sorted_by,
+        "note": None if dt else
+                "скорости появятся со второго запроса: считаются по разнице",
+    }
+
+
 def h_events(req):
     q = req["query"]
 
@@ -925,6 +1034,14 @@ def openapi_spec():
                 "delete": op("Снять временное ограничение", "записи", ip_param),
             },
             "/stats": {"get": op("Статистика трафика", "чтения")},
+            "/top": {"get": op("Верхушка адресов по текущей нагрузке", "чтения", [
+                {"name": "limit", "in": "query",
+                 "schema": {"type": "integer", "minimum": 1,
+                            "maximum": TOP_MAX, "default": TOP_DEFAULT}},
+                {"name": "sort", "in": "query",
+                 "schema": {"type": "string", "enum": list(TOP_SORTS),
+                            "default": "download"}},
+            ])},
             "/events": {"get": op("Журнал событий", "чтения", [
                 {"name": "cursor", "in": "query", "schema": {"type": "integer"}},
                 {"name": "limit", "in": "query", "schema": {"type": "integer"}},
@@ -1017,6 +1134,7 @@ ROUTES = [
     ("POST",   r"^/api/v1/limits/([^/]{1,45})/temporary$",   "write", h_limit_create),
     ("DELETE", r"^/api/v1/limits/([^/]{1,45})/temporary$",   "write", h_limit_delete),
     ("GET",    r"^/api/v1/stats$",                     "read",  h_stats),
+    ("GET",    r"^/api/v1/top$",                       "read",  h_top),
     ("GET",    r"^/api/v1/events$",                    "read",  h_events),
     ("GET",    r"^/api/v1/config$",                    "read",  h_config_get),
     ("PATCH",  r"^/api/v1/config$",                    "write", h_config_patch),

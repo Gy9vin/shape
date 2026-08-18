@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.9-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.10-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
@@ -13,7 +13,7 @@
   <b>Русский</b> · <a href="README.en.md">English</a>
 </p>
 
-# Shape v3.9
+# Shape v3.10
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -689,6 +689,56 @@ curl -X POST http://127.0.0.1:8765/api/v1/limits \
 
 `request_id` есть в каждом ответе и в каждой строке журнала ноды — по нему
 удобно связывать запрос внешней системы с тем, что произошло на ноде.
+
+### Верхушка нагрузки
+
+```
+GET /api/v1/top?limit=20&sort=download
+```
+
+Кто грузит канал прямо сейчас — то же, что показывает монитор, только в JSON
+и без всего остального.
+
+Смысл в ограничении выдачи. При сотне нод по три сотни адресов на каждой
+запрос «отдай всё» — это тридцать тысяч строк на цикл опроса, из которых
+интересны первые двадцать. `limit` от 1 до 200, по умолчанию 20.
+
+`sort` — `download`, `upload` или `total`.
+
+Скорости считаются по разнице между двумя чтениями карт ядра, поэтому **в
+первом ответе их ещё нет**. В этом случае список сортируется по накопленному
+объёму, и об этом честно сказано в полях `sorted_by` и `note` — вместо того
+чтобы выдать нули за правду.
+
+```json
+{
+  "items": [
+    {
+      "ip": "185.12.34.56",
+      "download_mbps": 79.8,
+      "upload_mbps": 0.4,
+      "download_bytes": 11000000,
+      "upload_bytes": 150000,
+      "idle_seconds": 0.3,
+      "whitelisted": false,
+      "limited": false,
+      "personal": false,
+      "limit_mbps": null,
+      "subject": {"label": "Александр", "user_id": "42"}
+    }
+  ],
+  "count": 1,
+  "total_known": 345,
+  "sorted_by": "download_mbps",
+  "note": null
+}
+```
+
+`total_known` показывает, сколько адресов известно всего — чтобы по короткому
+списку было понятно, от какого числа он отрезан.
+
+Снимок карт общий с `/api/v1/stats`: два эндпоинта не дёргают `bpftool`
+вдвое чаще, а пользуются одним чтением.
 
 ### Что API не умеет намеренно
 

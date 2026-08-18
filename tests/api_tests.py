@@ -658,6 +658,163 @@ check("состояние замера сохраняется в файл",
       os.path.exists(os.path.join(VAR, "metrics.state")),
       os.listdir(VAR))
 
+print("\n\033[1mВерхушка адресов: /api/v1/top\033[0m")
+
+# Карты в песочнице пустые: подставной bpftool отдаёт []. Подменяем чтение
+# карт напрямую — сортировка и расчёт скоростей проверяются на известных
+# числах, а не на том, что успело натечь.
+REAL_READ_USERS = S.read_users
+NS = S.NS
+NOW_NS = S.mono_ns()
+
+SNAP_A = {
+    "10.0.0.1": {"down": 1_000_000, "up": 100_000, "up_pkts": 10, "seen": NOW_NS},
+    "10.0.0.2": {"down": 5_000_000, "up": 200_000, "up_pkts": 20, "seen": NOW_NS},
+    "10.0.0.3": {"down": 2_000_000, "up": 900_000, "up_pkts": 30, "seen": NOW_NS},
+    "198.51.100.7": {"down": 10, "up": 10, "up_pkts": 1, "seen": NOW_NS},
+}
+# За секунду: первый скачал 10 МБ, второй 1 МБ, третий 0; отдал больше третий.
+SNAP_B = {
+    "10.0.0.1": {"down": 11_000_000, "up": 150_000, "up_pkts": 15, "seen": NOW_NS},
+    "10.0.0.2": {"down": 6_000_000, "up": 250_000, "up_pkts": 25, "seen": NOW_NS},
+    "10.0.0.3": {"down": 2_000_000, "up": 5_900_000, "up_pkts": 60, "seen": NOW_NS},
+    "198.51.100.7": {"down": 10, "up": 10, "up_pkts": 1, "seen": NOW_NS},
+}
+
+
+def reset_cache():
+    with api._cache_lock:
+        api._cache.pop("stats_snapshot", None)
+        api._cache.pop("stats_prev", None)
+
+
+def prime(prev_users, cur_users, dt=1.0):
+    """Кладёт в кэш прошлый снимок и подсовывает текущий."""
+    S.read_users = lambda: cur_users
+    with api._cache_lock:
+        api._cache.pop("stats_snapshot", None)
+        api._cache["stats_prev"] = {"t": time.monotonic() - dt,
+                                    "users": prev_users}
+
+
+try:
+    # ── первое обращение: разницу считать не с чем ──
+    reset_cache()
+    S.read_users = lambda: SNAP_A
+    st, body = call("GET", "/api/v1/top", token=READ)
+    check("верхушка отдаётся", st == 200 and isinstance(body, dict)
+          and "items" in body, f"{st} {str(body)[:300]}")
+    check("без прошлого снимка сортируем по объёму",
+          body["sorted_by"] == "download_bytes", body.get("sorted_by"))
+    check("и честно об этом говорим", bool(body.get("note")))
+    check("скорости при этом пустые, а не нули",
+          all(r["download_mbps"] is None for r in body["items"]))
+    check("по объёму первым идёт самый накачавший",
+          body["items"][0]["ip"] == "10.0.0.2", body["items"][0]["ip"])
+
+    # ── второе обращение: есть с чем сравнивать ──
+    prime(SNAP_A, SNAP_B)
+    st, body = call("GET", "/api/v1/top", token=READ)
+    check("со вторым снимком сортируем по скорости",
+          body["sorted_by"] == "download_mbps", body.get("sorted_by"))
+    check("примечания больше нет", body.get("note") is None)
+    top = body["items"][0]
+    check("первым идёт тот, кто грузит канал сейчас",
+          top["ip"] == "10.0.0.1", top["ip"])
+    check("скорость посчитана верно",
+          79 <= top["download_mbps"] <= 81, top["download_mbps"])
+    check("накопленный объём тоже отдаётся",
+          top["download_bytes"] == 11_000_000)
+    check("порядок по убыванию",
+          [r["ip"] for r in body["items"]][:3] == ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+          [r["ip"] for r in body["items"]])
+
+    # ── сортировка по отдаче ──
+    prime(SNAP_A, SNAP_B)
+    st, body = call("GET", "/api/v1/top?sort=upload", token=READ)
+    check("сортировка по отдаче меняет порядок",
+          body["items"][0]["ip"] == "10.0.0.3", body["items"][0]["ip"])
+    check("sorted_by отражает выбор", body["sorted_by"] == "upload_mbps")
+
+    prime(SNAP_A, SNAP_B)
+    st, body = call("GET", "/api/v1/top?sort=total", token=READ)
+    check("сортировка по сумме работает",
+          st == 200 and body["sorted_by"] == "download_mbps+upload_mbps")
+
+    # ── ограничение количества ──
+    prime(SNAP_A, SNAP_B)
+    st, body = call("GET", "/api/v1/top?limit=2", token=READ)
+    check("limit ограничивает выдачу", len(body["items"]) == 2)
+    check("общее число адресов при этом видно",
+          body["total_known"] == 4, body.get("total_known"))
+
+    # ── признаки адреса в строке ──
+    S.save_penalties({"10.0.0.2": {"mbps": 1.0, "until": time.time() + 3600,
+                                   "source": "guard"},
+                      "10.0.0.3": {"mbps": 5.0, "until": time.time() + 9e5,
+                                   "kind": "personal", "source": "manual"}})
+    S.save_owners({"10.0.0.1": {"label": "Александр", "user_id": "42"}})
+    prime(SNAP_A, SNAP_B)
+    st, body = call("GET", "/api/v1/top", token=READ)
+    rows = {r["ip"]: r for r in body["items"]}
+    check("ограниченный адрес помечен", rows["10.0.0.2"]["limited"] is True)
+    check("персональная скорость помечена отдельно",
+          rows["10.0.0.3"]["personal"] is True and
+          rows["10.0.0.3"]["limited"] is False)
+    check("действующая скорость показана", rows["10.0.0.2"]["limit_mbps"] == 1.0)
+    check("белый список помечен", rows["198.51.100.7"]["whitelisted"] is True)
+    check("владелец подставлен",
+          (rows["10.0.0.1"]["subject"] or {}).get("label") == "Александр",
+          rows["10.0.0.1"]["subject"])
+    check("у остальных владельца нет", rows["10.0.0.2"]["subject"] is None)
+    S.save_penalties({})
+
+    # ── проверка параметров ──
+    for bad_q in ("limit=0", "limit=-1", "limit=201", "limit=abc", "limit=1.5"):
+        prime(SNAP_A, SNAP_B)
+        st, body = call("GET", "/api/v1/top?" + bad_q, token=READ)
+        check(f"{bad_q} отвергнут", st == 400, f"{st} {body}")
+    prime(SNAP_A, SNAP_B)
+    st, body = call("GET", "/api/v1/top?sort=nonsense", token=READ)
+    check("неизвестная сортировка отвергнута", st == 400, st)
+    prime(SNAP_A, SNAP_B)
+    st, body = call("GET", "/api/v1/top?sort=", token=READ)
+    check("пустая сортировка берёт значение по умолчанию",
+          st == 200 and body["sorted_by"] == "download_mbps", st)
+    prime(SNAP_A, SNAP_B)
+    st, body = call("GET", "/api/v1/top?limit=200", token=READ)
+    check("верхняя граница limit принимается", st == 200)
+
+    # ── доступ ──
+    prime(SNAP_A, SNAP_B)
+    st, _ = call("GET", "/api/v1/top", token=WRITE)
+    check("токен записи тоже читает", st == 200)
+    st, _ = call("GET", "/api/v1/top")
+    check("без токена не отдаём", st == 401)
+    st, _ = call("GET", "/api/v1/top", token="WRONG-" + "x" * 30)
+    check("с чужим токеном не отдаём", st == 401, st)
+finally:
+    S.read_users = REAL_READ_USERS
+    reset_cache()
+
+# ── без движка ──
+import shutil as _shutil
+_saved_maps = os.path.join(TMP, "maps-saved")
+_shutil.move(PIN, _saved_maps)
+st, body = call("GET", "/api/v1/top", token=READ)
+check("без загруженного движка честный 503", st == 503, st)
+check("с внятным кодом ошибки",
+      isinstance(body, dict) and body.get("error", {}).get("code")
+      == "ENGINE_NOT_RUNNING", body)
+_shutil.move(_saved_maps, PIN)
+st, _ = call("GET", "/api/v1/top", token=READ)
+check("после возврата карт снова отвечает", st == 200)
+
+st, body = call("GET", "/api/v1/openapi.json", token=READ)
+check("новый маршрут описан в OpenAPI",
+      st == 200 and "/top" in json.dumps(body, ensure_ascii=False), st)
+
 srv.shutdown()
+
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)

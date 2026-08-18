@@ -13,6 +13,67 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.10
+
+**Top of the load in the API, and an upgrade check from an older version.**
+
+Two items that are cheaper to do now than after rolling out to a hundred
+nodes.
+
+### `GET /api/v1/top`
+
+Who is loading the channel right now — the same thing the monitor shows, only
+as JSON.
+
+```
+GET /api/v1/top?limit=20&sort=download
+```
+
+The point is the cap on the response. With a hundred nodes and three hundred
+addresses each, "give me everything" means thirty thousand rows per polling
+cycle, of which the first twenty matter. `limit` ranges from 1 to 200; `sort`
+is `download`, `upload` or `total`.
+
+Each row already carries everything a central system needs to decide: current
+speeds, accumulated volume, idle time, whitelist and active-limit flags, the
+personal speed and the address owner.
+
+Speeds are computed from the difference between two reads of the kernel maps,
+so the first response does not carry them yet. The list is then sorted by
+accumulated volume, and the `sorted_by` and `note` fields say so — rather than
+passing zeros off as the truth. The map snapshot is shared with
+`/api/v1/stats`: the two endpoints reuse a single read instead of poking
+`bpftool` twice as often.
+
+### Upgrade check from an older version
+
+A new `tests/upgrade_tests.py` suite — 46 checks.
+
+The installer is not run in CI: it needs root, installs packages and registers
+units. But what breaks on upgrade is not the installer — it is reading the old
+state, where the config lacks fields added later and the `node_id` file does
+not exist yet. The suite drops state into a sandbox exactly as version 3.4
+wrote it and checks that the current Shape picks it up in full: settings are
+filled in from defaults, limits and personal speeds survive, history and
+owners are read, metrics build, and a backup is produced and restored.
+
+Separately it checks the one place in the installer that could quietly ruin a
+node: creating `node_id`. The fragment is taken from the real `install.sh` and
+executed twice in a temporary directory — overwriting the identifier would
+break the metrics history with nothing to notice it by.
+
+### Fixed in the tests
+
+The `/api/v1/top` block initially landed after the test server was shut down,
+so the requests went nowhere. Cyrillic in the query string and in the
+`Authorization` header crashed the HTTP client rather than the server, so the
+wrong thing was being tested. Both were fixed.
+
+### Upgrading
+
+Nothing to configure. The new endpoint is available with a read token wherever
+the API is installed; nodes without the API are unaffected.
+
 ## 3.9
 
 **The speed is out of the configuration fingerprint.**

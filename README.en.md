@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.9-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.10-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.9
+# Shape v3.10
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -600,6 +600,57 @@ Errors come back structured, without tracebacks:
 
 The `request_id` is in every response and in every line of the node's log, which
 makes it easy to tie an external system's request to what happened on the node.
+
+### Top of the load
+
+```
+GET /api/v1/top?limit=20&sort=download
+```
+
+Who is loading the channel right now — the same thing the monitor shows, only
+as JSON and without the rest.
+
+The point is the cap on the response. With a hundred nodes and three hundred
+addresses each, "give me everything" means thirty thousand rows per polling
+cycle, of which the first twenty matter. `limit` ranges from 1 to 200,
+defaulting to 20.
+
+`sort` is `download`, `upload` or `total`.
+
+Speeds are computed from the difference between two reads of the kernel maps,
+so **the first response does not carry them yet**. In that case the list is
+sorted by accumulated volume, and the `sorted_by` and `note` fields say so
+plainly — rather than passing zeros off as the truth.
+
+```json
+{
+  "items": [
+    {
+      "ip": "185.12.34.56",
+      "download_mbps": 79.8,
+      "upload_mbps": 0.4,
+      "download_bytes": 11000000,
+      "upload_bytes": 150000,
+      "idle_seconds": 0.3,
+      "whitelisted": false,
+      "limited": false,
+      "personal": false,
+      "limit_mbps": null,
+      "subject": {"label": "Alexandr", "user_id": "42"}
+    }
+  ],
+  "count": 1,
+  "total_known": 345,
+  "sorted_by": "download_mbps",
+  "note": null
+}
+```
+
+`total_known` shows how many addresses are known in total, so a short list
+makes it clear what it was cut down from.
+
+The map snapshot is shared with `/api/v1/stats`: the two endpoints do not poke
+`bpftool` twice as often, they reuse a single read.
 
 ### What the API deliberately cannot do
 
