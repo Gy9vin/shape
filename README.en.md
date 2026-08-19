@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.11-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.12-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.11
+# Shape v3.12
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -283,6 +283,43 @@ traffic.
 
 **Torrents only** — volume thresholds off, only two-way load is used. For
 unmetered channels.
+
+### Fast node: half the channel for an hour
+
+The fourth preset differs from the rest in that it **does not set the hourly
+cap as a number — it derives it from the speed limit**.
+
+The reason is that gigabytes per hour mean nothing on their own:
+
+| per-address limit | a full hour at that speed | what 3 GB/h is |
+|---|---|---|
+| 10 Mbit/s | 4.5 GB | two thirds of the channel |
+| 100 Mbit/s | 45 GB | six percent |
+
+The same threshold catches a downloader on a slow node and fires on a single
+film on a fast one. So the preset takes **half the channel per hour**:
+
+```
+cap = limit_Mbit/s ÷ 8 ÷ 1000 × 3600 × 0.5
+```
+
+| limit | cap |
+|---|---|
+| 10 Mbit/s | 2.2 GB/h |
+| 50 Mbit/s | 11.2 GB/h |
+| 100 Mbit/s | 22.5 GB/h |
+
+The meaning is one thing: "held more than half of its own bandwidth for a
+full hour". Video takes a fraction of that — 4K runs around 7 GB/h — while a
+sustained bulk transfer takes it all and gets caught.
+
+The computed number is shown before it is applied, together with what a full
+hour at the limit would amount to. With no speed limit set there is nothing to
+derive from; the preset says so plainly and offers a fixed 20 GB.
+
+The rest: a 100 GB daily cap as a backstop for the slow but persistent, and a
+1 Mbit/s penalty for an hour. An hour rather than four: the trigger is already
+strict, and whoever carries on will simply be caught again.
 
 ### Reading the verdict
 

@@ -266,7 +266,7 @@ PY
 # Каждый пресет — один вызов shaperctl со всеми флагами сразу. Ручная
 # настройка остаётся: пресет только расставляет числа, дальше правь что хочешь.
 guard_preset() {
-    local speed ans
+    local speed ans gbh full
     speed="$(cfg speed_mbps 0)"
     while :; do
         title "${T[gp_title]}"
@@ -281,6 +281,10 @@ guard_preset() {
         echo
         echo -e "  ${B}[3]${N} 🚦 ${T[gp_torrent]}"
         echo -e "      ${D}${T[gp_torrent_d]}${N}"
+        echo
+        echo -e "  ${B}[4]${N} 🚀 ${T[gp_fast]}"
+        echo -e "      ${D}${T[gp_fast_d1]}${N}"
+        echo -e "      ${D}${T[gp_fast_d2]}${N}"
         echo
         echo -e "  ${B}[0]${N} ← ${T[m0]}"
         echo
@@ -301,6 +305,31 @@ guard_preset() {
                    --packet 600 --hours 4 --upload-gb 2 \
                    --download-gb 25 --download-gbh 3 \
                    --penalty-mbps 1 --penalty-min 240 && pause; return ;;
+            4) # Порог в гигабайтах за час осмыслен только относительно канала:
+               # 3 ГБ/час на десятимегабитной ноде — две трети её полосы, а на
+               # стомегабитной — шесть процентов, под такое попадёт один фильм.
+               # Поэтому считаем половину канала за час, а не берём число.
+               if [[ "$speed" == "0" ]]; then
+                   gbh=20
+                   echo -e "\n  ${Y}${T[gp_fast_nolimit]}${N}"
+                   echo -e "  ${D}${T[gp_fast_fixed]}${N}"
+               else
+                   full="$(awk "BEGIN{printf \"%.1f\", $speed/8/1000*3600}")"
+                   gbh="$(awk "BEGIN{printf \"%.1f\", $speed/8/1000*3600*0.5}")"
+                   echo -e "\n  ${D}${T[gp_fast_full]} ${B}${full} GB${N}"
+                   echo -e "  ${D}${T[gp_fast_calc]} ${B}${gbh} GB${N}${D} ${T[gp_fast_why]}${N}"
+               fi
+               echo -e "\n  ${T[gp_will]}:"
+               echo -e "  ${D}  · ${T[gp_p_hour]} ${B}${gbh} GB${N}"
+               echo -e "  ${D}  · ${T[gp_p_day]} 100 GB${N}"
+               echo -e "  ${D}  · ${T[gp_p_pen]} 1 Mbit/s × 60 ${T[min]}${N}"
+               echo
+               read -rp "  ${T[apply_q]}: " ans
+               [[ "$ans" =~ ^[NnНн] ]] && continue
+               "$CTL" guard --enable --score 3 --both-dl 50 --both-ul 15 --both-min 10 \
+                   --packet 600 --hours 4 --upload-gb 2 \
+                   --download-gb 100 --download-gbh "$gbh" \
+                   --penalty-mbps 1 --penalty-min 60 && pause; return ;;
             2) "$CTL" guard --enable --score 3 --both-dl 50 --both-ul 15 --both-min 10 \
                    --packet 600 --hours 4 --upload-gb 2 \
                    --download-gb 50 --download-gbh 0 \
