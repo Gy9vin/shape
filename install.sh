@@ -39,27 +39,16 @@ if [[ "${1:-}" == "--uninstall-api" ]]; then
     exit 0
 fi
 
+# Полное снятие Shape. Сама логика живёт в uninstall.sh — одна реализация
+# и для командной строки, и для меню. Держать её в двух местах нельзя: они
+# разойдутся, и один из путей однажды оставит на ноде висящую eBPF-программу
+# или файл метрик, по которому Prometheus будет считать ноду живой.
 if [[ "${1:-}" == "--uninstall" ]]; then
-    step "Удаление"
-    systemctl disable --now shaper shaper-watch 2>/dev/null || true
-    "$APP_DIR/engine.sh" unload 2>/dev/null || true
-    # Туннель ставится мастером из меню и тоже принадлежит Shape: оставить
-    # его после удаления значит оставить работающее ssh-соединение наружу.
-    if [[ -f /etc/systemd/system/shape-tunnel.service ]]; then
-        systemctl disable --now shape-tunnel 2>/dev/null || true
-        rm -f /etc/systemd/system/shape-tunnel.service
-        ok "SSH-туннель убран (ключ /root/.ssh/shape_tunnel оставлен)"
-    fi
-    api_remove
-    systemctl disable --now shape-metrics.timer >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/shape-metrics.service \
-          /etc/systemd/system/shape-metrics.timer
-    rm -f /etc/systemd/system/shaper.service \
-          /etc/systemd/system/shaper-watch.service /usr/local/bin/shaper
-    rm -rf "$APP_DIR"
-    systemctl daemon-reload
-    ok "удалено (конфиг $ETC_DIR оставлен — удали вручную, если не нужен)"
-    exit 0
+    shift
+    for candidate in "$SRC/uninstall.sh" "$APP_DIR/uninstall.sh"; do
+        [[ -f "$candidate" ]] && exec bash "$candidate" "$@"
+    done
+    die "uninstall.sh не найден — возьмите его из репозитория"
 fi
 
 step "Проверка ядра"
@@ -120,6 +109,8 @@ if [[ ! -s /var/lib/shape/node_id ]]; then
 fi
 install -m 755 "$SRC/shaperctl.py"     "$APP_DIR/shaperctl.py"
 install -m 755 "$SRC/engine.sh"        "$APP_DIR/engine.sh"
+# Удаление должно быть доступно с самой ноды: меню вызывает именно этот файл.
+install -m 755 "$SRC/uninstall.sh"     "$APP_DIR/uninstall.sh"
 install -m 755 "$SRC/menu.sh"          "$APP_DIR/menu.sh"
 install -m 644 "$SRC/lang.sh"          "$APP_DIR/lang.sh"
 install -m 644 "$SRC/VERSION"          "$APP_DIR/VERSION"

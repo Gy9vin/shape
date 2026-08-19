@@ -13,6 +13,65 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.11
+
+**Removing Shape from the menu.**
+
+Until now, taking Shape off a node required `install.sh --uninstall` from the
+repository — and the installer is not copied onto the node, so it is not there
+when you need it. It is now a menu item: **Service → 🗑 Remove Shape**.
+
+### One implementation instead of two
+
+The removal logic moved into `uninstall.sh`, which is installed alongside the
+other files. Both the menu and `install.sh --uninstall` call it. Keeping this
+in two places is not an option: the implementations would drift apart, and one
+of them would eventually leave a live eBPF program on the node.
+
+### What got fixed along the way
+
+The previous inline removal block did not clear the **metrics file** from the
+node_exporter directory. The file is static — after Shape was removed,
+Prometheus would keep serving its numbers and showing the node as alive. It is
+now deleted.
+
+A `--purge` mode was added: by default `/etc/shaper` and `/var/lib/shape` stay,
+so reinstalling gives the node back its identifier, tokens and history. With
+`--purge` those go too.
+
+### The order of steps
+
+It matters more than it looks, and is now covered by a test:
+
+1. stop the services;
+2. **detach the program from the interface while `/opt/shaper` is still
+   there** — once the files are gone `engine.sh` cannot run, and the filters
+   would stay on the NIC until a reboot;
+3. remove the metrics file;
+4. delete units and files.
+
+The script lives in the directory it deletes, so it works from a copy in a
+temporary directory: bash reads a script as it executes, and removing
+`/opt/shaper` could otherwise cut it off midway.
+
+### Three barriers in the menu
+
+The action is irreversible and drops the limit for every client instantly, so
+"y/N" is not enough here — those get pressed without reading. The screen spells
+out the consequences, offers to take a backup first, and requires typing the
+word `DELETE` in full.
+
+### Checks
+
+A new `tests/uninstall_tests.sh` suite — 36 checks. The script is destructive,
+so it runs end to end in a sandbox: paths come from `SHAPE_*_DIR`, `systemctl`
+and `tc` are replaced by stubs that log their calls. What is checked is not the
+text of the script but the order of actions and what is left on disk.
+
+### Upgrading
+
+Nothing to configure. `uninstall.sh` lands on the node with the first upgrade.
+
 ## 3.10
 
 **Top of the load in the API, and an upgrade check from an older version.**

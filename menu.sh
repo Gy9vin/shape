@@ -1377,6 +1377,67 @@ screen_backup() {
     done
 }
 
+# ── Удаление Shape ────────────────────────────────────────────────────
+# Действие необратимое и мгновенно снимает ограничение со всех клиентов,
+# поэтому здесь три преграды: показ последствий, предложение сделать копию
+# и ввод слова целиком. Обычного «y/N» для такого мало — его жмут не глядя.
+screen_uninstall() {
+    local purge=0 ans f
+    while :; do
+        title "${T[un_title]}"
+        echo -e "  ${R}${T[un_h1]}${N}"
+        echo -e "  ${R}${T[un_h2]}${N}"
+        echo -e "  ${R}${T[un_h3]}${N}"
+        echo
+        echo -e "  ${B}${T[un_what]}:${N}"
+        echo -e "    ${D}· ${T[un_w1]}${N}"
+        echo -e "    ${D}· ${T[un_w2]}${N}"
+        echo -e "    ${D}· ${T[un_w3]}${N}"
+        echo -e "    ${D}· ${T[un_w4]}${N}"
+        echo
+        if (( purge )); then
+            echo -e "  ${T[un_keep]}: ${R}${T[un_keep_no]}${N}"
+        else
+            echo -e "  ${T[un_keep]}: ${G}${T[un_keep_yes]}${N}"
+        fi
+        hr
+        echo "  [1] ${T[un_backup]}"
+        echo "  [2] ${T[un_toggle]}"
+        echo -e "  [3] ${R}${T[un_go]}${N}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) f="/root/shape-$(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d).json"
+               f="$(ask "${T[bk_where]}" "$f")"
+               [[ -z "$f" ]] && continue
+               echo
+               "$CTL" export --out "$f" --with-secrets
+               pause ;;
+            2) purge=$(( 1 - purge )) ;;
+            3) echo
+               echo -e "  ${Y}${T[un_word_ask]}: ${B}${T[un_word]}${N}"
+               ans="$(ask "${T[choice]}")"
+               if [[ "$ans" != "${T[un_word]}" ]]; then
+                   echo -e "  ${G}${T[un_aborted]}${N}"; pause; continue
+               fi
+               echo
+               if (( purge )); then
+                   bash "$APP_DIR/uninstall.sh" --purge
+               else
+                   bash "$APP_DIR/uninstall.sh"
+               fi
+               echo
+               echo -e "  ${G}✓ ${T[un_done]}${N}"
+               echo -e "  ${D}${T[un_fq]}${N}"
+               echo
+               read -rsp "  ${T[back]} " _
+               clear
+               exit 0 ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 screen_service() {
     local auto_lbl
     while :; do
@@ -1413,6 +1474,7 @@ screen_service() {
             echo -e " [10] 🔗 ${T[api_menu]} ${D}${T[api_none]}${N}"
         fi
         echo -e " [11] 💾 ${T[bk_title]}"
+        echo -e " [12] 🗑  ${R}${T[un_title]}${N}"
         echo -e "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -1437,6 +1499,7 @@ screen_service() {
             9) screen_metrics ;;
            10) screen_api ;;
            11) screen_backup ;;
+           12) screen_uninstall ;;
             0|"") return ;;
         esac
     done

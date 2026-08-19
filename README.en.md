@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.10-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.11-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.10
+# Shape v3.11
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -983,6 +983,52 @@ shape_speed_limit_mbps
 
 In the API both fields live in `/api/v1/status` (the `node` section) and in
 `/api/v1/node`.
+
+---
+
+## Removal
+
+Menu: **Service → 🗑 Remove Shape**. Or from the repository:
+
+```bash
+bash install.sh --uninstall            # keep the settings
+bash install.sh --uninstall --purge    # delete the settings too
+```
+
+Both paths lead into the same `uninstall.sh` — keeping this in two places is
+not an option: the implementations would drift apart, and one of them would
+eventually leave a live eBPF program on the node.
+
+### What happens, and in what order
+
+The order matters more than it looks:
+
+1. services are stopped — engine, watchdog, API, metrics, tunnel;
+2. **the program is detached from the interface while `/opt/shaper` is still
+   there.** Once the files are gone `engine.sh` can no longer run, and the
+   filters would stay on the NIC until a reboot;
+3. the metrics file is removed from the node_exporter directory. It is
+   static: leave it, and Prometheus will show the removed node as alive
+   forever;
+4. units, `/opt/shaper` and the `shaper` command are deleted.
+
+The `fq` root qdisc is left in place deliberately — it is harmless and often
+needed by other software on the same machine.
+
+### What stays
+
+By default `/etc/shaper` and `/var/lib/shape` are untouched: settings, API
+tokens, the node identifier and history. Install Shape again and the node
+stays itself, with no gap in the monitoring graph.
+
+The `--purge` flag (a toggle in the menu) removes those as well.
+
+### Three barriers in the menu
+
+The action is irreversible and drops the limit for every client instantly, so
+a plain "y/N" is not enough — those get pressed without reading. The screen
+spells out the consequences, offers to take a backup first, and requires
+typing the word `DELETE` in full.
 
 ---
 

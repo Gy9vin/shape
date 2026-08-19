@@ -38,8 +38,15 @@ check "без флага сервис API не включается" \
       'grep -A2 "if (( WITH_API ))" "$SRC/install.sh" | grep -q "step"'
 check "удаление API не трогает shaper.service" \
       '! sed -n "/uninstall-api/,/^fi/p" "$SRC/install.sh" | grep -qE "disable.*shaper\b|rm.*shaper.service"'
-check "полное удаление убирает и API" \
-      'sed -n "/== \"--uninstall\"/,/^fi/p" "$SRC/install.sh" | grep -q api_remove'
+# Полное удаление живёт в uninstall.sh — туда и смотрим. Важно, что API
+# снимается вместе со всем остальным: оставленный сервис продолжал бы
+# слушать порт на ноде, с которой Shape уже удалён.
+check "полное удаление останавливает службу API" \
+      'grep -q "shape-api" "$SRC/uninstall.sh"'
+check "полное удаление убирает юнит API" \
+      'grep -q "shape-api.service" "$SRC/uninstall.sh"'
+check "установщик передаёт удаление в uninstall.sh" \
+      'sed -n "/== \"--uninstall\"/,/^fi/p" "$SRC/install.sh" | grep -q "uninstall.sh"'
 
 echo -e "\n${B}4. Shape работает при отсутствующем каталоге api${N}"
 TMP="$(mktemp -d)"
