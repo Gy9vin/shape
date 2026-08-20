@@ -45,7 +45,8 @@ def guard(**kw):
     d = dict(enable=False, disable=False, score=None, both_min=None, both_dl=None,
              both_ul=None, percent=None, sustain=None, penalty_mbps=None,
              penalty_min=None, hours=None, upload_gb=None, download_gb=None,
-             download_gbh=None, interval=None, packet=None, quiet=True)
+             download_gbh=None, interval=None, packet=None, require_packet=None,
+             quiet=True)
     d.update(kw); return argparse.Namespace(**d)
 
 def tg(**kw):
@@ -184,6 +185,95 @@ for flows in (1, 4, 64):
     mbps, drop = edt(10, [1500] * 4000, flows=flows)
     check(f"{flows:>2} потоков: {mbps:.2f} Мбит/с при лимите 10", 9.0 <= mbps <= 11.0,
           f"получено {mbps:.2f}")
+
+print("\n\033[1mКрупные пакеты вверх как обязательное условие\033[0m")
+# Смысл всей затеи: порог отдачи можно опустить до единиц процентов, только
+# если подтверждения через него не проходят. Отличает их размер пакета —
+# он один не зависит от скорости канала.
+
+CAP = 50.0
+
+
+def gate(sample, guard):
+    """Повторяет условие из cmd_watch: два направления плюс размер пакета."""
+    dl_floor = CAP * guard["both_dl_percent"] / 100
+    ul_floor = CAP * guard["both_ul_percent"] / 100
+    both = sample["dl"] >= dl_floor and sample["ul"] >= ul_floor
+    if guard.get("require_packet") and sample["up_pkt"] < guard["packet_bytes"]:
+        both = False
+    return both
+
+
+g_off = dict(S.GUARD_DEFAULT, enabled=True, both_ul_percent=3, require_packet=False)
+g_on = dict(S.GUARD_DEFAULT, enabled=True, both_ul_percent=3, require_packet=True)
+
+# Подтверждения при 37.9 Мбит/с скачивания: около двух мегабит, пакет ~140 байт.
+ack = {"dl": 37.9, "ul": 1.9, "up_pkt": 140}
+# Раздача: тот же объём вниз, но вверх идут данные.
+seed = {"dl": 37.9, "ul": 4.6, "up_pkt": 1280}
+
+check("без признака подтверждения открывают шлюз", gate(ack, g_off) is True)
+check("с признаком подтверждения шлюз не открывают", gate(ack, g_on) is False)
+check("раздача проходит и с признаком", gate(seed, g_on) is True)
+check("раздача проходит и без него", gate(seed, g_off) is True)
+
+# На быстрой ноде подтверждений больше — ради этого случая всё и делалось.
+CAP = 100.0
+fast_ack = {"dl": 88.6, "ul": 4.2, "up_pkt": 150}
+check("на быстрой ноде подтверждений хватает на 3% порога",
+      gate(fast_ack, g_off) is True)
+check("но признак их всё равно отсекает", gate(fast_ack, g_on) is False)
+CAP = 50.0
+
+# Пограничные значения размера пакета.
+check("пакет ровно на пороге проходит",
+      gate({"dl": 30, "ul": 2, "up_pkt": 600}, g_on) is True)
+check("пакет на байт меньше не проходит",
+      gate({"dl": 30, "ul": 2, "up_pkt": 599}, g_on) is False)
+check("нулевой пакет не проходит",
+      gate({"dl": 30, "ul": 2, "up_pkt": 0}, g_on) is False)
+
+# Признак не подменяет собой двусторонность.
+check("крупные пакеты без скачивания шлюз не открывают",
+      gate({"dl": 1, "ul": 5, "up_pkt": 1400}, g_on) is False)
+check("крупные пакеты без отдачи шлюз не открывают",
+      gate({"dl": 40, "ul": 0.1, "up_pkt": 1400}, g_on) is False)
+
+print("\n\033[1mНастройка порога отдачи\033[0m")
+S.save_config({"speed_mbps": 50, "ports": [443], "guard": dict(S.GUARD_DEFAULT)})
+check("три процента принимаются", not dies(S.cmd_guard, guard(both_ul=3)))
+check("и записались", S.load_config()["guard"]["both_ul_percent"] == 3)
+check("один процент принимается", not dies(S.cmd_guard, guard(both_ul=1)))
+check("ноль отвергается", dies(S.cmd_guard, guard(both_ul=0)))
+check("больше ста отвергается", dies(S.cmd_guard, guard(both_ul=101)))
+
+S.cmd_guard(guard(require_packet="on"))
+check("признак включается", S.load_config()["guard"]["require_packet"] is True)
+S.cmd_guard(guard(require_packet="off"))
+check("и выключается", S.load_config()["guard"]["require_packet"] is False)
+check("по умолчанию выключен", S.GUARD_DEFAULT["require_packet"] is False)
+check("входит в отпечаток настроек",
+      "require_packet" not in S.GUARD_HASH_SKIP)
+
+print("\n\033[1mСтроки помощи не роняют argparse\033[0m")
+# Одинокий знак процента в help ронял `guard --help` с ValueError: argparse
+# прогоняет строки через %-форматирование.
+import argparse as _ap
+_parser = S.build_parser()
+_bad = [k for k, v in S.MSG["ru"].items() if k.startswith("h_") and "%" in v]
+check("в русских строках помощи нет голого процента", not _bad, str(_bad))
+_bad_en = [k for k, v in S.MSG["en"].items() if k.startswith("h_") and "%" in v]
+check("в английских тоже", not _bad_en, str(_bad_en))
+import contextlib as _ctx
+import io as _io
+_out = _io.StringIO()
+try:
+    with _ctx.redirect_stdout(_out):
+        _parser.parse_args(["guard", "--help"])
+except SystemExit:
+    check("guard --help отрабатывает", "--require-packet" in _out.getvalue())
+except Exception as exc:
+    check("guard --help отрабатывает", False, repr(exc))
 
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)

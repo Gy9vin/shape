@@ -93,6 +93,10 @@ C = {
 MSG = {
     "ru": {
         "root": "нужны права root",
+        "h_req_packet": "требовать крупные пакеты вверх: on/off",
+        "guard_req_packet": "и только при пакетах вверх от {n} байт — подтверждения не в счёт",
+        "mon_pkt": "пакет",
+        "mon_leg_pkt": "пакет — средний размер в отдаче, байт; от {n} это данные, а не подтверждения",
         "id_node": "нода",
         "id_config": "отпечаток",
         "id_none": "не создан",
@@ -201,8 +205,8 @@ MSG = {
         "lim_speed": "скорость нарушителя",
         "h_score": "баллов для штрафа (1-6)",
         "h_both_min": "минут одновременной нагрузки в обе стороны",
-        "h_both_dl": "порог скачивания для двусторонней нагрузки, %",
-        "h_both_ul": "порог отдачи для двусторонней нагрузки, %",
+        "h_both_dl": "порог скачивания для двусторонней нагрузки, в процентах",
+        "h_both_ul": "порог отдачи для двусторонней нагрузки, в процентах",
         "h_hours": "часов активности за сутки",
         "h_upload_gb": "гигабайт отдачи за сутки",
         "h_download_gb": "гигабайт скачивания за сутки, 0 = выкл",
@@ -218,7 +222,7 @@ MSG = {
         "why_hours": "часами не отпускает канал",
         "why_upload": "много отдал за сутки",
         "h_guard": "автоограничение нарушителей",
-        "h_percent": "порог, % от лимита",
+        "h_percent": "порог в процентах от лимита",
         "h_sustain": "сколько минут держать нагрузку до штрафа",
         "h_pen_mbps": "скорость нарушителя, Мбит/с",
         "h_pen_min": "на сколько минут ограничивать",
@@ -318,6 +322,10 @@ MSG = {
     },
     "en": {
         "root": "root privileges required",
+        "h_req_packet": "require large upload packets: on/off",
+        "guard_req_packet": "and only with upload packets from {n} bytes — acknowledgements do not count",
+        "mon_pkt": "packet",
+        "mon_leg_pkt": "packet — average upload size in bytes; from {n} it is data, not acknowledgements",
         "id_node": "node",
         "id_config": "fingerprint",
         "id_none": "not created",
@@ -426,8 +434,8 @@ MSG = {
         "lim_speed": "offender speed",
         "h_score": "score needed for a penalty (1-6)",
         "h_both_min": "minutes of simultaneous two-way load",
-        "h_both_dl": "download floor for two-way load, %",
-        "h_both_ul": "upload floor for two-way load, %",
+        "h_both_dl": "download floor for two-way load, percent",
+        "h_both_ul": "upload floor for two-way load, percent",
         "h_hours": "hours of activity per day",
         "h_upload_gb": "gigabytes uploaded per day",
         "h_download_gb": "gigabytes downloaded per day, 0 = off",
@@ -443,7 +451,7 @@ MSG = {
         "why_upload": "uploaded a lot in 24h",
         "why_hours": "keeps the channel busy for hours",
         "h_guard": "automatic limiting of heavy users",
-        "h_percent": "threshold, % of the limit",
+        "h_percent": "threshold as a percent of the limit",
         "h_sustain": "minutes of sustained load before the penalty",
         "h_pen_mbps": "offender speed, Mbit/s",
         "h_pen_min": "penalty duration, minutes",
@@ -723,6 +731,21 @@ GUARD_DEFAULT = {
 
     # Признаки, за которые начисляются баллы
     "packet_bytes": 600,      # +2 средний размер пакета в отдаче
+
+    # Делает размер пакета не признаком, а обязательным условием: без
+    # крупных пакетов вверх двусторонний счётчик не растёт вообще.
+    #
+    # Зачем. Порог отдачи задан в процентах от лимита, и опускать его, чтобы
+    # ловить торрент со слабой раздачей, само по себе опасно: скачивание
+    # порождает подтверждения вверх, а их объём растёт вместе со скоростью
+    # скачивания. На ста мегабитах это несколько мегабит "отдачи", в которой
+    # нет ни байта пользовательских данных.
+    #
+    # Размер пакета от скорости канала не зависит: подтверждение остаётся
+    # коротким и на десяти мегабитах, и на гигабите. Поэтому с включённым
+    # признаком порог отдачи можно опускать до единиц процентов, не боясь
+    # поймать обычную закачку.
+    "require_packet": False,
     "trigger_percent": 80,    # +1 держит потолок скачивания
     "sustain_min": 5,
     "hours_per_day": 4,       # +2 часов активности за сутки
@@ -1002,12 +1025,22 @@ def cmd_status(a):
 # ────────────────────────────── монитор ──────────────────────────────
 
 def rates(prev, cur, dt):
-    """Скорости по каждому IP за прошедший интервал, Мбит/с."""
+    """
+    По каждому IP за прошедший интервал: скорости в Мбит/с и средний размер
+    пакета в отдаче.
+
+    Размер пакета здесь не для красоты. Это единственное число, которое
+    отличает раздачу от обычной закачки, и оно не зависит от скорости канала:
+    подтверждение остаётся коротким и на десяти мегабитах, и на гигабите.
+    """
     out = {}
     for ip, c in cur.items():
-        p = prev.get(ip, {"down": 0, "up": 0})
+        p = prev.get(ip, {"down": 0, "up": 0, "up_pkts": 0})
+        up_bytes = max(0, c["up"] - p["up"])
+        up_pkts = max(0, c.get("up_pkts", 0) - p.get("up_pkts", 0))
         out[ip] = (max(0, c["down"] - p["down"]) * 8 / 1e6 / dt,
-                   max(0, c["up"] - p["up"]) * 8 / 1e6 / dt)
+                   up_bytes * 8 / 1e6 / dt,
+                   (up_bytes / up_pkts) if up_pkts else 0)
     return out
 
 
@@ -1025,6 +1058,12 @@ def fmt_hold(sec):
 # Дробные блоки: восьмушки ширины символа. Обычная полоса из целых блоков
 # при ширине 12 различает всего двенадцать уровней — разница между 7.3 и 7.4
 # на ней не видна вовсе. С восьмушками уровней 96 при той же ширине.
+# Выше этого среднего размера пакета отдача перестаёт быть подтверждениями и
+# становится данными. Подтверждение в туннеле занимает 100-170 байт, кусок
+# торрента — больше тысячи. Число служит только подсветкой в мониторе;
+# решение сторож принимает по своему packet_bytes.
+PKT_DATA_HINT = 600
+
 EIGHTHS = "▏▎▍▌▋▊▉█"
 SPARK = "▁▂▃▄▅▆▇█"
 
@@ -1098,7 +1137,7 @@ def cmd_monitor(a):
                 wl = whitelist_ips()
 
             rows = []
-            for ip, (dl, ul) in rt.items():
+            for ip, (dl, ul, up_pkt) in rt.items():
                 h = history.setdefault(ip, [])
                 h.append(dl)
                 del h[:-keep]
@@ -1107,7 +1146,7 @@ def cmd_monitor(a):
                 else:
                     since.pop(ip, None)
                 rows.append((ip, dl, ul, sum(h) / len(h),
-                             now_t - since[ip] if ip in since else 0))
+                             now_t - since[ip] if ip in since else 0, up_pkt))
 
             active = [r for r in rows if r[1] + r[2] > 0.05]
             active.sort(key=lambda r: r[1] + r[2], reverse=True)
@@ -1137,13 +1176,14 @@ def cmd_monitor(a):
                            f"          {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
                            f" {t('mon_of')} {len(rows)}")
             out.append(f"  {C['gry']}{'─' * width}{C['r']}")
-            out.append(f"{C['gry']}   {'IP':<21}{t('now'):>8}{t('mon_up'):>9}"
-                       f"{t('mon_avg'):>9}{t('mon_hold'):>8}  {t('mon_share')}{C['r']}")
+            out.append(f"{C['gry']}   {'IP':<21}{t('now'):>8}{t('mon_up'):>8}"
+                       f"{t('mon_pkt'):>7}{t('mon_avg'):>8}{t('mon_hold'):>7}"
+                       f"  {t('mon_share')}{C['r']}")
 
             if not active:
                 out.append(f"\n   {C['gry']}{t('mon_idle')}{C['r']}")
 
-            for ip, dl, ul, avg, hold in active[:a.top]:
+            for ip, dl, ul, avg, hold, up_pkt in active[:a.top]:
                 share = dl / scale if scale > 0 else 0
                 col = load_color(share)
                 # Значок слева вместо колонки «держит»: в спокойный час она
@@ -1170,10 +1210,20 @@ def cmd_monitor(a):
                 # а значок слева этого не показывает.
                 hold_txt = fmt_hold(hold) if hold >= 1 else "—"
                 hold_col = C["byel"] if hold >= 30 else C["gry"]
+                # Средний размер пакета в отдаче — единственное число, по
+                # которому раздача отличается от обычной закачки, и оно не
+                # зависит от скорости канала. Подтверждения занимают около
+                # сотни байт, данные — за тысячу; красим по порогу сторожа.
+                if up_pkt < 1:
+                    pkt_txt, pkt_col = "—", C["gry"]
+                else:
+                    pkt_txt = f"{up_pkt:.0f}"
+                    pkt_col = C["byel"] if up_pkt >= PKT_DATA_HINT else C["gry"]
                 out.append(f" {mark} {ip:<21}{col}{dl:>8.1f}{C['r']}"
-                           f"{ul_col}{ul:>9.1f}{C['r']}"
-                           f"{C['gry']}{avg:>9.1f}{C['r']}"
-                           f"{hold_col}{hold_txt:>8}{C['r']}"
+                           f"{ul_col}{ul:>8.1f}{C['r']}"
+                           f"{pkt_col}{pkt_txt:>7}{C['r']}"
+                           f"{C['gry']}{avg:>8.1f}{C['r']}"
+                           f"{hold_col}{hold_txt:>7}{C['r']}"
                            f"  {col}{bar(dl, scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}")
 
             out.append(f"  {C['gry']}{'─' * width}{C['r']}")
@@ -1181,6 +1231,7 @@ def cmd_monitor(a):
             out.append(f"   {C['gry']}{t('mon_shown', a=shown, b=len(active))}"
                        f"   ▪ {t('mon_leg_hold')}   ✓ {t('mon_leg_wl')}"
                        f"   ⊘ {t('mon_leg_limited')}{C['r']}")
+            out.append(f"   {C['gry']}{t('mon_leg_pkt', n=PKT_DATA_HINT)}{C['r']}")
             print("\n".join(out), flush=True)
     except KeyboardInterrupt:
         pass
@@ -1645,7 +1696,7 @@ def cmd_guard(a):
         (a.score,      "score_needed",      1, 6),
         (a.both_min,   "both_ways_min",     1, 120),
         (a.both_dl,    "both_dl_percent",   10, 100),
-        (a.both_ul,    "both_ul_percent",   5, 100),
+        (a.both_ul,    "both_ul_percent",   1, 100),
         (a.percent,    "trigger_percent",   10, 100),
         (a.sustain,    "sustain_min",       1, 1440),
         (a.penalty_mbps, "penalty_mbps",    0.1, 1000),
@@ -1662,6 +1713,9 @@ def cmd_guard(a):
             if not lo <= val <= hi:
                 die(t("guard_range", k=key, lo=lo, hi=hi))
             g[key] = val
+
+    if a.require_packet is not None:
+        g["require_packet"] = a.require_packet == "on"
 
     # Секцию telegram сюда обязательно: раньше её здесь не было, и любая
     # правка автоограничения молча стирала токен, чат, прокси и время сводки.
@@ -1680,6 +1734,8 @@ def cmd_guard_show(speed, g):
         print(f"  {t('guard_both')}: ↓{speed * g['both_dl_percent'] / 100:g} "
               f"↑{speed * g['both_ul_percent'] / 100:g} Mbit/s "
               f"{t('guard_during')} {g['both_ways_min']} {t('min')}")
+        if g.get("require_packet"):
+            print(f"  {C['gry']}{t('guard_req_packet', n=g['packet_bytes'])}{C['r']}")
         print(f"  {t('guard_score')}: {g['score_needed']}")
     print(f"  {t('guard_penalty')}: {g['penalty_mbps']:g} Mbit/s "
           f"{t('guard_for')} {g['penalty_min']} {t('min')}")
@@ -1883,6 +1939,11 @@ def cmd_watch(a):
 
                 # счётчики с допуском: короткий провал не обнуляет наблюдение
                 both = s["dl"] >= dl_floor and s["ul"] >= ul_floor
+                # Крупные пакеты вверх как часть обязательного условия, а не
+                # как балл: иначе низкий порог отдачи ловил бы подтверждения
+                # обычной закачки, которых тем больше, чем быстрее качают.
+                if g.get("require_packet") and s["up_pkt"] < g["packet_bytes"]:
+                    both = False
                 both_streak[ip] = (both_streak.get(ip, 0) + 1) if both \
                     else max(0, both_streak.get(ip, 0) - 1)
                 peak = s["dl"] >= peak_floor
@@ -3474,6 +3535,8 @@ def build_parser():
     g.add_argument("--download-gbh", type=float, default=None, help=t("h_download_gbh"))
     g.add_argument("--interval", type=int, default=None, help=t("h_watch_iv"))
     g.add_argument("--packet", type=int, default=None, help=t("h_packet"))
+    g.add_argument("--require-packet", dest="require_packet",
+                   choices=["on", "off"], default=None, help=t("h_req_packet"))
     g.add_argument("--quiet", action="store_true")
     g.set_defaults(func=cmd_guard)
 

@@ -334,8 +334,14 @@ guard_preset() {
                    --packet 600 --hours 4 --upload-gb 2 \
                    --download-gb 50 --download-gbh 0 \
                    --penalty-mbps 1 --penalty-min 60 && pause; return ;;
-            3) "$CTL" guard --enable --score 3 --both-dl 50 --both-ul 15 --both-min 10 \
-                   --packet 600 --hours 4 --upload-gb 2 \
+            3) # Порог отдачи опущен до 3% — это полтора мегабита при лимите 50,
+               # то есть уровень слабой раздачи. Сам по себе такой порог поймал
+               # бы и обычную закачку: подтверждения вверх растут вместе со
+               # скоростью скачивания. Поэтому вместе с ним включается
+               # обязательное требование крупных пакетов — подтверждения через
+               # него не проходят ни на какой скорости.
+               "$CTL" guard --enable --score 3 --both-dl 50 --both-ul 3 --both-min 10 \
+                   --packet 600 --require-packet on --hours 4 --upload-gb 2 \
                    --download-gb 0 --download-gbh 0 \
                    --penalty-mbps 1 --penalty-min 60 && pause; return ;;
             0|"") return ;;

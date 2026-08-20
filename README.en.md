@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.12-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.13-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.12
+# Shape v3.13
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -141,16 +141,23 @@ address has been holding the load:
    Channel now     ↓   54.1   ↑  10.4 Mbit/s   ▂▃▄▅▅▆▇█████  last minute
    Limit per address  10 Mbit/s   for every IP    loading 58 of 377
   ────────────────────────────────────────────────────────────────────────────
-   IP                        now   upload      avg  holding  share of limit
- ▪ 109.248.47.99            10.1      0.1      3.1   12 min  ████████████ 101%
- ▪ 91.78.0.72                9.8      0.2      9.6   44 min  ███████████▉  98%
-   91.79.7.124               6.4      0.2      1.1        —  ███████▊····  64%
- ✓ 203.0.113.40              5.1      0.4      4.8    5 min  ██████▏·····  51%
-   91.79.15.94               1.4      2.7      1.7        —  █▊··········  14%
- ⊘ 89.253.46.46              1.0      0.0      4.3        —  █▎··········  10%
+   IP                       now  upload packet     avg holding  share of limit
+ ▪ 109.248.47.99           10.1     0.1    140     3.1  12 min  ████████████ 101%
+ ▪ 91.78.0.72               9.8     0.2    150     9.6  44 min  ███████████▉  98%
+   91.79.7.124              6.4     0.2    130     1.1       —  ███████▊····  64%
+ ✓ 203.0.113.40             5.1     0.4    160     4.8   5 min  ██████▏·····  51%
+   91.79.15.94              1.4     2.7   1310     1.7       —  █▊··········  14%
+ ⊘ 89.253.46.46             1.0     0.0    120     4.3       —  █▎··········  10%
   ────────────────────────────────────────────────────────────────────────────
    showing 20 of 68   ▪ holding over 30 s   ✓ whitelisted   ⊘ limited
+   packet — average upload size in bytes; from 600 it is data, not acknowledgements
 ```
+
+The **packet** column is the average upload packet size. That is the figure
+which tells seeding apart from an ordinary download, and it does not depend on
+the channel speed: acknowledgements take 100–170 bytes, data takes over a
+thousand. In the sample above everyone sits around a hundred and fifty, and
+only 91.79.15.94 shows 1310.
 
 **Row colour is the share of the limit:** grey up to 20%, green to half, yellow
 to 80%, red above. The upload column has its own scale: mobile carriers give a
@@ -226,6 +233,47 @@ difference is the same at 3 Mbit and at 20.
 | Online gaming | clean |
 | Torrent at 3, 5, 10, 20 Mbit uplink | limited after 10 min |
 | Torrent with pauses | limited after 23 min |
+
+### Why you cannot simply lower the upload floor
+
+The obvious rule suggests itself: "downloading and uploading more than one
+and a half megabits at the same time means seeding". It does not work, and
+here is why.
+
+Downloading generates an upstream flow all by itself — acknowledgements. Their
+volume **grows together with the download speed**:
+
+```
+37.9 Mbit/s down  ≈ 3400 packets/s
+                  ≈ 1700 acknowledgements/s upstream
+    wrapped by Reality at 130–170 bytes each
+                  ≈ 1.5–2.0 Mbit/s of "upload"
+```
+
+So an ordinary download on a 50 Mbit node already produces about two megabits
+upstream, and twice that on a 100 Mbit one. An absolute threshold would catch
+it along with the seeding.
+
+**Packet size tells them apart**, and it is the only figure that does not
+depend on the channel speed:
+
+| | average upload packet |
+|---|---|
+| acknowledgements | 100–170 bytes |
+| seeding data | 1200–1400 bytes |
+
+That is why the torrent preset lowers the upload floor to 3% **together with**
+the large-packet requirement: `--require-packet on`. With it the two-way
+counter does not grow while upstream packets stay short — no matter how many
+megabits of acknowledgements pile up.
+
+The switch is available on its own from the command line:
+
+```bash
+shaperctl.py guard --both-ul 3 --require-packet on
+```
+
+Without it, lowering the upload floor below 10% is a bad idea.
 
 ### Volume thresholds
 

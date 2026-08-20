@@ -13,6 +13,79 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.13
+
+**Large upload packets as a mandatory condition, and packet size in the monitor.**
+
+A torrent with weak seeding escaped auto-limiting: it never reached the 15%
+upload floor. Lowering the floor was the obvious move, but on its own it is
+dangerous.
+
+### Why lowering the floor is not enough
+
+Downloading generates acknowledgements upstream, and their volume grows
+together with the download speed:
+
+```
+37.9 Mbit/s down ≈ 1700 acknowledgements/s ≈ 1.5–2.0 Mbit/s of "upload"
+```
+
+On a 50 Mbit node an ordinary download already produces about two megabits
+upstream, and twice that on a 100 Mbit one. An absolute threshold would catch
+it along with the seeding.
+
+### What tells them apart reliably
+
+The average upload packet size — the only figure independent of channel speed:
+100–170 bytes for acknowledgements, 1200–1400 for data.
+
+Shape measured it before, but it was worth two points out of three, so a
+penalty could land without it. There is now `--require-packet on`: with it the
+two-way counter does not grow while upstream packets stay short.
+
+### The torrent preset
+
+The upload floor drops from 15% to **3%** — one and a half megabits at a
+50 Mbit limit — with the large-packet requirement enabled at the same time. A
+low floor is safe with it: acknowledgements never pass, at any speed.
+
+The lower bound of `--both-ul` moves from 5% to 1%: the old one would not
+accept one and a half megabits at a 50 Mbit limit.
+
+### Packet size is visible in the monitor
+
+A new `packet` column between upload and average. Values from 600 are
+highlighted:
+
+```
+IP                       now  upload packet     avg holding  share of limit
+88.135.124.138          37.9     4.6   1280    23.4     4 s  █████████▏··  76%
+89.109.51.149           13.9     0.8    150     5.1       —  ███▍········  28%
+```
+
+The difference is immediate: 1280 bytes for the seeder against 150 for the
+downloader. Previously only the watchdog saw this number, leaving no way to
+check a hunch.
+
+### Fixed
+
+**`shaperctl.py guard --help` crashed with `ValueError: incomplete format`.**
+Three help strings contained a bare percent sign, and argparse runs them
+through %-formatting. The bug was long-standing and unrelated to this release —
+it surfaced while adding the new argument. The texts now spell the word out,
+and a check was added so it cannot return.
+
+### Checks
+
+23 new checks: gate behaviour with and without the signal on slow and fast
+nodes, edge values of packet size, setting bounds, and `--help` parsing. The
+core suite now holds 102.
+
+### Upgrading
+
+Existing settings are untouched: `require_packet` is off by default. To adopt
+the new behaviour — **Auto-limit → Presets → [3]**.
+
 ## 3.12
 
 **A preset for fast nodes: the hourly cap is derived from the channel.**
