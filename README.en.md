@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.13-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.14-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.13
+# Shape v3.14
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -42,7 +42,7 @@ Zero external dependencies: the system Python plus `clang`, `bpftool` and
 ## Installation
 
 ```bash
-apt update && apt install -y git && \
+apt update && apt install -y git && rm -rf /tmp/shape && \
 git clone https://github.com/SkunkBG/shape.git /tmp/shape && \
 bash /tmp/shape/install.sh && shaper
 ```
@@ -482,6 +482,13 @@ shaperctl.py import /root/node.json --only whitelist,owners
 shaperctl.py telegram backup                # send a backup right now
 shaperctl.py telegram set --backup on --backup-day 1
 shaperctl.py telegram set --backup-thread 777
+
+shaperctl.py panel show                     # the Remnawave panel link
+shaperctl.py panel test                     # check the link, change nothing
+shaperctl.py panel scan --dry-run           # look for sharing, do nothing
+shaperctl.py panel set --url … --token … --node-uuid …
+shaperctl.py panel set --action-set notify,limit --mbps 1 --minutes 60
+shaperctl.py panel set --threshold 20 --window 10 --exempt 97,346
 ```
 
 The `status --json` format:
@@ -790,6 +797,139 @@ token.
 
 ---
 
+## Finding shared subscriptions
+
+A node sees addresses but not their owners. The Remnawave panel knows the
+owners. Joining the two lets Shape answer a question neither side can answer
+alone: **how many addresses of one user are alive on this node right now**.
+
+Many addresses at once means the key went to other people.
+
+The section is optional and off by default. The panel is only a lookup: if it is
+unreachable, rate limiting and the watchdog carry on as if nothing happened.
+
+### Why the device limit does not catch this
+
+Remnawave's HWID limit restricts **fetching the subscription**, not connecting.
+The client sends an `x-hwid` header when it downloads the link, and the panel
+returns 404 for an extra device. But once someone holds a `vless://…` string,
+HWID is out of the picture — at connection time the node only sees a UUID.
+
+That is how a five-device limit happily coexists with hundreds of addresses: it
+is enough to share the raw config instead of the subscription link.
+
+### What counts as sharing
+
+Simultaneity, not a total over a period. A person with a phone racks up dozens
+of addresses a day, but only one is alive at any moment. Shape counts only the
+addresses the panel saw within the last `window_min` minutes.
+
+Default: **20 addresses within a 10-minute window**.
+
+### The token: grant the minimum
+
+The key will sit on every node, so it does not need full access. When creating
+the token in the panel, these scopes are enough:
+
+```
+connections:by-node
+connections:by-node-result
+connections:drop          ← only if you enable dropping
+```
+
+Leaking such a token grants neither access to users nor the ability to change
+anything — at most, a look at the addresses on one node.
+
+The lifetime is chosen at creation. Shape reads it from the token itself and
+warns in Telegram a week before it expires.
+
+### Setting it up
+
+Menu: **Service → 🛰 Remnawave panel**. Or from the command line:
+
+```bash
+shaperctl.py panel set --url https://panel.example.com \
+                       --token TOKEN \
+                       --node-uuid UUID-OF-THIS-NODE
+shaperctl.py panel test        # check the link, change nothing
+shaperctl.py panel set --enable
+```
+
+Take the UUID from the panel: **Nodes → the server you need**. That is a node,
+not a host: hosts are the entry points shown in subscriptions, they have their
+own UUIDs, and those will not work here.
+
+### What to do with an offender
+
+| Action | Effect |
+| --- | --- |
+| `notify` | a Telegram card: who, how many addresses, examples |
+| `limit` | a local penalty on the addresses this node can see itself |
+| `drop` | drop connections through the panel — by address, on this node only |
+
+Combine them with commas:
+
+```bash
+shaperctl.py panel set --action-set notify,limit --mbps 1 --minutes 60
+```
+
+Only `notify` is on by default.
+
+> **Dropping is not a punishment.** The client reconnects a second later. As a
+> "we see you" signal it works; as a measure it does not. `limit` is what bites:
+> it holds for the configured minutes.
+
+Limiting touches only addresses present in the node's own map. The whitelist and
+existing penalties are left alone.
+
+### Exceptions
+
+Who is allowed to share — family, colleagues:
+
+```bash
+shaperctl.py panel set --exempt 97,346
+```
+
+### All settings
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | whether to poll the panel |
+| `url` | — | panel address, without `/api` |
+| `token` | — | token with the `connections` scopes |
+| `node_uuid` | — | UUID of this node in the panel |
+| `interval` | `300` | how often to ask, seconds |
+| `window_min` | `10` | simultaneity window, minutes |
+| `ip_threshold` | `20` | addresses above which it is sharing |
+| `action` | `notify` | `notify`, `limit`, `drop`, or a combination |
+| `limit_mbps` | `1` | megabits to throttle down to |
+| `limit_min` | `60` | for how many minutes |
+| `cooldown_min` | `360` | pause between alerts about one person |
+| `exempt` | `[]` | who is allowed to share |
+| `proxy` | — | http proxy to the panel; socks5 is not supported |
+
+The threshold never drops below two addresses, whatever the settings say: one
+would mean "throttle everyone who connected".
+
+### When something goes wrong
+
+```bash
+shaperctl.py panel show        # state, token expiry, last error
+shaperctl.py panel scan --dry-run   # show findings, change nothing
+```
+
+The link is visible separately in the metrics:
+
+```
+shape_panel_up                      1 if the last poll succeeded
+shape_panel_last_success_seconds    time since the last success
+shape_panel_token_expires_seconds   time left on the token
+shape_panel_sharing_found           offenders on the last poll
+```
+
+`shape_panel_up` is separate on purpose: without it, a silent panel looks exactly
+like a panel where nobody is cheating.
+
 ## Monitoring
 
 Prometheus metrics come out **two ways**, and the API is not required for
@@ -999,6 +1139,7 @@ So every node carries a permanent identifier:
 
 ```
 /var/lib/shape/node_id      16 hex characters, created once
+/var/lib/shape/panel.state  cooldowns and the last panel poll error
 ```
 
 It survives a Shape upgrade, a move to another server and a hostname change.

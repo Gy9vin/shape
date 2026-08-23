@@ -7,6 +7,8 @@ shaperctl — управление eBPF-шейпером через pinned BPF-�
 """
 
 import argparse
+import base64
+import calendar
 import contextlib
 import fcntl
 import hashlib
@@ -184,6 +186,68 @@ MSG = {
         "tg_need_proxy": "похоже на блокировку — задай прокси",
         "tg_sent": "сообщение отправлено",
         "tg_test_text": "Проверка связи прошла успешно.",
+
+        # Панель Remnawave
+        "pn_no_url": "адрес панели не задан",
+        "pn_no_token": "токен панели не задан",
+        "pn_no_uuid": "не указан UUID ноды в панели",
+        "pn_no_job": "панель не вернула идентификатор задачи",
+        "pn_job_failed": "панель сообщила об ошибке задачи {job}",
+        "pn_job_slow": "панель не успела подготовить результат задачи {job}",
+        "pn_denied": "панель отказала в доступе: {detail}",
+        "pn_bad_json": "панель ответила не в формате JSON",
+        "pn_socks": "для панели поддержан только http-прокси, socks5 — нет",
+        "pn_state": "Связь с панелью",
+        "pn_url": "Адрес",
+        "pn_uuid": "UUID ноды",
+        "pn_win": "Окно",
+        "pn_thr": "Порог адресов",
+        "pn_act": "Действие",
+        "pn_cool": "Пауза между сигналами",
+        "pn_exempt": "Исключения",
+        "pn_every": "Опрос",
+        "pn_token_exp": "Токен действует до",
+        "pn_token_none": "срок не определяется",
+        "pn_token_gone": "истёк",
+        "pn_last": "Последний успешный опрос",
+        "pn_never": "ещё не было",
+        "pn_last_err": "Последняя ошибка",
+        "pn_min": "мин",
+        "pn_sec": "с",
+        "pn_scanning": "Спрашиваю панель…",
+        "pn_scan_ok": "Пользователей на ноде: {n}",
+        "pn_scan_none": "Раздачи не обнаружено.",
+        "pn_scan_found": "Найдено раздающих: {n}",
+        "pn_scan_row": "  {user} — адресов {n}, из них видит нода {here}",
+        "pn_dry": "Ничего не предпринято: это пробный запуск.",
+        "pn_msg_head": "🔎 <b>Похоже на раздачу подписки</b> · {node}",
+        "pn_msg_user": "Пользователь: <code>{user}</code>",
+        "pn_msg_ips": "Адресов одновременно: <b>{n}</b> за последние {w} мин",
+        "pn_msg_sample": "Например: {ips}",
+        "pn_msg_limited": "Ограничено адресов: {n} — до {mbps} Мбит/с на {m} мин",
+        "pn_msg_dropped": "Соединения оборваны: {n}",
+        "pn_token_soon": "⏳ {node}: токен панели истекает через {days} дн. "
+                         "После этого поиск раздачи остановится.",
+        "pn_denied_msg": "⚠️ {node}: панель отказала в доступе — поиск "
+                         "раздачи остановлен.\n{detail}",
+        "h_panel": "связь с панелью Remnawave: поиск раздачи подписки",
+        "h_pn_url": "адрес панели, например https://panel.example.com",
+        "h_pn_token": "токен панели с правами connections",
+        "h_pn_uuid": "UUID этой ноды в панели",
+        "h_pn_on": "включить опрос панели",
+        "h_pn_off": "выключить опрос панели",
+        "h_pn_interval": "как часто спрашивать панель, в секундах",
+        "h_pn_window": "окно одновременности в минутах",
+        "h_pn_threshold": "сколько адресов считать раздачей",
+        "h_pn_action": "notify, limit, drop или их сочетание через запятую",
+        "h_pn_mbps": "до скольких мегабит резать нарушителя",
+        "h_pn_minutes": "на сколько минут резать",
+        "h_pn_cooldown": "пауза между сигналами по одному человеку, в минутах",
+        "h_pn_exempt": "кому раздавать можно: userId через запятую",
+        "h_pn_proxy": "http-прокси до панели",
+        "h_pn_dry": "только показать найденное, ничего не делать",
+        "pn_bad_action": "действие — это notify, limit, drop или их сочетание",
+        "pn_bad_url": "адрес панели должен начинаться с http:// или https://",
         "tg_limited": "Ограничен",
         "tg_shared": "за адресом может стоять несколько человек",
         "bad_ip": "«{ip}» — это не IP-адрес",
@@ -413,6 +477,68 @@ MSG = {
         "tg_need_proxy": "looks like blocking — set a proxy",
         "tg_sent": "message sent",
         "tg_test_text": "Connection test passed.",
+
+        # Remnawave panel
+        "pn_no_url": "the panel address is not set",
+        "pn_no_token": "the panel token is not set",
+        "pn_no_uuid": "the node UUID in the panel is not set",
+        "pn_no_job": "the panel returned no job id",
+        "pn_job_failed": "the panel reported job {job} as failed",
+        "pn_job_slow": "the panel did not finish job {job} in time",
+        "pn_denied": "the panel denied access: {detail}",
+        "pn_bad_json": "the panel replied with something that is not JSON",
+        "pn_socks": "only an http proxy is supported for the panel, not socks5",
+        "pn_state": "Panel link",
+        "pn_url": "Address",
+        "pn_uuid": "Node UUID",
+        "pn_win": "Window",
+        "pn_thr": "Address threshold",
+        "pn_act": "Action",
+        "pn_cool": "Pause between alerts",
+        "pn_exempt": "Exceptions",
+        "pn_every": "Polling",
+        "pn_token_exp": "Token valid until",
+        "pn_token_none": "expiry unknown",
+        "pn_token_gone": "expired",
+        "pn_last": "Last successful poll",
+        "pn_never": "never",
+        "pn_last_err": "Last error",
+        "pn_min": "min",
+        "pn_sec": "s",
+        "pn_scanning": "Asking the panel…",
+        "pn_scan_ok": "Users on this node: {n}",
+        "pn_scan_none": "No sharing found.",
+        "pn_scan_found": "Sharing found: {n}",
+        "pn_scan_row": "  {user} — {n} addresses, {here} of them seen by this node",
+        "pn_dry": "Nothing was done: this was a dry run.",
+        "pn_msg_head": "🔎 <b>Looks like a shared subscription</b> · {node}",
+        "pn_msg_user": "User: <code>{user}</code>",
+        "pn_msg_ips": "Simultaneous addresses: <b>{n}</b> over the last {w} min",
+        "pn_msg_sample": "For example: {ips}",
+        "pn_msg_limited": "Addresses limited: {n} — to {mbps} Mbit/s for {m} min",
+        "pn_msg_dropped": "Connections dropped: {n}",
+        "pn_token_soon": "⏳ {node}: the panel token expires in {days} day(s). "
+                         "After that the sharing search will stop.",
+        "pn_denied_msg": "⚠️ {node}: the panel denied access — the sharing "
+                         "search has stopped.\n{detail}",
+        "h_panel": "Remnawave panel link: find shared subscriptions",
+        "h_pn_url": "panel address, e.g. https://panel.example.com",
+        "h_pn_token": "panel token with the connections scopes",
+        "h_pn_uuid": "UUID of this node in the panel",
+        "h_pn_on": "enable panel polling",
+        "h_pn_off": "disable panel polling",
+        "h_pn_interval": "how often to ask the panel, in seconds",
+        "h_pn_window": "simultaneity window, in minutes",
+        "h_pn_threshold": "how many addresses count as sharing",
+        "h_pn_action": "notify, limit, drop, or a comma-separated combination",
+        "h_pn_mbps": "megabits to throttle an offender down to",
+        "h_pn_minutes": "for how many minutes to throttle",
+        "h_pn_cooldown": "pause between alerts about one person, in minutes",
+        "h_pn_exempt": "who is allowed to share: comma-separated userIds",
+        "h_pn_proxy": "http proxy to reach the panel",
+        "h_pn_dry": "only show what was found, change nothing",
+        "pn_bad_action": "action is notify, limit, drop, or a combination",
+        "pn_bad_url": "the panel address must start with http:// or https://",
         "tg_limited": "Limited",
         "tg_shared": "this address may be shared by several people",
         "bad_ip": "«{ip}» is not an IP address",
@@ -801,6 +927,37 @@ TG_DEFAULT = {
 }
 
 
+# Связь с панелью Remnawave. Нужна ровно для одного: нода видит адреса, но не
+# знает, кому они принадлежат. Панель знает. Из этого получается поиск тех, кто
+# раздал свою подписку: у обычного человека на одной ноде живёт один-два адреса
+# одновременно, у перепродавца — десятки.
+#
+# Раздел необязательный и по умолчанию выключен. Панель недоступна, токен
+# протух, версия API другая — Shape продолжает работать ровно как раньше.
+# Ограничение скорости и сторож от панели не зависят и зависеть не должны:
+# нода обязана оставаться самостоятельной.
+PANEL_DEFAULT = {
+    "enabled": False,
+    "url": "",            # https://panel.example.com, без /api
+    "token": "",          # токен панели; нужны права connections
+    "node_uuid": "",      # какая нода в панели соответствует этой машине
+    "proxy": "",          # http(s)-прокси; socks5 здесь не поддержан
+
+    "interval": 300,      # как часто спрашивать панель, секунды
+    "window_min": 10,     # окно «одновременности» по lastSeen, минуты
+    "ip_threshold": 20,   # адресов в окне, выше которых считаем раздачей
+
+    # notify | limit | drop — и любые сочетания через запятую.
+    # По умолчанию только уведомление: резать чужих клиентов без ведома
+    # владельца ноды нельзя, это должно включаться руками.
+    "action": "notify",
+    "limit_mbps": 1,
+    "limit_min": 60,
+    "cooldown_min": 360,  # не долбить одним и тем же нарушителем
+    "exempt": [],         # userId, которым делиться разрешено (семья и т.п.)
+}
+
+
 def load_config():
     try:
         with open(CONFIG_FILE) as f:
@@ -811,9 +968,16 @@ def load_config():
     guard.update(cfg.get("guard", {}))
     tg = dict(TG_DEFAULT)
     tg.update(cfg.get("telegram", {}))
+    panel = dict(PANEL_DEFAULT)
+    panel.update(cfg.get("panel", {}))
+    # exempt приходит из файла и правится руками — приведём к списку строк,
+    # чтобы сравнение с userId из панели не зависело от того, записали там
+    # число или строку.
+    panel["exempt"] = [str(x).strip() for x in (panel.get("exempt") or [])
+                       if str(x).strip()]
     return {"ports": cfg.get("ports", [443]),
             "speed_mbps": float(cfg.get("speed_mbps", 0)),
-            "guard": guard, "telegram": tg}
+            "guard": guard, "telegram": tg, "panel": panel}
 
 
 def save_config(cfg):
@@ -1333,6 +1497,7 @@ EVENT_TYPES = {
     "engine_started",    # движок загрузил eBPF
     "engine_stopped",    # движок выгружен
     "api_action",        # действие через API
+    "sharing_found",     # панель показала раздачу подписки
     "error",             # ошибка
 }
 EVENT_MAX_BYTES = 4 * 1024 * 1024      # больше — половина уезжает в .1
@@ -1875,6 +2040,10 @@ def cmd_watch(a):
                 today = day_now
             digest_due(cfg)
             backup_due(cfg)
+            # Опрос панели. Внутри свой дедлайн и своя пауза после ошибки:
+            # недоступная панель не должна ни ронять сторож, ни задерживать
+            # выдачу штрафов дольше одного пропущенного прохода.
+            panel_due(cfg)
 
             # Персональные скорости живут в ядре с далёким, но конечным
             # сроком. Продлеваем раз в час, чтобы они не истекли молча.
@@ -2415,6 +2584,565 @@ def backup_due(cfg, now=None):
     return ok
 
 
+# ─────────────────────── связь с панелью Remnawave ───────────────────────
+#
+# Зачем это здесь. Нода видит адреса, но не знает, кому они принадлежат.
+# Панель знает. Пересечение двух знаний даёт то, чего нельзя получить ни там,
+# ни там по отдельности: сколько адресов одного пользователя живёт на этой
+# ноде прямо сейчас. Десятки одновременных адресов у одной подписки — это не
+# человек с телефоном, это раздача ключа на сторону.
+#
+# Запрос двухшаговый, и это не наша прихоть — так устроен API панели:
+#   POST /api/connections/by-node/{nodeUuid} → {"response": {"jobId": "43"}}
+#   GET  /api/connections/by-node/{jobId}    → {"response": {isCompleted, result}}
+# Панель опрашивает ноду в фоне, поэтому результат приходит не сразу. Ответы
+# завёрнуты в "response" — в опубликованном SDK этой обёртки нет, проверено на
+# живой панели 3.2.3. userId там число, а не строка, вопреки тому же SDK.
+#
+# Ключевое поле — lastSeen у каждого адреса. Именно оно отличает раздачу от
+# честного мобильного интернета: у человека с телефоном за сутки набегают
+# десятки адресов, но одновременно живёт один. Поэтому считаем не все адреса,
+# а только те, что видели за последние window_min минут.
+#
+# Раздел необязательный. Панель недоступна, токен протух, версия API другая —
+# сторож и ограничение скорости продолжают работать как ни в чём не бывало.
+# Это главное свойство: нода не должна зависеть от внешней службы.
+
+PANEL_STATE = os.path.join(VAR_DIR, "panel.state")
+PANEL_RETRY = 900           # пауза после ошибки, чтобы не долбить панель
+PANEL_JOB_DEADLINE = 20.0   # сколько всего ждём готовности задачи, секунд
+PANEL_JOB_POLL = 1.0        # пауза между опросами задачи
+PANEL_HTTP_TIMEOUT = 10     # на один запрос, секунд
+PANEL_ACTIONS = ("notify", "limit", "drop")
+PANEL_TOKEN_WARN = 7 * 86400    # предупредить за неделю до истечения токена
+PANEL_MIN_THRESHOLD = 2     # ниже этого порог не опускаем ни при каких настройках
+
+
+class PanelError(Exception):
+    """Ошибка обращения к панели. code — HTTP-код, если он был."""
+
+    def __init__(self, msg, code=0):
+        super().__init__(msg)
+        self.code = code
+
+
+def panel_actions(p):
+    """
+    Разбирает поле action в набор.
+
+    Строкой, а не тремя флагами, потому что сочетания осмысленны: обрыв без
+    уведомления оставит владельца в неведении, а ограничение без обрыва —
+    самый частый рабочий вариант. Неизвестные слова молча отбрасываем: чужая
+    опечатка в конфиге не повод останавливать сторож.
+    """
+    raw = str(p.get("action") or "").replace(";", ",").split(",")
+    return {w.strip().lower() for w in raw if w.strip().lower() in PANEL_ACTIONS}
+
+
+def token_expiry(token):
+    """
+    Когда истекает токен панели — из него самого, без обращения к панели.
+
+    Токен это JWT: три части через точку, средняя — base64url с полем exp.
+    Подпись не проверяем и проверять не должны: это не наш секрет, нам нужна
+    только дата, чтобы предупредить владельца заранее. Не разобралось — 0, и
+    предупреждение просто не показывается.
+    """
+    try:
+        payload = str(token).split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return float(json.loads(base64.urlsafe_b64decode(payload)).get("exp") or 0)
+    except Exception:
+        return 0.0
+
+
+def panel_ts(value):
+    """
+    lastSeen вида 2026-08-23T12:53:10.000Z в секунды UTC.
+
+    Разбираем вручную: datetime.fromisoformat научился понимать «Z» только в
+    Python 3.11, а ноды бывают и на старых системах. Не разобралось — 0, такой
+    адрес в окно «сейчас» не попадёт. Это правильная сторона ошибки: лучше не
+    заметить нарушителя, чем наказать невиновного.
+    """
+    s = str(value or "").strip()
+    if s.endswith("Z"):
+        s = s[:-1]
+    s = s.split(".")[0].split("+")[0]
+    try:
+        return float(calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%S")))
+    except Exception:
+        return 0.0
+
+
+def panel_unwrap(payload):
+    """Панель заворачивает полезное в response. Обёртки нет — берём как есть."""
+    if isinstance(payload, dict) and isinstance(payload.get("response"), dict):
+        return payload["response"]
+    return payload if isinstance(payload, dict) else {}
+
+
+def panel_scrub(text, p=None):
+    """Убирает токен панели из текста ошибки — журнал читают не только свои."""
+    s = str(text)
+    token = str((p or {}).get("token") or "")
+    if len(token) > 8:
+        s = s.replace(token, "***")
+    return s
+
+
+def panel_call(p, method, path, body=None):
+    """
+    Один запрос к панели. Возвращает распакованный ответ словарём.
+
+    Прокси поддержан только http(s). Для Telegram socks5 реализован вручную,
+    но там один известный адрес и один метод; городить то же самое ради панели
+    незачем — панель это машина того же владельца, до неё нода ходит напрямую.
+    Если socks5 всё-таки указан, честно говорим об этом, а не молча ходим мимо
+    прокси.
+    """
+    base = str(p.get("url") or "").strip().rstrip("/")
+    if not base:
+        raise PanelError(t("pn_no_url"))
+    if not base.startswith(("http://", "https://")):
+        base = "https://" + base
+    token = str(p.get("token") or "").strip()
+    if not token:
+        raise PanelError(t("pn_no_token"))
+
+    proxy = str(p.get("proxy") or "").strip()
+    if proxy.startswith(("socks5://", "socks5h://")):
+        raise PanelError(t("pn_socks"))
+
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + token)
+    req.add_header("Accept", "application/json")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+
+    # Пустой ProxyHandler отключает подхват http_proxy из окружения: прокси у
+    # Shape свой, в настройках, и брать его откуда-то ещё он не должен.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler(
+        {"http": proxy, "https": proxy} if proxy else {}))
+    try:
+        with opener.open(req, timeout=PANEL_HTTP_TIMEOUT) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        # Тело ошибки читается ровно один раз: поток одноразовый, и повторный
+        # read() вернул бы пустоту, из-за чего пояснение панели потерялось бы.
+        detail = ""
+        try:
+            body = json.loads(e.read() or b"{}")
+            detail = str(panel_unwrap(body).get("message")
+                         or (body.get("message") if isinstance(body, dict) else "")
+                         or "")
+        except Exception:
+            detail = ""
+        if e.code in (401, 403):
+            raise PanelError(t("pn_denied", detail=detail or e.reason), e.code)
+        raise PanelError(panel_scrub(f"HTTP {e.code}: {detail or e.reason}", p), e.code)
+    except Exception as e:
+        raise PanelError(panel_scrub(e, p))
+
+    try:
+        return panel_unwrap(json.loads(raw.decode() or "{}"))
+    except ValueError:
+        raise PanelError(t("pn_bad_json"))
+
+
+def panel_fetch(p):
+    """
+    Полный цикл: запустить задачу и дождаться результата.
+
+    Возвращает [{"user_id": строка, "ips": [(адрес, когда видели)]}].
+
+    Дедлайн общий и жёсткий. Нас зовут из цикла сторожа, и повиснуть там
+    нельзя: пока мы ждём панель, ограничения не выдаются. Лучше пропустить
+    один проход, чем задержать штраф.
+    """
+    uuid = str(p.get("node_uuid") or "").strip()
+    if not uuid:
+        raise PanelError(t("pn_no_uuid"))
+
+    started = panel_call(p, "POST", "/api/connections/by-node/" + uuid)
+    job = str(started.get("jobId") or "").strip()
+    if not job:
+        raise PanelError(t("pn_no_job"))
+
+    deadline = time.monotonic() + PANEL_JOB_DEADLINE
+    while True:
+        got = panel_call(p, "GET", "/api/connections/by-node/" + job)
+        if got.get("isFailed"):
+            raise PanelError(t("pn_job_failed", job=job))
+        if got.get("isCompleted"):
+            break
+        if time.monotonic() >= deadline:
+            raise PanelError(t("pn_job_slow", job=job))
+        time.sleep(PANEL_JOB_POLL)
+
+    out = []
+    for u in ((got.get("result") or {}).get("users") or []):
+        ips = [(str(e.get("ip") or ""), panel_ts(e.get("lastSeen")))
+               for e in (u.get("ips") or []) if e.get("ip")]
+        out.append({"user_id": str(u.get("userId")), "ips": ips})
+    return out
+
+
+def panel_offenders(users, p, now=None):
+    """
+    Кто раздал подписку: считаем адреса, живые в окне window_min.
+
+    Порог ниже PANEL_MIN_THRESHOLD не опускаем ни при каких настройках. Ноль
+    или единица в конфиге означали бы «ограничить вообще всех», и человек,
+    который просто не разобрался в настройке, положил бы себе ноду.
+    """
+    now = now if now is not None else time.time()
+    window = max(1, int(p.get("window_min") or 10)) * 60
+    threshold = max(PANEL_MIN_THRESHOLD, int(p.get("ip_threshold") or 20))
+    exempt = {str(x) for x in (p.get("exempt") or [])}
+
+    out = []
+    for u in users:
+        if u["user_id"] in exempt:
+            continue
+        fresh = sorted({ip for ip, ts in u["ips"] if ts and now - ts <= window})
+        if len(fresh) >= threshold:
+            out.append({"user_id": u["user_id"], "ips": fresh,
+                        "count": len(fresh), "total": len(u["ips"])})
+    out.sort(key=lambda r: -r["count"])
+    return out
+
+
+def panel_state():
+    try:
+        with open(PANEL_STATE) as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
+    except Exception:
+        return {}
+
+
+def panel_state_save(state):
+    try:
+        os.makedirs(VAR_DIR, exist_ok=True)
+        tmp = PANEL_STATE + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, PANEL_STATE)
+    except OSError:
+        pass
+
+
+def panel_drop(p, ips):
+    """
+    Обрыв соединений — точечно: только эти адреса и только на этой ноде.
+
+    По адресам, а не по userIds: адреса у нас точные, а обрыв по пользователю
+    выкинул бы его и с тех нод, где он ничего не нарушал. targetNodes тоже
+    сужаем до своей ноды по той же причине.
+    """
+    ips = list(ips)
+    if not ips:
+        return
+    panel_call(p, "POST", "/api/connections/drop", {
+        "dropBy": {"by": "ipAddresses", "ipAddresses": ips},
+        "targetNodes": {"target": "specificNodes",
+                        "nodeUuids": [str(p.get("node_uuid") or "").strip()]}})
+
+
+def panel_limit(p, ips):
+    """
+    Локальный штраф на адреса нарушителя. Возвращает те, что реально урезаны.
+
+    Режем только то, что нода видит сама: панель отдаёт и адреса, которые уже
+    отвалились, а карта ядра — то, что есть сейчас. Белый список и уже
+    выданные ограничения не трогаем: решение по ним принято раньше и, вполне
+    возможно, человеком.
+    """
+    wl = whitelist_ips()
+    known = set(read_users())
+    pens = load_penalties()
+    mbps = float(p.get("limit_mbps") or 1)
+    minutes = max(1, int(p.get("limit_min") or 60))
+    until = time.time() + minutes * 60
+
+    done = []
+    for ip in ips:
+        if ip in wl or ip in pens or ip not in known:
+            continue
+        try:
+            penalty_apply(ip, mbps, until)
+        except Exception:
+            continue
+        entry = {"until": until, "mbps": mbps, "since": time.time(),
+                 "source": "panel", "kind": "auto", "reason": "sharing"}
+        penalties_update(lambda pp, i=ip, e=entry: pp.__setitem__(i, e))
+        log_event("limit_applied", ip=ip, source="panel", mbps=mbps,
+                  minutes=minutes, reason="sharing")
+        done.append(ip)
+    return done
+
+
+def panel_notify(cfg, rec):
+    """Карточка нарушителя в Telegram."""
+    p, tg = cfg["panel"], cfg["telegram"]
+    lines = [t("pn_msg_head", node=node_label(tg)),
+             t("pn_msg_user", user=html.escape(rec["user_id"])),
+             t("pn_msg_ips", n=rec["count"],
+               w=max(1, int(p.get("window_min") or 10)))]
+    sample = ", ".join(html.escape(x) for x in rec["ips"][:5])
+    if sample:
+        lines.append(t("pn_msg_sample", ips=sample))
+    if rec.get("limited"):
+        lines.append(t("pn_msg_limited", n=len(rec["limited"]),
+                       mbps=p.get("limit_mbps", 1),
+                       m=max(1, int(p.get("limit_min") or 60))))
+    if rec.get("dropped"):
+        lines.append(t("pn_msg_dropped", n=len(rec["dropped"])))
+    tg_send("\n".join(lines), cfg)
+
+
+def panel_warn_token(cfg, detail):
+    """Панель отказала в доступе — сказать об этом один раз, а не каждый цикл."""
+    state = panel_state()
+    if state.get("denied_warned"):
+        return
+    state["denied_warned"] = True
+    panel_state_save(state)
+    tg_send(t("pn_denied_msg", node=node_label(cfg["telegram"]),
+              detail=html.escape(str(detail)[:200])), cfg)
+
+
+def panel_token_check(cfg, now=None):
+    """
+    Предупреждение об истечении токена — один раз на токен.
+
+    Считается из самого токена, запрос к панели не нужен. Смысл простой: без
+    этого функция однажды замолчала бы разом на всех нодах, и владелец узнал
+    бы об этом только по тому, что нарушители перестали находиться.
+    """
+    p = cfg["panel"]
+    if not p.get("enabled"):
+        return False
+    exp = token_expiry(p.get("token"))
+    if not exp:
+        return False
+    now = now if now is not None else time.time()
+    if exp - now > PANEL_TOKEN_WARN:
+        return False
+    state = panel_state()
+    if state.get("token_warned") == int(exp):
+        return False
+    state["token_warned"] = int(exp)
+    panel_state_save(state)
+    # Округляем вверх: до истечения двое с половиной суток — это «через 3 дня»,
+    # а не «через 2». Занижать срок в предупреждении незачем.
+    tg_send(t("pn_token_soon", node=node_label(cfg["telegram"]),
+              days=max(0, int((exp - now + 86399) // 86400))), cfg)
+    return True
+
+
+def panel_scan(cfg, now=None, act=True):
+    """
+    Один проход: спросить панель, найти нарушителей, выполнить действия.
+
+    Исключений наружу не выпускает. Нас зовут из цикла сторожа, и недоступная
+    панель не должна останавливать всё остальное — возвращаем сводку с
+    пометкой об ошибке, а решение, что с ней делать, принимает вызывающий.
+    """
+    p = cfg["panel"]
+    now = now if now is not None else time.time()
+    try:
+        users = panel_fetch(p)
+    except PanelError as e:
+        return {"ok": False, "error": str(e), "code": e.code,
+                "users": 0, "offenders": []}
+
+    found = panel_offenders(users, p, now)
+    res = {"ok": True, "error": "", "code": 0,
+           "users": len(users), "offenders": found}
+    if not act:
+        return res
+
+    actions = panel_actions(p)
+    state = panel_state()
+    seen = state.get("seen") or {}
+    cooldown = max(0, int(p.get("cooldown_min") or 0)) * 60
+
+    for rec in found:
+        rec.setdefault("limited", [])
+        rec.setdefault("dropped", [])
+        # Кулдаун: один и тот же перепродавец не должен приходить в Telegram
+        # каждые пять минут — иначе уведомления перестают читать.
+        if now - float(seen.get(rec["user_id"]) or 0) < cooldown:
+            rec["skipped"] = True
+            continue
+        seen[rec["user_id"]] = now
+
+        if "limit" in actions:
+            rec["limited"] = panel_limit(p, rec["ips"])
+        if "drop" in actions:
+            try:
+                panel_drop(p, rec["ips"])
+                rec["dropped"] = list(rec["ips"])
+            except PanelError as e:
+                print(f"panel drop: {e}", flush=True)
+        log_event("sharing_found", source="panel", user_id=rec["user_id"],
+                  ips=rec["count"], limited=len(rec["limited"]),
+                  dropped=len(rec["dropped"]))
+        if "notify" in actions:
+            panel_notify(cfg, rec)
+
+    # Файл не должен расти вечно: забываем тех, кого давно не видели.
+    keep = max(cooldown, 86400) * 2
+    state["seen"] = {k: v for k, v in seen.items()
+                     if now - float(v or 0) < keep}
+    state["last_ok"] = now
+    state["last_error"] = ""
+    state.pop("retry_at", None)
+    state.pop("denied_warned", None)
+    panel_state_save(state)
+    return res
+
+
+def panel_due(cfg, now=None):
+    """
+    Раз в цикл сторожа: не пора ли спросить панель.
+
+    Отметку о запуске ставим до самого запроса. Если панель отвечает медленно
+    или нода перезапустилась в неудачный момент, это не должно превратиться в
+    поток запросов — лучше пропустить проход.
+    """
+    p = cfg["panel"]
+    if not p.get("enabled"):
+        return False
+    now = now if now is not None else time.time()
+
+    state = panel_state()
+    if now < float(state.get("retry_at") or 0):
+        return False
+    if now - float(state.get("last_run") or 0) < max(60, int(p.get("interval") or 300)):
+        return False
+    state["last_run"] = now
+    panel_state_save(state)
+
+    panel_token_check(cfg, now)
+    res = panel_scan(cfg, now)
+    if not res["ok"]:
+        print(f"panel: {res['error']}", flush=True)
+        state = panel_state()
+        state["last_error"] = res["error"]
+        state["retry_at"] = now + PANEL_RETRY
+        panel_state_save(state)
+        if res.get("code") in (401, 403):
+            panel_warn_token(cfg, res["error"])
+    return res["ok"]
+
+
+def cmd_panel(a):
+    cfg = load_config()
+    p = cfg["panel"]
+
+    if a.action == "show":
+        exp = token_expiry(p.get("token"))
+        if not p.get("token"):
+            when = "—"
+        elif not exp:
+            when = t("pn_token_none")
+        elif exp <= time.time():
+            when = f"{C['red']}{t('pn_token_gone')}{C['r']}"
+        else:
+            when = time.strftime("%Y-%m-%d", time.localtime(exp))
+        st = panel_state()
+        last = float(st.get("last_ok") or 0)
+        print()
+        print(f"  {t('pn_state')}  : " + (f"{C['grn']}{t('guard_on')}{C['r']}"
+              if p["enabled"] else f"{C['gry']}{t('guard_off')}{C['r']}"))
+        print(f"  {t('pn_url')}   : {p['url'] or '—'}")
+        print(f"  {t('pn_uuid')}  : {p['node_uuid'] or '—'}")
+        print(f"  {t('pn_token_exp')} : {when}")
+        print(f"  {t('pn_every')}  : {p['interval']} {t('pn_sec')}")
+        print(f"  {t('pn_thr')}    : {p['ip_threshold']} / {p['window_min']} {t('pn_min')}")
+        print(f"  {t('pn_act')}    : {p['action']}")
+        print(f"  {t('pn_cool')}   : {p['cooldown_min']} {t('pn_min')}")
+        if p.get("exempt"):
+            print(f"  {t('pn_exempt')} : {', '.join(p['exempt'])}")
+        print(f"  {t('pn_last')} : " + (time.strftime("%Y-%m-%d %H:%M",
+              time.localtime(last)) if last else t("pn_never")))
+        if st.get("last_error"):
+            print(f"  {t('pn_last_err')} : {C['red']}{st['last_error']}{C['r']}")
+        print()
+        return
+
+    if a.action == "set":
+        if a.url is not None:
+            url = a.url.strip().rstrip("/")
+            if url and not url.startswith(("http://", "https://")):
+                die(t("pn_bad_url"))
+            p["url"] = url
+        if a.token is not None:
+            p["token"] = a.token.strip()
+        if a.node_uuid is not None:
+            p["node_uuid"] = a.node_uuid.strip()
+        if a.proxy is not None:
+            p["proxy"] = a.proxy.strip()
+        if a.interval is not None:
+            p["interval"] = max(60, a.interval)
+        if a.window is not None:
+            p["window_min"] = max(1, a.window)
+        if a.threshold is not None:
+            p["ip_threshold"] = max(PANEL_MIN_THRESHOLD, a.threshold)
+        if a.action_set is not None:
+            want = {w.strip().lower() for w in a.action_set.replace(";", ",").split(",")
+                    if w.strip()}
+            if not want or want - set(PANEL_ACTIONS):
+                die(t("pn_bad_action"))
+            p["action"] = ",".join(x for x in PANEL_ACTIONS if x in want)
+        if a.mbps is not None:
+            p["limit_mbps"] = max(0.1, a.mbps)
+        if a.minutes is not None:
+            p["limit_min"] = max(1, a.minutes)
+        if a.cooldown is not None:
+            p["cooldown_min"] = max(0, a.cooldown)
+        if a.exempt is not None:
+            p["exempt"] = [w.strip() for w in a.exempt.split(",") if w.strip()]
+        if a.enable:
+            p["enabled"] = True
+        if a.disable:
+            p["enabled"] = False
+        save_config({"panel": p})
+        log_event("config_changed", source="cli", section="panel")
+        return cmd_panel(argparse.Namespace(**{**vars(a), "action": "show"}))
+
+    # test и scan отличаются одним: test ничего не меняет и ничего не шлёт,
+    # он нужен, чтобы проверить адрес, токен и UUID до включения.
+    dry = a.dry_run or a.action == "test"
+    if not a.json:
+        print(f"\n  {t('pn_scanning')}", flush=True)
+    res = panel_scan(cfg, act=not dry)
+
+    if a.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res["ok"] else 1
+    if not res["ok"]:
+        die(res["error"])
+
+    known = set(read_users()) if res["offenders"] else set()
+    print(f"  {C['grn']}✓{C['r']} {t('pn_scan_ok', n=res['users'])}")
+    if not res["offenders"]:
+        print(f"  {t('pn_scan_none')}\n")
+        return
+    print(f"  {C['red']}{t('pn_scan_found', n=len(res['offenders']))}{C['r']}")
+    for rec in res["offenders"]:
+        here = len([x for x in rec["ips"] if x in known])
+        print(t("pn_scan_row", user=rec["user_id"], n=rec["count"], here=here))
+    if dry:
+        print(f"  {C['gry']}{t('pn_dry')}{C['r']}")
+    print()
+
+
 def cmd_telegram(a):
     cfg = load_config()
     tg = cfg["telegram"]
@@ -2836,6 +3564,31 @@ def build_metrics(users=None, unit_state=None, started=None, events=None):
                [({"direction": "download"}, hist[-1].get("down", 0)),
                 ({"direction": "upload"}, hist[-1].get("up", 0))])
 
+    # Связь с панелью. Метрики отдаём только когда она включена: на ноде без
+    # панели нули означали бы поломку, а её нет.
+    #
+    # shape_panel_up нужен именно как отдельная метрика: без него молчащая
+    # панель выглядит точно так же, как панель, на которой никто не нарушает.
+    # Отличить «всё тихо» от «мы ослепли» иначе нечем.
+    pan = load_config()["panel"]
+    if pan.get("enabled"):
+        st = panel_state()
+        add("shape_panel_up", "gauge",
+            "1 if the last panel poll succeeded",
+            0 if st.get("last_error") else 1)
+        add("shape_panel_last_success_seconds", "gauge",
+            "Seconds since the last successful panel poll",
+            int(time.time() - float(st.get("last_ok") or 0))
+            if st.get("last_ok") else -1)
+        exp = token_expiry(pan.get("token"))
+        if exp:
+            add("shape_panel_token_expires_seconds", "gauge",
+                "Seconds until the panel token expires",
+                int(exp - time.time()))
+        add("shape_panel_sharing_found", "gauge",
+            "Users flagged as sharing on the last poll",
+            len(st.get("seen") or {}))
+
     return "\n".join(out) + "\n"
 
 
@@ -3056,7 +3809,8 @@ EXPORT_SECTIONS = ("config", "whitelist", "penalties", "owners", "history")
 
 # Поля конфига, в которых лежат секреты: токен даёт полный доступ к боту,
 # а в строке прокси почти всегда есть пароль. По умолчанию не выгружаются.
-SECRET_PATHS = (("telegram", "token"), ("telegram", "proxy"))
+SECRET_PATHS = (("telegram", "token"), ("telegram", "proxy"),
+                ("panel", "token"), ("panel", "proxy"))
 
 
 def _strip_secrets(cfg):
@@ -3572,6 +4326,30 @@ def build_parser():
                     help=t("h_tg_bk_day"))
     tg.add_argument("--quiet", action="store_true")
     tg.set_defaults(func=cmd_telegram)
+
+    pn = sub.add_parser("panel", help=t("h_panel"))
+    pn.add_argument("action", choices=["show", "set", "test", "scan"],
+                    nargs="?", default="show")
+    pn.add_argument("--url", default=None, help=t("h_pn_url"))
+    pn.add_argument("--token", default=None, help=t("h_pn_token"))
+    pn.add_argument("--node-uuid", dest="node_uuid", default=None,
+                    help=t("h_pn_uuid"))
+    pn.add_argument("--proxy", default=None, help=t("h_pn_proxy"))
+    pn.add_argument("--enable", action="store_true", help=t("h_pn_on"))
+    pn.add_argument("--disable", action="store_true", help=t("h_pn_off"))
+    pn.add_argument("--interval", type=int, default=None, help=t("h_pn_interval"))
+    pn.add_argument("--window", type=int, default=None, help=t("h_pn_window"))
+    pn.add_argument("--threshold", type=int, default=None, help=t("h_pn_threshold"))
+    pn.add_argument("--action-set", dest="action_set", default=None,
+                    help=t("h_pn_action"))
+    pn.add_argument("--mbps", type=float, default=None, help=t("h_pn_mbps"))
+    pn.add_argument("--minutes", type=int, default=None, help=t("h_pn_minutes"))
+    pn.add_argument("--cooldown", type=int, default=None, help=t("h_pn_cooldown"))
+    pn.add_argument("--exempt", default=None, help=t("h_pn_exempt"))
+    pn.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help=t("h_pn_dry"))
+    pn.add_argument("--json", action="store_true")
+    pn.set_defaults(func=cmd_panel)
 
     pr = sub.add_parser("personal", help=t("h_personal"))
     pr.add_argument("action", choices=["set", "del", "list"])

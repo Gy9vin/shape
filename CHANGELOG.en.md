@@ -13,6 +13,123 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.14
+
+**Shared-subscription detection: Shape asks the Remnawave panel who owns the
+addresses it sees, and finds the users who gave their key away.**
+
+A node sees addresses but not their owners. The panel knows the owners. Putting
+the two together answers a question neither side can answer alone: how many
+addresses of one user are alive on this node right now.
+
+### Why the device limit does not catch this
+
+Remnawave's HWID limit restricts **fetching the subscription**, not connecting.
+The client sends an `x-hwid` header when it downloads the link, and the panel
+returns 404 for the sixth device. After that the client holds a `vless://…`
+string, and no HWID is involved at connection time — the node only sees a UUID.
+
+Three holes follow, and any one of them explains hundreds of addresses under a
+five-device limit:
+
+* the reseller shares the raw config instead of the subscription link, so the
+  device counter never moves while the key works for everyone;
+* the client does not send the header at all (several apps have it off by
+  default);
+* the limit is disabled for that user individually.
+
+Shape comes at it from the other side: it looks at addresses, not devices.
+
+### What separates sharing from mobile internet
+
+Simultaneity. A person with a phone racks up dozens of addresses a day, but only
+one is alive at any moment. So Shape counts only the addresses the panel saw
+within the last `window_min` minutes — every address in the panel's reply
+carries a `lastSeen` stamp.
+
+Defaults: 20 addresses within a 10-minute window.
+
+### What to do about it
+
+Three actions, combinable with commas:
+
+| Action | Effect |
+| --- | --- |
+| `notify` | a Telegram card: who, how many addresses, examples |
+| `limit`  | a local penalty on the addresses this node can see itself |
+| `drop`   | drop connections through the panel — by address, on this node only |
+
+Only `notify` is on by default. Throttling someone else's customers without the
+node owner's knowledge is not acceptable, so that is switched on by hand.
+
+Dropping without limiting is a signal, not a punishment: the client reconnects a
+second later. `limit` is what bites — it holds for the configured minutes.
+
+### The token needs narrow scopes
+
+A panel key will sit on every node, so it should not carry full access. This is
+enough:
+
+```
+connections:by-node
+connections:by-node-result
+connections:drop          ← only if you enable dropping
+```
+
+Leaking such a token grants neither access to users nor the ability to change
+anything — at most, a look at the addresses on one node.
+
+The token's lifetime is chosen when it is created. Shape reads it from the token
+itself, with no panel request, and warns in Telegram a week before it expires —
+otherwise the feature would fall silent on every node at once, with nothing to
+notice it by.
+
+### The node stays independent
+
+That is the property that matters, and it is covered by tests. Panel
+unreachable, token expired, different API version — the watchdog and the rate
+limiting carry on exactly as before. The poll has its own hard deadline so a slow
+panel cannot delay penalties, and a 15-minute pause after an error so a broken
+panel is not hammered.
+
+### What is new
+
+* a `panel` section in the config; the token and proxy are marked as secrets and
+  stay out of backups;
+* the **Service → 🛰 Remnawave panel** screen;
+* `shaperctl.py panel show|set|test|scan`; `test` and `scan --dry-run` report
+  findings without changing anything;
+* metrics `shape_panel_up`, `shape_panel_last_success_seconds`,
+  `shape_panel_token_expires_seconds`, `shape_panel_sharing_found`;
+* a `sharing_found` event in the log.
+
+`shape_panel_up` is a separate metric on purpose: without it, a silent panel
+looks exactly like a panel where nobody is cheating.
+
+### Details
+
+* `exempt` lists the users who are allowed to share; a `userId` may be written as
+  a number or a string;
+* the threshold never drops below two addresses, whatever the settings say — one
+  would mean "throttle everyone who connected";
+* limiting touches only addresses present in the node's own map; the whitelist
+  and existing penalties are left alone;
+* a 6-hour cooldown per user, so the alerts stay worth reading.
+
+### Upgrading
+
+The `panel` section is added to an existing config disabled, with an empty
+address and token. After the upgrade a node sends nothing anywhere until you turn
+it on yourself.
+
+### Tests
+
+79 new checks against a fake panel that replies exactly like the live 3.2.3 one:
+the two-step job, the `response` wrapper, the numeric `userId`. Plus 5 checks for
+carrying settings over from an older version. 847 in total.
+
+---
+
 ## 3.13
 
 **Large upload packets as a mandatory condition, and packet size in the monitor.**

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.13-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.14-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
@@ -13,7 +13,7 @@
   <b>Русский</b> · <a href="README.en.md">English</a>
 </p>
 
-# Shape v3.13
+# Shape v3.14
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -41,7 +41,7 @@
 ## Установка
 
 ```bash
-apt update && apt install -y git && \
+apt update && apt install -y git && rm -rf /tmp/shape && \
 git clone https://github.com/SkunkBG/shape.git /tmp/shape && \
 bash /tmp/shape/install.sh && shaper
 ```
@@ -491,6 +491,13 @@ shaperctl.py import /root/node.json --only whitelist,owners
 shaperctl.py telegram backup                # отправить копию в Telegram сейчас
 shaperctl.py telegram set --backup on --backup-day 1
 shaperctl.py telegram set --backup-thread 777
+
+shaperctl.py panel show                     # связь с панелью Remnawave
+shaperctl.py panel test                     # проверить связь, ничего не меняя
+shaperctl.py panel scan --dry-run           # поискать раздачу, ничего не делая
+shaperctl.py panel set --url … --token … --node-uuid …
+shaperctl.py panel set --action-set notify,limit --mbps 1 --minutes 60
+shaperctl.py panel set --threshold 20 --window 10 --exempt 97,346
 ```
 
 Формат `status --json`:
@@ -654,6 +661,7 @@ systemd/shaper-watch.service   сторож нарушителей
 /etc/shaper/digest.json    отложенная сводка, ждёт назначенного часа
 /etc/shaper/api.json       настройки и токены API (600)
 /var/lib/shape/node_id     постоянный идентификатор ноды
+/var/lib/shape/panel.state кулдауны и последняя ошибка опроса панели
 /var/lib/shape/events.jsonl журнал событий
 /var/lib/shape/owners.json  кто стоит за адресом
 /var/lib/shape/history.jsonl трафик по суткам
@@ -840,6 +848,139 @@ GET /api/v1/top?limit=20&sort=download
 
 Типы: `limit_applied`, `limit_released`, `limit_expired`, `guard_triggered`,
 `config_changed`, `engine_started`, `engine_stopped`, `api_action`, `error`.
+
+## Поиск раздачи подписки
+
+Нода видит адреса, но не знает, кому они принадлежат. Панель Remnawave знает.
+Связав одно с другим, Shape отвечает на вопрос, недоступный ни ей, ни ему по
+отдельности: **сколько адресов одного пользователя живёт на этой ноде сейчас**.
+
+Много адресов одновременно — значит ключ ушёл на сторону.
+
+Раздел необязательный и по умолчанию выключен. Панель нужна только для
+справки: если она недоступна, ограничение скорости и сторож работают как ни в
+чём не бывало.
+
+### Почему лимит устройств этого не ловит
+
+HWID в Remnawave ограничивает **получение подписки**, а не подключение. Клиент
+шлёт заголовок `x-hwid`, когда скачивает ссылку, и на лишнем устройстве панель
+отдаёт 404. Но как только человек получил строку `vless://…`, HWID больше нигде
+не участвует — нода при подключении видит только UUID.
+
+Поэтому лимит в пять устройств спокойно уживается с сотнями адресов: достаточно
+раздать не ссылку на подписку, а сам конфиг.
+
+### Что считается раздачей
+
+Одновременность, а не общее число за период. У человека с телефоном за сутки
+набегают десятки адресов, но в каждый момент живёт один. Shape считает только
+те адреса, которые панель видела за последние `window_min` минут.
+
+По умолчанию: **20 адресов в окне 10 минут**.
+
+### Токен: давайте минимум
+
+Ключ ляжет на каждую ноду, поэтому полный доступ ему не нужен. При создании
+токена в панели достаточно прав:
+
+```
+connections:by-node
+connections:by-node-result
+connections:drop          ← только если включаете обрыв
+```
+
+Утечка такого токена не даёт ни доступа к пользователям, ни возможности что-то
+изменить — максимум посмотреть адреса на одной ноде.
+
+Срок жизни задаётся при создании. Shape читает его из самого токена и
+предупреждает в Telegram за неделю до истечения.
+
+### Настройка
+
+Меню: **Сервис → 🛰 Панель Remnawave**. Или из командной строки:
+
+```bash
+shaperctl.py panel set --url https://panel.example.com \
+                       --token ТОКЕН \
+                       --node-uuid UUID-ЭТОЙ-НОДЫ
+shaperctl.py panel test        # проверить связь, ничего не меняя
+shaperctl.py panel set --enable
+```
+
+UUID берётся в панели: **Ноды → нужный сервер**. Это именно нода, а не хост:
+хосты — это точки входа в подписке, у них свои UUID, и они здесь не подойдут.
+
+### Что делать с нарушителем
+
+| Действие | Что делает |
+| --- | --- |
+| `notify` | карточка в Telegram: кто, сколько адресов, примеры |
+| `limit` | локальный штраф на те адреса, которые нода видит сама |
+| `drop` | обрыв соединений через панель — точечно, по адресам, только на этой ноде |
+
+Сочетаются через запятую:
+
+```bash
+shaperctl.py panel set --action-set notify,limit --mbps 1 --minutes 60
+```
+
+По умолчанию включено только `notify`.
+
+> **Обрыв — это не наказание.** Клиент переподключается через секунду. Как
+> сигнал «мы тебя видим» работает, как мера — нет. Кусается `limit`: он держится
+> заданные минуты.
+
+Ограничение применяется только к адресам, которые нода видит в своей карте.
+Белый список и уже выданные ограничения не трогаются.
+
+### Исключения
+
+Кому делиться разрешено — семье, коллегам:
+
+```bash
+shaperctl.py panel set --exempt 97,346
+```
+
+### Настройки целиком
+
+| Ключ | По умолчанию | Что значит |
+| --- | --- | --- |
+| `enabled` | `false` | опрашивать ли панель |
+| `url` | — | адрес панели, без `/api` |
+| `token` | — | токен с правами `connections` |
+| `node_uuid` | — | UUID этой ноды в панели |
+| `interval` | `300` | как часто спрашивать, секунды |
+| `window_min` | `10` | окно одновременности, минуты |
+| `ip_threshold` | `20` | адресов, выше которых это раздача |
+| `action` | `notify` | `notify`, `limit`, `drop` или сочетание |
+| `limit_mbps` | `1` | до скольких мегабит резать |
+| `limit_min` | `60` | на сколько минут |
+| `cooldown_min` | `360` | пауза между сигналами по одному человеку |
+| `exempt` | `[]` | кому раздавать можно |
+| `proxy` | — | http-прокси до панели; socks5 не поддержан |
+
+Порог ниже двух адресов не опускается ни при каких настройках: единица означала
+бы «ограничить каждого, кто подключился».
+
+### Если что-то идёт не так
+
+```bash
+shaperctl.py panel show        # состояние, срок токена, последняя ошибка
+shaperctl.py panel scan --dry-run   # показать найденное, ничего не делая
+```
+
+В метриках связь видна отдельно:
+
+```
+shape_panel_up                      1, если последний опрос удался
+shape_panel_last_success_seconds    сколько прошло с последнего успеха
+shape_panel_token_expires_seconds   сколько осталось токену
+shape_panel_sharing_found           сколько нарушителей на последнем опросе
+```
+
+`shape_panel_up` вынесен отдельно намеренно: без него молчащая панель выглядит
+ровно так же, как панель, на которой никто не нарушает.
 
 ## Мониторинг
 

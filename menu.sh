@@ -709,6 +709,128 @@ screen_telegram() {
     done
 }
 
+# ── Панель Remnawave ──────────────────────────────────────────────────
+# Признак включённости нужен на экране «Сервис», где рисуется список: гонять
+# ради одной галочки полный pn_read с разбором токена незачем.
+pn_enabled() {
+    python3 -c "
+import json, sys
+try: d = json.load(open('$ETC_DIR/config.json')).get('panel', {})
+except Exception: d = {}
+sys.exit(0 if d.get('enabled') else 1)" 2>/dev/null
+}
+
+# Читаем одним заходом, как и настройки Telegram: дёргать shaperctl по разу
+# на каждое поле — это девять запусков питона на отрисовку одного экрана.
+pn_read() {
+    python3 - <<PY 2>/dev/null || echo "0|—|—|—|300|10|20|notify|360|—|—"
+import base64, json, os, time
+try:
+    d = json.load(open("$ETC_DIR/config.json")).get("panel", {})
+except Exception:
+    d = {}
+
+
+def exp(tok):
+    """Срок жизни токена — из него самого. Не разобралось, и ладно."""
+    try:
+        p = tok.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        e = float(json.loads(base64.urlsafe_b64decode(p)).get("exp") or 0)
+        return time.strftime("%Y-%m-%d", time.localtime(e)) if e else "?"
+    except Exception:
+        return "?"
+
+
+tok = d.get("token") or ""
+print("|".join([
+    "1" if d.get("enabled") else "0",
+    d.get("url") or "—",
+    (d.get("node_uuid") or "—")[:8],
+    (tok[:6] + "…" + exp(tok)) if tok else "—",
+    str(d.get("interval") or 300),
+    str(d.get("window_min") or 10),
+    str(d.get("ip_threshold") or 20),
+    d.get("action") or "notify",
+    str(d.get("cooldown_min") or 360),
+    ", ".join(str(x) for x in (d.get("exempt") or [])) or "—",
+    "%s/%s" % (d.get("limit_mbps") or 1, d.get("limit_min") or 60),
+]))
+PY
+}
+
+screen_panel() {
+    local on url uuid tok every win thr act cool exempt lim v
+    while :; do
+        IFS='|' read -r on url uuid tok every win thr act cool exempt lim \
+            <<< "$(pn_read)"
+        title "${T[pn_title]}"
+        echo -e "  ${D}${T[pn_h1]}${N}"
+        echo -e "  ${D}${T[pn_h2]}${N}"
+        echo
+        if [[ "$on" == "1" ]]; then
+            echo -e "  ${T[pn_state]} : ${G}${T[g_on]}${N}"
+        else
+            echo -e "  ${T[pn_state]} : ${D}${T[g_off]}${N}"
+        fi
+        echo -e "  ${T[pn_url]} : ${url}"
+        echo -e "  ${T[pn_uuid]} : ${uuid}"
+        echo -e "  ${T[pn_token]} : ${tok}"
+        echo -e "  ${T[pn_thr]} : ${B}${thr}${N} / ${win} ${T[pn_win]}"
+        echo -e "  ${T[pn_act]} : ${B}${act}${N}   ${D}${lim}${N}"
+        [[ "$exempt" != "—" ]] && echo -e "  ${T[pn_exempt]}: ${exempt}"
+        hr
+        echo "  [1] ${T[g_toggle]}"
+        echo "  [2] ${T[pn_set_url]}"
+        echo "  [3] ${T[pn_set_token]}"
+        echo "  [4] ${T[pn_set_uuid]}"
+        echo "  [5] ${T[pn_set_thr]}"
+        echo "  [6] ${T[pn_set_win]}"
+        echo "  [7] ${T[pn_set_act]}"
+        echo "  [8] ${T[pn_set_speed]}"
+        echo "  [9] ${T[pn_set_min]}"
+        echo " [10] ${T[pn_set_cool]}"
+        echo " [11] ${T[pn_set_exempt]}"
+        echo " [12] ${T[pn_test]}"
+        echo " [13] ${T[pn_scan]}"
+        echo "  [0] ← ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}")" in
+            1) if [[ "$on" == "1" ]]; then "$CTL" panel set --disable
+               else "$CTL" panel set --enable; fi >/dev/null ;;
+            2) echo -e "  ${D}${T[pn_hint_url]}${N}"
+               v="$(ask "${T[pn_set_url]}")"
+               [[ -n "$v" ]] && { "$CTL" panel set --url "$v" >/dev/null || pause; } ;;
+            3) echo -e "  ${D}${T[pn_hint_token]}${N}"
+               v="$(ask "${T[pn_set_token]}")"
+               [[ -n "$v" ]] && "$CTL" panel set --token "$v" >/dev/null ;;
+            4) echo -e "  ${D}${T[pn_hint_uuid]}${N}"
+               v="$(ask "${T[pn_set_uuid]}")"
+               [[ -n "$v" ]] && "$CTL" panel set --node-uuid "$v" >/dev/null ;;
+            5) echo -e "  ${D}${T[pn_hint_thr]}${N}"
+               v="$(ask "${T[pn_set_thr]}" "$thr")"
+               [[ -n "$v" ]] && "$CTL" panel set --threshold "$v" >/dev/null ;;
+            6) v="$(ask "${T[pn_set_win]}" "$win")"
+               [[ -n "$v" ]] && "$CTL" panel set --window "$v" >/dev/null ;;
+            7) echo -e "  ${D}${T[pn_hint_act]}${N}"
+               v="$(ask "${T[pn_set_act]}" "$act")"
+               [[ -n "$v" ]] && { "$CTL" panel set --action-set "$v" >/dev/null || pause; } ;;
+            8) v="$(ask "${T[pn_set_speed]}" "${lim%%/*}")"
+               [[ -n "$v" ]] && "$CTL" panel set --mbps "$v" >/dev/null ;;
+            9) v="$(ask "${T[pn_set_min]}" "${lim##*/}")"
+               [[ -n "$v" ]] && "$CTL" panel set --minutes "$v" >/dev/null ;;
+           10) v="$(ask "${T[pn_set_cool]}" "$cool")"
+               [[ -n "$v" ]] && "$CTL" panel set --cooldown "$v" >/dev/null ;;
+           11) echo -e "  ${D}${T[pn_hint_exempt]}${N}"
+               v="$(ask "${T[pn_set_exempt]}")"
+               "$CTL" panel set --exempt "$v" >/dev/null ;;
+           12) echo; "$CTL" panel test; pause ;;
+           13) echo; "$CTL" panel scan --dry-run; pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 # ── Ограниченные пользователи ─────────────────────────────────────────
 limited_count() {
     python3 -c "
@@ -1508,8 +1630,13 @@ screen_service() {
         else
             echo -e " [10] 🔗 ${T[api_menu]} ${D}${T[api_none]}${N}"
         fi
-        echo -e " [11] 💾 ${T[bk_title]}"
-        echo -e " [12] 🗑  ${R}${T[un_title]}${N}"
+        if pn_enabled; then
+            echo -e " [11] 🛰  ${T[pn_menu]} ${G}${T[tg_on]}${N}"
+        else
+            echo -e " [11] 🛰  ${T[pn_menu]} ${D}${T[g_off]}${N}"
+        fi
+        echo -e " [12] 💾 ${T[bk_title]}"
+        echo -e " [13] 🗑  ${R}${T[un_title]}${N}"
         echo -e "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -1533,8 +1660,9 @@ screen_service() {
             8) screen_lang ;;
             9) screen_metrics ;;
            10) screen_api ;;
-           11) screen_backup ;;
-           12) screen_uninstall ;;
+           11) screen_panel ;;
+           12) screen_backup ;;
+           13) screen_uninstall ;;
             0|"") return ;;
         esac
     done
