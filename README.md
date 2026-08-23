@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.17-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.18-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
@@ -13,7 +13,7 @@
   <b>Русский</b> · <a href="README.en.md">English</a>
 </p>
 
-# Shape v3.17
+# Shape v3.18
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -901,7 +901,7 @@ connections:drop          ← только если включаете обры�
 
 ### Настройка
 
-Меню: **Сервис → 🛰 Панель Remnawave**. Или из командной строки:
+Меню: **🛰 Панель Remnawave** на главном экране. Или из командной строки:
 
 ```bash
 shaperctl.py panel set --url https://panel.example.com \

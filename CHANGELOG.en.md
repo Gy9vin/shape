@@ -13,6 +13,69 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.18
+
+**The panel moved to the main screen, and that screen finally shows everything.**
+
+### What was wrong
+
+The panel screen showed some settings and mangled others:
+
+```
+Threshold  : 20 / 10 Window
+Action     : notify   1/60
+Polling    : 300 · Alert pause 360
+```
+
+`1/60` is the penalty speed and its minutes, but there was no way to guess
+that. Numbers had no units: 300 of what, 360 of what. The "Window" label sat
+after its value like a tail. Panel names were not shown at all.
+
+The cause: fields glued into one string when reading the config, and labels
+doing double duty as column headers and as units.
+
+### How it looks now
+
+```
+State       : enabled
+Address     : https://admin.badgerproxy.com
+Node UUID   : 5d8bba03
+Token       : eyJhbG… · valid until 2848-01-06
+Polling     : 300 s
+Threshold   : 20 addresses / 10 min
+Action      : notify
+Penalty     : 1 Mbit/s · 60 min
+Alert pause : 360 min
+Names       : enabled
+Node report : 09:00
+Exempt      : 97, 346
+```
+
+Every setting on its own line, with units, labels aligned. The config reader
+returns one value per field: no more glued pairs to take apart later.
+
+### The panel is on the main screen
+
+It used to be **Service → [11]**, now it is **[9]** on the main screen with its
+state beside it. Service is a once-a-month place — updates and removal; the
+panel is daily. Service went back to its old numbering: backup is [11] again,
+removal [12].
+
+### Why labels are padded with spaces rather than printf
+
+`printf %-14s` in bash counts bytes, and Cyrillic takes two per character in
+UTF-8. In English the column is straight; in Russian it drifts. So the width is
+baked into the translation strings — and a check now guards it: every label on
+the screen must be the same length.
+
+### Tests
+
+7 new, all in the shell suite: equal label widths in both languages, no glued
+fields in the config reader, units present, the panel on the main screen, and
+the old numbering back in Service. 923 in total.
+
+---
+
 ## 3.17
 
 **The report is always a file, and the offender's addresses live in a collapsed

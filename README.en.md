@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.17-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.18-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.17
+# Shape v3.18
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -848,7 +848,7 @@ warns in Telegram a week before it expires.
 
 ### Setting it up
 
-Menu: **Service → 🛰 Remnawave panel**. Or from the command line:
+Menu: **🛰 Remnawave panel** on the main screen. Or from the command line:
 
 ```bash
 shaperctl.py panel set --url https://panel.example.com \
