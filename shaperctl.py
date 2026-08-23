@@ -223,9 +223,24 @@ MSG = {
         "pn_msg_head": "🔎 <b>Похоже на раздачу подписки</b> · {node}",
         "pn_msg_user": "Пользователь: <code>{user}</code>",
         "pn_msg_ips": "Адресов одновременно: <b>{n}</b> за последние {w} мин",
-        "pn_msg_sample": "Например: {ips}",
         "pn_msg_limited": "Ограничено адресов: {n} — до {mbps} Мбит/с на {m} мин",
         "pn_msg_dropped": "Соединения оборваны: {n}",
+        "pn_msg_more": "…и ещё {n}. Полный список — файлом следом.",
+        "pn_msg_file": "📄 Все адреса: {user} — {n} шт.",
+        "pn_rep_off": "отчёт по ноде выключен",
+        "pn_rep_head": "Отчёт по ноде {node} · {at}",
+        "pn_rep_users": "Подключено пользователей: {n}",
+        "pn_rep_ips": "Адресов всего: {n}",
+        "pn_rep_window": "Окно: {w} мин",
+        "pn_rep_caption": "📋 <b>{node}</b> · подключено {users}, адресов {ips}",
+        "pn_rep_state": "Отчёт по ноде",
+        "pn_rep_at": "Время отчёта",
+        "pn_rep_sent": "отчёт отправлен",
+        "pn_resolve": "Имена из панели",
+        "h_pn_report": "присылать отчёт по ноде: on или off",
+        "h_pn_report_at": "во сколько присылать отчёт, ЧЧ:ММ",
+        "h_pn_report_thread": "ID темы для отчёта по ноде",
+        "h_pn_resolve": "подставлять имя и Telegram ID вместо номера: on или off",
         "pn_token_soon": "⏳ {node}: токен панели истекает через {days} дн. "
                          "После этого поиск раздачи остановится.",
         "pn_denied_msg": "⚠️ {node}: панель отказала в доступе — поиск "
@@ -514,9 +529,24 @@ MSG = {
         "pn_msg_head": "🔎 <b>Looks like a shared subscription</b> · {node}",
         "pn_msg_user": "User: <code>{user}</code>",
         "pn_msg_ips": "Simultaneous addresses: <b>{n}</b> over the last {w} min",
-        "pn_msg_sample": "For example: {ips}",
         "pn_msg_limited": "Addresses limited: {n} — to {mbps} Mbit/s for {m} min",
         "pn_msg_dropped": "Connections dropped: {n}",
+        "pn_msg_more": "…and {n} more. The full list follows as a file.",
+        "pn_msg_file": "📄 All addresses: {user} — {n}",
+        "pn_rep_off": "the node report is off",
+        "pn_rep_head": "Node report {node} · {at}",
+        "pn_rep_users": "Users connected: {n}",
+        "pn_rep_ips": "Addresses in total: {n}",
+        "pn_rep_window": "Window: {w} min",
+        "pn_rep_caption": "📋 <b>{node}</b> · {users} connected, {ips} addresses",
+        "pn_rep_state": "Node report",
+        "pn_rep_at": "Report time",
+        "pn_rep_sent": "report sent",
+        "pn_resolve": "Names from the panel",
+        "h_pn_report": "send the node report: on or off",
+        "h_pn_report_at": "when to send the report, HH:MM",
+        "h_pn_report_thread": "topic ID for the node report",
+        "h_pn_resolve": "use the name and Telegram ID instead of the number: on or off",
         "pn_token_soon": "⏳ {node}: the panel token expires in {days} day(s). "
                          "After that the sharing search will stop.",
         "pn_denied_msg": "⚠️ {node}: the panel denied access — the sharing "
@@ -955,6 +985,17 @@ PANEL_DEFAULT = {
     "limit_min": 60,
     "cooldown_min": 360,  # не долбить одним и тем же нарушителем
     "exempt": [],         # userId, которым делиться разрешено (семья и т.п.)
+
+    # Имя и Telegram ID вместо внутреннего номера пользователя. Требует у
+    # токена права users:read. Выключишь — в сообщениях останутся номера,
+    # всё остальное продолжит работать.
+    "resolve": True,
+
+    # Отчёт по ноде: кто подключён и с каких адресов. Отдельно от суточной
+    # сводки Telegram — это другой отчёт и, как правило, в другое время.
+    "report": False,
+    "report_at": "09:00",
+    "report_thread_id": "",
 }
 
 
@@ -2044,6 +2085,7 @@ def cmd_watch(a):
             # недоступная панель не должна ни ронять сторож, ни задерживать
             # выдачу штрафов дольше одного пропущенного прохода.
             panel_due(cfg)
+            panel_report_due(cfg)
 
             # Персональные скорости живут в ядре с далёким, но конечным
             # сроком. Продлеваем раз в час, чтобы они не истекли молча.
@@ -2502,12 +2544,33 @@ def tg_backup(cfg=None, force=False):
                f"{t('bk_tg_counts', w=len(st['whitelist']), p=len(st['penalties']), o=len(st['owners']))}\n"
                f"<i>{t('bk_tg_nosec')}</i>")
 
-    fields = {"chat_id": tg["chat_id"], "caption": caption, "parse_mode": "HTML"}
-    thread = str(tg.get("backup_thread_id") or tg.get("thread_id") or "").strip()
-    if thread:
-        fields["message_thread_id"] = thread
+    return tg_document(cfg, backup_filename(data.get("node")), blob, caption,
+                       thread=tg.get("backup_thread_id") or tg.get("thread_id"))
 
-    body, ctype = _multipart(fields, backup_filename(data.get("node")), blob)
+
+def tg_document(cfg, filename, blob, caption="", thread=None,
+                mime="application/json"):
+    """
+    Отправляет файл в Telegram. Возвращает (успех, пояснение).
+
+    Выделено из отправки резервной копии, когда файлов стало больше одного.
+    Причина у всех одна: в сообщении Telegram 4096 символов, и список из
+    четырёхсот адресов туда не помещается — это семь килобайт. Что не влезло
+    в сообщение, уходит вложением.
+    """
+    tg = cfg["telegram"]
+    if not tg.get("token") or not tg.get("chat_id"):
+        return False, t("tg_no_creds")
+
+    fields = {"chat_id": tg["chat_id"], "parse_mode": "HTML"}
+    if caption:
+        # У подписи к файлу свой предел, вчетверо меньше, чем у сообщения.
+        fields["caption"] = caption[:1024]
+    th = str(thread if thread is not None else tg.get("thread_id") or "").strip()
+    if th:
+        fields["message_thread_id"] = th
+
+    body, ctype = _multipart(fields, filename, blob, mime=mime)
     url = f"https://api.telegram.org/bot{tg['token']}/sendDocument"
     try:
         return _post(url, body, tg.get("proxy", ""), ctype) == 200, "ok"
@@ -2814,6 +2877,213 @@ def panel_offenders(users, p, now=None):
     return out
 
 
+# ── справочник пользователей ──────────────────────────────────────────
+#
+# Держим в памяти процесса и не пишем на диск. Это чужие персональные данные,
+# и хранить их на ноде мы не подряжались: понадобились — спросили, отправили,
+# забыли. Сторож живёт долго, часа кэша достаточно — имена меняются реже.
+
+_PANEL_DIR_CACHE = {"at": 0.0, "map": {}}
+PANEL_DIR_TTL = 3600
+PANEL_PAGE = 1000           # предел панели на одну страницу
+PANEL_DIR_MAX_PAGES = 40    # страховка от бесконечной постраничности
+PANEL_IPS_INLINE = 20       # сколько адресов показывать прямо в сообщении
+PANEL_MSG_LIMIT = 3500      # больше этого уходит вложением, а не сообщением
+
+
+def panel_person(u):
+    """Из карточки панели оставляем три поля. Остальные двадцать — мимо."""
+    if not isinstance(u, dict) or u.get("id") is None:
+        return None
+    return {"id": str(u.get("id")),
+            "name": str(u.get("username") or ""),
+            "telegram_id": str(u.get("telegramId") or "")}
+
+
+def panel_label(uid, person=None):
+    """«Елена (851400228)» — или внутренний номер, если справочника нет."""
+    if not person:
+        return "#" + str(uid)
+    name = person.get("name") or ("#" + str(uid))
+    tg = person.get("telegram_id")
+    return f"{name} ({tg})" if tg else name
+
+
+def panel_user(p, uid):
+    """
+    Имя и Telegram ID одного человека. Не вышло — None, и это не ошибка:
+    без справочника в сообщении просто останется внутренний номер.
+    """
+    if not p.get("resolve"):
+        return None
+    try:
+        return panel_person(panel_call(p, "GET", "/api/users/%s" % uid))
+    except PanelError:
+        return None
+
+
+def panel_directory(p, now=None, force=False):
+    """
+    Справочник {номер: {имя, telegram}} по всей панели, постранично.
+
+    Целиком — потому что так дешевле. На ноде полторы сотни подключённых, и
+    спрашивать про каждого отдельно значит сделать полторы сотни запросов;
+    панель на шесть тысяч учётных записей укладывается в шесть страниц по
+    тысяче. Из каждой записи оставляем три поля, остальные два десятка
+    выбрасываем сразу: на ноде с 512 МБ памяти разница заметна.
+
+    Зовёт это только отчёт, раз в сутки. Обычный поиск раздачи справочник
+    целиком не трогает — нарушители редки, и про них спрашивают поимённо.
+    """
+    now = now if now is not None else time.time()
+    if not force and _PANEL_DIR_CACHE["map"] \
+            and now - _PANEL_DIR_CACHE["at"] < PANEL_DIR_TTL:
+        return _PANEL_DIR_CACHE["map"]
+
+    out, start = {}, 0
+    for _ in range(PANEL_DIR_MAX_PAGES):
+        page = panel_call(p, "GET",
+                          "/api/users?start=%d&size=%d" % (start, PANEL_PAGE))
+        users = page.get("users") or []
+        for u in users:
+            person = panel_person(u)
+            if person:
+                out[person["id"]] = person
+        start += len(users)
+        # Выходим по пустой странице и по счётчику total. По «страница короче
+        # запрошенного» — намеренно нет: панель вправе отдать меньше, чем у неё
+        # попросили, и тогда справочник оборвался бы на первой же странице.
+        if not users or start >= int(page.get("total") or 0):
+            break
+
+    _PANEL_DIR_CACHE.update({"at": now, "map": out})
+    return out
+
+
+# ── отчёт по ноде ─────────────────────────────────────────────────────
+
+def panel_report_rows(users, directory, p, now=None):
+    """
+    Кто подключён к ноде и с каких адресов. Возвращает (строки, всего адресов).
+
+    Сортировка по числу одновременных адресов: самое интересное сверху, а
+    самое интересное здесь — это как раз тот, у кого адресов слишком много.
+    """
+    now = now if now is not None else time.time()
+    window = max(1, int(p.get("window_min") or 10)) * 60
+
+    rows = []
+    for u in users:
+        fresh = sorted({ip for ip, ts in u["ips"] if ts and now - ts <= window})
+        # Если свежих нет вовсе (например, панель не отдала время), показываем
+        # что есть: пустая строка в отчёте бесполезна.
+        shown = fresh or sorted({ip for ip, _ in u["ips"]})
+        rows.append({"user_id": u["user_id"],
+                     "label": panel_label(u["user_id"],
+                                          directory.get(u["user_id"])),
+                     "ips": shown, "count": len(fresh)})
+    rows.sort(key=lambda r: (-r["count"], r["label"]))
+    return rows, len({ip for r in rows for ip in r["ips"]})
+
+
+def panel_report_text(cfg, rows, total_ips, now=None):
+    """Полный текст отчёта. Он же уходит вложением, если не влез в сообщение."""
+    p, tg = cfg["panel"], cfg["telegram"]
+    now = now if now is not None else time.time()
+    threshold = max(PANEL_MIN_THRESHOLD, int(p.get("ip_threshold") or 20))
+    window = max(1, int(p.get("window_min") or 10))
+
+    out = [t("pn_rep_head", node=node_label(tg),
+             at=time.strftime("%Y-%m-%d %H:%M", time.localtime(now))),
+           t("pn_rep_users", n=len(rows)),
+           t("pn_rep_ips", n=total_ips),
+           t("pn_rep_window", w=window), ""]
+    for r in rows:
+        mark = "  ⚠" if r["count"] >= threshold else ""
+        out.append(f"{r['label']} — {r['count']}{mark}")
+        out.extend("    " + ip for ip in r["ips"])
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def panel_report(cfg, now=None, force=False):
+    """
+    Отчёт по ноде: кто подключён и с каких адресов. Возвращает (успех, пояснение).
+
+    force — для кнопки «отправить сейчас»: она работает и при выключенном
+    расписании, лишь бы Telegram был настроен.
+    """
+    p = cfg["panel"]
+    now = now if now is not None else time.time()
+    if not force and not p.get("report"):
+        return False, t("pn_rep_off")
+
+    try:
+        users = panel_fetch(p)
+    except PanelError as e:
+        return False, str(e)
+
+    directory = {}
+    if p.get("resolve"):
+        try:
+            directory = panel_directory(p, now)
+        except PanelError as e:
+            # Без имён отчёт всё равно полезен — уйдёт с номерами.
+            print(f"panel report: {e}", flush=True)
+
+    rows, total_ips = panel_report_rows(users, directory, p, now)
+    body = panel_report_text(cfg, rows, total_ips, now)
+    head = t("pn_rep_caption", node=node_label(cfg["telegram"]),
+             users=len(rows), ips=total_ips)
+
+    thread = str(p.get("report_thread_id") or "").strip() or None
+    # Короткий отчёт читать удобнее сообщением, длинный туда просто не влезет.
+    if len(body) <= PANEL_MSG_LIMIT:
+        ok, err = tg_send(f"{head}\n\n<pre>{html.escape(body)}</pre>", cfg,
+                          force=True)
+        return ok, err
+    name = "shape-%s-%s.txt" % (_safe_name(node_label(cfg["telegram"])),
+                                time.strftime("%Y-%m-%d", time.localtime(now)))
+    return tg_document(cfg, name, body.encode(), head, thread=thread,
+                       mime="text/plain; charset=utf-8")
+
+
+def panel_report_due(cfg, now=None):
+    """
+    Раз в цикл сторожа: не пора ли отправить отчёт по ноде.
+
+    Правила те же, что у недельной копии: не раньше назначенного часа и не
+    чаще раза в сутки. Нода была выключена и час прошёл — ждём завтра.
+    Догонять пропущенный отчёт бессмысленно: он про то, кто подключён сейчас.
+    """
+    p = cfg["panel"]
+    if not (p.get("enabled") and p.get("report")):
+        return False
+    now = now if now is not None else time.time()
+    lt = time.localtime(now)
+    h, m = parse_hhmm(p.get("report_at", "09:00"))
+    if (lt.tm_hour, lt.tm_min) < (h, m):
+        return False
+
+    today = time.strftime("%Y-%m-%d", lt)
+    state = panel_state()
+    if state.get("report_sent") == today:
+        return False
+    if now < float(state.get("report_retry_at") or 0):
+        return False
+
+    ok, err = panel_report(cfg, now)
+    state = panel_state()
+    if ok:
+        state["report_sent"] = today
+        state.pop("report_retry_at", None)
+    else:
+        print(f"panel report: {err}", flush=True)
+        state["report_retry_at"] = now + PANEL_RETRY
+    panel_state_save(state)
+    return ok
+
+
 def panel_state():
     try:
         with open(PANEL_STATE) as f:
@@ -2886,22 +3156,45 @@ def panel_limit(p, ips):
 
 
 def panel_notify(cfg, rec):
-    """Карточка нарушителя в Telegram."""
+    """
+    Карточка нарушителя в Telegram.
+
+    Адресов у перепродавца бывают сотни, а в сообщении Telegram 4096 символов.
+    Поэтому в тексте — первые двадцать, а полный список уходит следом файлом.
+    Обрезать молча нельзя: список адресов и есть то, ради чего это писалось.
+    """
     p, tg = cfg["panel"], cfg["telegram"]
+    who = panel_label(rec["user_id"], rec.get("person"))
     lines = [t("pn_msg_head", node=node_label(tg)),
-             t("pn_msg_user", user=html.escape(rec["user_id"])),
+             t("pn_msg_user", user=html.escape(who)),
              t("pn_msg_ips", n=rec["count"],
                w=max(1, int(p.get("window_min") or 10)))]
-    sample = ", ".join(html.escape(x) for x in rec["ips"][:5])
-    if sample:
-        lines.append(t("pn_msg_sample", ips=sample))
     if rec.get("limited"):
         lines.append(t("pn_msg_limited", n=len(rec["limited"]),
                        mbps=p.get("limit_mbps", 1),
                        m=max(1, int(p.get("limit_min") or 60))))
     if rec.get("dropped"):
         lines.append(t("pn_msg_dropped", n=len(rec["dropped"])))
+
+    shown = rec["ips"][:PANEL_IPS_INLINE]
+    if shown:
+        lines.append("")
+        lines.append("<pre>" + html.escape("\n".join(shown)) + "</pre>")
+    extra = len(rec["ips"]) - len(shown)
+    if extra > 0:
+        lines.append(t("pn_msg_more", n=extra))
     tg_send("\n".join(lines), cfg)
+
+    if extra > 0:
+        body = "\n".join([who, ""] + list(rec["ips"])) + "\n"
+        name = "shape-sharing-%s-%s.txt" % (
+            _safe_name(rec["user_id"]), time.strftime("%Y-%m-%d"))
+        ok, err = tg_document(cfg, name, body.encode(),
+                              t("pn_msg_file", user=html.escape(who),
+                                n=len(rec["ips"])),
+                              mime="text/plain; charset=utf-8")
+        if not ok:
+            print(f"panel notify: {err}", flush=True)
 
 
 def panel_warn_token(cfg, detail):
@@ -2980,6 +3273,9 @@ def panel_scan(cfg, now=None, act=True):
             rec["skipped"] = True
             continue
         seen[rec["user_id"]] = now
+        # Имя спрашиваем поимённо и только про нарушителя: тянуть ради этого
+        # весь справочник в шесть тысяч записей каждые пять минут незачем.
+        rec["person"] = panel_user(p, rec["user_id"])
 
         if "limit" in actions:
             rec["limited"] = panel_limit(p, rec["ips"])
@@ -3067,6 +3363,14 @@ def cmd_panel(a):
         print(f"  {t('pn_thr')}    : {p['ip_threshold']} / {p['window_min']} {t('pn_min')}")
         print(f"  {t('pn_act')}    : {p['action']}")
         print(f"  {t('pn_cool')}   : {p['cooldown_min']} {t('pn_min')}")
+        if p.get("report"):
+            print(f"  {t('pn_rep_state')} : {C['grn']}{p.get('report_at', '09:00')}{C['r']}"
+                  + (f"  · {t('tg_thread')} {p['report_thread_id']}"
+                     if str(p.get("report_thread_id") or "").strip() else ""))
+        else:
+            print(f"  {t('pn_rep_state')} : {C['gry']}{t('guard_off')}{C['r']}")
+        print(f"  {t('pn_resolve')} : "
+              + (t("guard_on") if p.get("resolve") else t("guard_off")))
         if p.get("exempt"):
             print(f"  {t('pn_exempt')} : {', '.join(p['exempt'])}")
         print(f"  {t('pn_last')} : " + (time.strftime("%Y-%m-%d %H:%M",
@@ -3108,6 +3412,17 @@ def cmd_panel(a):
             p["cooldown_min"] = max(0, a.cooldown)
         if a.exempt is not None:
             p["exempt"] = [w.strip() for w in a.exempt.split(",") if w.strip()]
+        if a.report is not None:
+            p["report"] = a.report == "on"
+        if a.report_at is not None:
+            v = a.report_at.strip()
+            if parse_hhmm(v, None) is None:
+                die(t("tg_bad_time"))
+            p["report_at"] = "%02d:%02d" % parse_hhmm(v)
+        if a.report_thread is not None:
+            p["report_thread_id"] = a.report_thread.strip()
+        if a.resolve is not None:
+            p["resolve"] = a.resolve == "on"
         if a.enable:
             p["enabled"] = True
         if a.disable:
@@ -3115,6 +3430,17 @@ def cmd_panel(a):
         save_config({"panel": p})
         log_event("config_changed", source="cli", section="panel")
         return cmd_panel(argparse.Namespace(**{**vars(a), "action": "show"}))
+
+    if a.action == "report":
+        # force: кнопка «отправить сейчас» работает и при выключенном
+        # расписании — иначе проверить настройку было бы нечем.
+        if not a.json:
+            print(f"\n  {t('pn_scanning')}", flush=True)
+        ok, err = panel_report(cfg, force=True)
+        if not ok:
+            die(err)
+        print(f"  {C['grn']}✓{C['r']} {t('pn_rep_sent')}\n")
+        return
 
     # test и scan отличаются одним: test ничего не меняет и ничего не шлёт,
     # он нужен, чтобы проверить адрес, токен и UUID до включения.
@@ -4328,8 +4654,16 @@ def build_parser():
     tg.set_defaults(func=cmd_telegram)
 
     pn = sub.add_parser("panel", help=t("h_panel"))
-    pn.add_argument("action", choices=["show", "set", "test", "scan"],
+    pn.add_argument("action", choices=["show", "set", "test", "scan", "report"],
                     nargs="?", default="show")
+    pn.add_argument("--report", choices=["on", "off"], default=None,
+                    help=t("h_pn_report"))
+    pn.add_argument("--report-at", dest="report_at", default=None,
+                    help=t("h_pn_report_at"))
+    pn.add_argument("--report-thread", dest="report_thread", default=None,
+                    help=t("h_pn_report_thread"))
+    pn.add_argument("--resolve", choices=["on", "off"], default=None,
+                    help=t("h_pn_resolve"))
     pn.add_argument("--url", default=None, help=t("h_pn_url"))
     pn.add_argument("--token", default=None, help=t("h_pn_token"))
     pn.add_argument("--node-uuid", dest="node_uuid", default=None,

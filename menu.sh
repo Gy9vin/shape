@@ -723,7 +723,7 @@ sys.exit(0 if d.get('enabled') else 1)" 2>/dev/null
 # Читаем одним заходом, как и настройки Telegram: дёргать shaperctl по разу
 # на каждое поле — это девять запусков питона на отрисовку одного экрана.
 pn_read() {
-    python3 - <<PY 2>/dev/null || echo "0|—|—|—|300|10|20|notify|360|—|—"
+    python3 - <<PY 2>/dev/null || echo "0|—|—|—|300|10|20|notify|360|—|—|0|09:00|1"
 import base64, json, os, time
 try:
     d = json.load(open("$ETC_DIR/config.json")).get("panel", {})
@@ -755,15 +755,18 @@ print("|".join([
     str(d.get("cooldown_min") or 360),
     ", ".join(str(x) for x in (d.get("exempt") or [])) or "—",
     "%s/%s" % (d.get("limit_mbps") or 1, d.get("limit_min") or 60),
+    "1" if d.get("report") else "0",
+    d.get("report_at") or "09:00",
+    "0" if d.get("resolve") is False else "1",
 ]))
 PY
 }
 
 screen_panel() {
-    local on url uuid tok every win thr act cool exempt lim v
+    local on url uuid tok every win thr act cool exempt lim rep rep_at names v
     while :; do
         IFS='|' read -r on url uuid tok every win thr act cool exempt lim \
-            <<< "$(pn_read)"
+            rep rep_at names <<< "$(pn_read)"
         title "${T[pn_title]}"
         echo -e "  ${D}${T[pn_h1]}${N}"
         echo -e "  ${D}${T[pn_h2]}${N}"
@@ -778,6 +781,12 @@ screen_panel() {
         echo -e "  ${T[pn_token]} : ${tok}"
         echo -e "  ${T[pn_thr]} : ${B}${thr}${N} / ${win} ${T[pn_win]}"
         echo -e "  ${T[pn_act]} : ${B}${act}${N}   ${D}${lim}${N}"
+        echo -e "  ${T[pn_every]} : ${every} ${D}·${N} ${T[pn_cool]} ${cool}"
+        if [[ "$rep" == "1" ]]; then
+            echo -e "  ${T[pn_rep]} : ${G}${rep_at}${N}"
+        else
+            echo -e "  ${T[pn_rep]} : ${D}${T[g_off]}${N}"
+        fi
         [[ "$exempt" != "—" ]] && echo -e "  ${T[pn_exempt]}: ${exempt}"
         hr
         echo "  [1] ${T[g_toggle]}"
@@ -791,8 +800,20 @@ screen_panel() {
         echo "  [9] ${T[pn_set_min]}"
         echo " [10] ${T[pn_set_cool]}"
         echo " [11] ${T[pn_set_exempt]}"
-        echo " [12] ${T[pn_test]}"
-        echo " [13] ${T[pn_scan]}"
+        if [[ "$rep" == "1" ]]; then
+            echo -e " [12] ${T[pn_rep]}: ${G}${T[tg_on]}${N} ${D}${T[tg_press]}${N}"
+        else
+            echo -e " [12] ${T[pn_rep]}: ${Y}${T[tg_off]}${N} ${D}${T[tg_press]}${N}"
+        fi
+        echo -e " [13] ${T[pn_rep_at]}: ${B}${rep_at}${N}"
+        echo " [14] ${T[pn_rep_now]}"
+        if [[ "$names" == "1" ]]; then
+            echo -e " [15] ${T[pn_names]}: ${G}${T[tg_on]}${N} ${D}${T[tg_press]}${N}"
+        else
+            echo -e " [15] ${T[pn_names]}: ${Y}${T[tg_off]}${N} ${D}${T[tg_press]}${N}"
+        fi
+        echo " [16] ${T[pn_test]}"
+        echo " [17] ${T[pn_scan]}"
         echo "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -824,8 +845,17 @@ screen_panel() {
            11) echo -e "  ${D}${T[pn_hint_exempt]}${N}"
                v="$(ask "${T[pn_set_exempt]}")"
                "$CTL" panel set --exempt "$v" >/dev/null ;;
-           12) echo; "$CTL" panel test; pause ;;
-           13) echo; "$CTL" panel scan --dry-run; pause ;;
+           12) echo -e "  ${D}${T[pn_hint_rep]}${N}"
+               "$CTL" panel set --report "$([[ "$rep" == 1 ]] && echo off || echo on)" \
+                   >/dev/null ;;
+           13) v="$(ask "${T[pn_rep_at]}" "$rep_at")"
+               [[ -n "$v" ]] && { "$CTL" panel set --report-at "$v" >/dev/null || pause; } ;;
+           14) echo; "$CTL" panel report; pause ;;
+           15) echo -e "  ${D}${T[pn_hint_names]}${N}"
+               "$CTL" panel set --resolve "$([[ "$names" == 1 ]] && echo off || echo on)" \
+                   >/dev/null ;;
+           16) echo; "$CTL" panel test; pause ;;
+           17) echo; "$CTL" panel scan --dry-run; pause ;;
             0|"") return ;;
         esac
     done

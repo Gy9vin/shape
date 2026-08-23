@@ -12,7 +12,7 @@ bash    uninstall_tests.sh      # удаление: порядок шагов, �
 python3 export_tests.py         # резервная копия: формат, секреты, круговой тест
 python3 upgrade_tests.py        # обновление: старое состояние читается новым кодом
 python3 api_tests.py            # API: проверки по HTTP
-python3 panel_tests.py          # связь с панелью: поддельная панель по HTTP
+python3 panel_tests.py          # связь с панелью и отчёт: поддельная панель по HTTP
 bash    api_independence_tests.sh   # Shape работает без API
 gcc -O1 -Wno-unknown-pragmas -I stub -o /tmp/h bpf_harness.c && /tmp/h
 ```
@@ -47,6 +47,8 @@ gcc -O1 -Wno-unknown-pragmas -I stub -o /tmp/h bpf_harness.c && /tmp/h
 проверяли бы собственные представления о панели, а проверять надо разбор
 настоящих ответов. Отдельно проверяется главное: недоступная панель не роняет
 сторож и не задерживает выдачу штрафов дольше одного пропущенного прохода.
+Отдельно проверяется граница между сообщением и вложением: в сообщении
+Telegram 4096 символов, и список из четырёхсот адресов обязан уйти файлом.
 
 Набор удаления гоняет `uninstall.sh` целиком в песочнице: пути берутся из
 `SHAPE_APP_DIR`, `SHAPE_ETC_DIR`, `SHAPE_VAR_DIR` и `SHAPE_UNIT_DIR`,

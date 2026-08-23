@@ -13,6 +13,87 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.15
+
+**Names and Telegram IDs instead of internal numbers, and a node report: who is
+connected and from which addresses.**
+
+In the connections reply the panel returns only a user number — 97, 346. That
+tells you nothing about who to write to. The name and Telegram ID live in the
+user's card, and Shape now asks for them separately: the message says
+`Elena (851400228)`.
+
+This needs the **Users → Read** scope on the token. Without it everything keeps
+working, just with numbers; `--resolve off` turns it off entirely.
+
+### Node report
+
+Once a day at a time you choose: who is connected and what addresses they use.
+
+```bash
+shaperctl.py panel set --report on --report-at 09:00
+shaperctl.py panel report        # send it now
+```
+
+```
+Node report FRONT-3 · 2026-08-23 09:00
+Users connected: 138
+Addresses in total: 412
+
+Nikita (7288183505) — 437  ⚠
+    1.2.3.4
+    …
+Elena (851400228) — 2
+```
+
+Sorted by simultaneous address count; anyone above the threshold is marked. The
+report can go to its own topic: `--report-thread 777`.
+
+### Long things go as files
+
+A Telegram message holds 4096 characters. Four hundred addresses of one reseller
+is seven kilobytes, and a report on a hundred and fifty people is larger still.
+Truncating silently is not an option: the address list is the whole point.
+
+So short stays a message and long goes as an attachment. In the sharing alert:
+the first twenty addresses inline, the full list as a file right after. Shape
+could already send documents — that is how weekly backups travel; now it is one
+shared function rather than two similar ones.
+
+### What this costs the panel
+
+An offender is looked up by number — one request, and only once they are found.
+The full directory is fetched for the report alone, once a day, a thousand
+records per page: on a panel with six thousand accounts that is six requests
+against a hundred and forty if each connected user were asked about separately.
+
+Three fields are kept from each card — number, name, Telegram ID. The other
+twenty are dropped immediately: on a node with 512 MB of RAM the difference
+shows. The directory is never written to disk — it is other people's personal
+data, and a node has no business storing it.
+
+### Details
+
+* a denied directory does not sink the report: it goes out with numbers instead
+  of names;
+* page walking does not rely on "the page is shorter than requested" — a panel
+  may legitimately return less, which would cut the directory off at page one;
+* a missed report is not caught up: if the node was down past the hour, it waits
+  for tomorrow. A report about who is connected now is worthless a day later.
+
+### Upgrading
+
+The new fields arrive switched off: no report is sent by default, and names are
+resolved only if the token has the scope. Nothing needs reconfiguring.
+
+### Tests
+
+46 new ones: directory pagination and caching, the user label in every variant,
+the boundary between a message and a file, the report's contents and ordering,
+its schedule, and the behaviour when the scope is missing. 893 in total.
+
+---
+
 ## 3.14
 
 **Shared-subscription detection: Shape asks the Remnawave panel who owns the

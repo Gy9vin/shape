@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.14-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.15-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.14
+# Shape v3.15
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -489,6 +489,9 @@ shaperctl.py panel scan --dry-run           # look for sharing, do nothing
 shaperctl.py panel set --url … --token … --node-uuid …
 shaperctl.py panel set --action-set notify,limit --mbps 1 --minutes 60
 shaperctl.py panel set --threshold 20 --window 10 --exempt 97,346
+shaperctl.py panel report                   # send the node report now
+shaperctl.py panel set --report on --report-at 09:00 --report-thread 777
+shaperctl.py panel set --resolve off        # do not resolve names
 ```
 
 The `status --json` format:
@@ -890,6 +893,67 @@ Who is allowed to share — family, colleagues:
 shaperctl.py panel set --exempt 97,346
 ```
 
+### Names instead of numbers
+
+In the connections reply the panel returns only the internal user number — 97,
+346. The name and Telegram ID live in the user's card, so Shape asks the panel
+separately and writes `Elena (851400228)` instead of `#346`.
+
+That needs the **Users → Read** scope. Without it everything still works, just
+with numbers. To turn it off entirely:
+
+```bash
+shaperctl.py panel set --resolve off
+```
+
+An offender is looked up by number, one request at a time. The full directory is
+fetched only for the report and only once a day: a panel with six thousand
+accounts is six pages of a thousand, and keeping that in a node's memory every
+five minutes serves no purpose.
+
+### Node report
+
+Who is connected right now and from which addresses — once a day at a time you
+choose:
+
+```bash
+shaperctl.py panel set --report on --report-at 09:00
+shaperctl.py panel report        # send it right now
+```
+
+It looks like this:
+
+```
+Node report FRONT-3 · 2026-08-23 09:00
+Users connected: 138
+Addresses in total: 412
+Window: 10 min
+
+Nikita (7288183505) — 437  ⚠
+    1.2.3.4
+    5.6.7.8
+    …
+Elena (851400228) — 2
+    …
+```
+
+Sorted by the number of simultaneous addresses: whoever is worth a look is on
+top, marked with `⚠`.
+
+A Telegram message holds 4096 characters, and a hundred and fifty people with
+their addresses do not fit — a long report is sent as a **file**, a short one
+stays a message. The sharing alert works the same way: the first twenty
+addresses inline, the full list attached.
+
+The report can go to its own topic so it does not clutter the alerts:
+
+```bash
+shaperctl.py panel set --report-thread 777
+```
+
+Nothing is written to disk: collected, sent, forgotten. Shape does not keep a
+history of addresses and should not.
+
 ### All settings
 
 | Key | Default | Meaning |
@@ -906,6 +970,10 @@ shaperctl.py panel set --exempt 97,346
 | `limit_min` | `60` | for how many minutes |
 | `cooldown_min` | `360` | pause between alerts about one person |
 | `exempt` | `[]` | who is allowed to share |
+| `resolve` | `true` | use the name and Telegram ID instead of the number |
+| `report` | `false` | send the node report |
+| `report_at` | `09:00` | when to send the report |
+| `report_thread_id` | — | topic for the report; empty means the usual one |
 | `proxy` | — | http proxy to the panel; socks5 is not supported |
 
 The threshold never drops below two addresses, whatever the settings say: one
