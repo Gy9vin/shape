@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.15-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.16-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.15
+# Shape v3.16
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -868,6 +868,7 @@ own UUIDs, and those will not work here.
 | --- | --- |
 | `notify` | a Telegram card: who, how many addresses, examples |
 | `limit` | a local penalty on the addresses this node can see itself |
+| `block` | cut off access to the node: minimal speed plus a connection drop |
 | `drop` | drop connections through the panel — by address, on this node only |
 
 Combine them with commas:
@@ -884,6 +885,47 @@ Only `notify` is on by default.
 
 Limiting touches only addresses present in the node's own map. The whitelist and
 existing penalties are left alone.
+
+
+### What arrives in Telegram
+
+```
+🔎 Looks like a shared subscription · FRONT-3
+
+👤 Bashou
+🆔 Telegram: 637181482
+🔑 Panel ID: 741
+
+Simultaneous addresses: 437 over the last 10 min
+🚫 Access to the node cut off for 60 min, addresses: 412
+Connections dropped: 437
+
+1.2.3.4
+5.6.7.8
+…
+…and 417 more. The full list follows as a file.
+```
+
+The Telegram ID and the panel ID sit on their own lines and copy with a single
+tap — that is how you find the person in the panel in seconds. The name comes
+from there too. A Telegram handle like `@bashoyy` is not stored by the panel, so
+the card cannot show it.
+
+### About blocking
+
+`block` is not a firewall rule but a minimal speed: 0.05 Mbit/s on every address
+of the offender the node can see, plus a drop of the current connections.
+
+Zero would not work: zero in the kernel map means "no limit", and the engine is
+written that way on purpose. At 0.05 Mbit a 1500-byte packet takes 240 ms, while
+the engine's queue horizon is two seconds. Eight packets fit in the queue, the
+rest are dropped, and a TLS handshake never completes. From the outside it looks
+like the internet is gone.
+
+Dropping connections is part of blocking: without it, established connections
+would merely become slow and the person would stay "online" until they timed out.
+
+If both `limit` and `block` are set, `block` wins.
 
 ### Exceptions
 

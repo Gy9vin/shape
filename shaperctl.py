@@ -221,7 +221,12 @@ MSG = {
         "pn_scan_row": "  {user} — адресов {n}, из них видит нода {here}",
         "pn_dry": "Ничего не предпринято: это пробный запуск.",
         "pn_msg_head": "🔎 <b>Похоже на раздачу подписки</b> · {node}",
-        "pn_msg_user": "Пользователь: <code>{user}</code>",
+        "pn_card_name": "👤 <b>{name}</b>",
+        "pn_card_tg": "🆔 Telegram: <code>{id}</code>",
+        "pn_card_panel": "🔑 ID в панели: <code>{id}</code>",
+        "pn_card_panel_plain": "ID в панели: {id}",
+        "pn_msg_blocked": "🚫 Доступ к ноде перекрыт на {m} мин, адресов: {n}",
+        "pn_msg_nothing": "Ничего не предпринято: включено только уведомление.",
         "pn_msg_ips": "Адресов одновременно: <b>{n}</b> за последние {w} мин",
         "pn_msg_limited": "Ограничено адресов: {n} — до {mbps} Мбит/с на {m} мин",
         "pn_msg_dropped": "Соединения оборваны: {n}",
@@ -254,14 +259,14 @@ MSG = {
         "h_pn_interval": "как часто спрашивать панель, в секундах",
         "h_pn_window": "окно одновременности в минутах",
         "h_pn_threshold": "сколько адресов считать раздачей",
-        "h_pn_action": "notify, limit, drop или их сочетание через запятую",
+        "h_pn_action": "notify, limit, block, drop или их сочетание через запятую",
         "h_pn_mbps": "до скольких мегабит резать нарушителя",
         "h_pn_minutes": "на сколько минут резать",
         "h_pn_cooldown": "пауза между сигналами по одному человеку, в минутах",
         "h_pn_exempt": "кому раздавать можно: userId через запятую",
         "h_pn_proxy": "http-прокси до панели",
         "h_pn_dry": "только показать найденное, ничего не делать",
-        "pn_bad_action": "действие — это notify, limit, drop или их сочетание",
+        "pn_bad_action": "действие — это notify, limit, block, drop или их сочетание",
         "pn_bad_url": "адрес панели должен начинаться с http:// или https://",
         "tg_limited": "Ограничен",
         "tg_shared": "за адресом может стоять несколько человек",
@@ -527,7 +532,12 @@ MSG = {
         "pn_scan_row": "  {user} — {n} addresses, {here} of them seen by this node",
         "pn_dry": "Nothing was done: this was a dry run.",
         "pn_msg_head": "🔎 <b>Looks like a shared subscription</b> · {node}",
-        "pn_msg_user": "User: <code>{user}</code>",
+        "pn_card_name": "👤 <b>{name}</b>",
+        "pn_card_tg": "🆔 Telegram: <code>{id}</code>",
+        "pn_card_panel": "🔑 Panel ID: <code>{id}</code>",
+        "pn_card_panel_plain": "Panel ID: {id}",
+        "pn_msg_blocked": "🚫 Access to the node cut off for {m} min, addresses: {n}",
+        "pn_msg_nothing": "Nothing was done: only notification is enabled.",
         "pn_msg_ips": "Simultaneous addresses: <b>{n}</b> over the last {w} min",
         "pn_msg_limited": "Addresses limited: {n} — to {mbps} Mbit/s for {m} min",
         "pn_msg_dropped": "Connections dropped: {n}",
@@ -560,14 +570,14 @@ MSG = {
         "h_pn_interval": "how often to ask the panel, in seconds",
         "h_pn_window": "simultaneity window, in minutes",
         "h_pn_threshold": "how many addresses count as sharing",
-        "h_pn_action": "notify, limit, drop, or a comma-separated combination",
+        "h_pn_action": "notify, limit, block, drop, or a comma-separated combination",
         "h_pn_mbps": "megabits to throttle an offender down to",
         "h_pn_minutes": "for how many minutes to throttle",
         "h_pn_cooldown": "pause between alerts about one person, in minutes",
         "h_pn_exempt": "who is allowed to share: comma-separated userIds",
         "h_pn_proxy": "http proxy to reach the panel",
         "h_pn_dry": "only show what was found, change nothing",
-        "pn_bad_action": "action is notify, limit, drop, or a combination",
+        "pn_bad_action": "action is notify, limit, block, drop, or a combination",
         "pn_bad_url": "the panel address must start with http:// or https://",
         "tg_limited": "Limited",
         "tg_shared": "this address may be shared by several people",
@@ -2676,7 +2686,20 @@ PANEL_RETRY = 900           # пауза после ошибки, чтобы н�
 PANEL_JOB_DEADLINE = 20.0   # сколько всего ждём готовности задачи, секунд
 PANEL_JOB_POLL = 1.0        # пауза между опросами задачи
 PANEL_HTTP_TIMEOUT = 10     # на один запрос, секунд
-PANEL_ACTIONS = ("notify", "limit", "drop")
+PANEL_ACTIONS = ("notify", "limit", "block", "drop")
+
+# «Перекрыть доступ» — это очень маленькая скорость, а не ноль.
+#
+# Ноль в карте ядра означает «ограничения нет»: движок так и написан, и это
+# намеренно — между проверкой и применением лимит могли снять из userspace, и
+# пакет с нулевой скоростью уехал бы мимо всякого учёта. Поэтому блокировка
+# делается минимальной скоростью.
+#
+# 0.05 Мбит/с — это 6250 байт в секунду. Полуторакилобайтный пакет при такой
+# скорости занимает 240 мс, а горизонт очереди в движке — 2 секунды, то есть
+# в очереди помещается восемь пакетов, остальные отбрасываются. Рукопожатие
+# TLS до конца не доходит. Снаружи это выглядит как «интернета нет».
+PANEL_BLOCK_MBPS = 0.05
 PANEL_TOKEN_WARN = 7 * 86400    # предупредить за неделю до истечения токена
 PANEL_MIN_THRESHOLD = 2     # ниже этого порог не опускаем ни при каких настройках
 
@@ -3122,9 +3145,11 @@ def panel_drop(p, ips):
                         "nodeUuids": [str(p.get("node_uuid") or "").strip()]}})
 
 
-def panel_limit(p, ips):
+def panel_limit(p, ips, mbps=None):
     """
     Локальный штраф на адреса нарушителя. Возвращает те, что реально урезаны.
+
+    mbps задаётся явно только блокировкой; в обычном случае берётся из настроек.
 
     Режем только то, что нода видит сама: панель отдаёт и адреса, которые уже
     отвалились, а карта ядра — то, что есть сейчас. Белый список и уже
@@ -3134,7 +3159,7 @@ def panel_limit(p, ips):
     wl = whitelist_ips()
     known = set(read_users())
     pens = load_penalties()
-    mbps = float(p.get("limit_mbps") or 1)
+    mbps = float(mbps if mbps is not None else (p.get("limit_mbps") or 1))
     minutes = max(1, int(p.get("limit_min") or 60))
     until = time.time() + minutes * 60
 
@@ -3164,17 +3189,33 @@ def panel_notify(cfg, rec):
     Обрезать молча нельзя: список адресов и есть то, ради чего это писалось.
     """
     p, tg = cfg["panel"], cfg["telegram"]
-    who = panel_label(rec["user_id"], rec.get("person"))
-    lines = [t("pn_msg_head", node=node_label(tg)),
-             t("pn_msg_user", user=html.escape(who)),
-             t("pn_msg_ips", n=rec["count"],
-               w=max(1, int(p.get("window_min") or 10)))]
-    if rec.get("limited"):
+    person = rec.get("person") or {}
+    minutes = max(1, int(p.get("limit_min") or 60))
+
+    # Карточка построена под одну задачу: увидеть сообщение и сразу пойти
+    # разбираться в панели. Поэтому оба идентификатора — отдельными строками и
+    # в <code>: в Telegram такой текст копируется одним касанием, а искать
+    # человека всё равно придётся по ним.
+    lines = [t("pn_msg_head", node=node_label(tg)), ""]
+    name = person.get("name")
+    if name:
+        lines.append(t("pn_card_name", name=html.escape(name)))
+    if person.get("telegram_id"):
+        lines.append(t("pn_card_tg", id=html.escape(person["telegram_id"])))
+    lines.append(t("pn_card_panel", id=html.escape(str(rec["user_id"]))))
+    lines.append("")
+    lines.append(t("pn_msg_ips", n=rec["count"],
+                   w=max(1, int(p.get("window_min") or 10))))
+
+    if rec.get("blocked"):
+        lines.append(t("pn_msg_blocked", n=len(rec["limited"]), m=minutes))
+    elif rec.get("limited"):
         lines.append(t("pn_msg_limited", n=len(rec["limited"]),
-                       mbps=p.get("limit_mbps", 1),
-                       m=max(1, int(p.get("limit_min") or 60))))
+                       mbps=p.get("limit_mbps", 1), m=minutes))
     if rec.get("dropped"):
         lines.append(t("pn_msg_dropped", n=len(rec["dropped"])))
+    if not (rec.get("blocked") or rec.get("limited") or rec.get("dropped")):
+        lines.append(t("pn_msg_nothing"))
 
     shown = rec["ips"][:PANEL_IPS_INLINE]
     if shown:
@@ -3186,10 +3227,17 @@ def panel_notify(cfg, rec):
     tg_send("\n".join(lines), cfg)
 
     if extra > 0:
-        body = "\n".join([who, ""] + list(rec["ips"])) + "\n"
-        name = "shape-sharing-%s-%s.txt" % (
+        who = panel_label(rec["user_id"], rec.get("person"))
+        # Шапка внутри файла — чтобы вложение оставалось понятным само по
+        # себе: его пересылают и открывают отдельно от сообщения.
+        head = [who,
+                t("pn_card_panel_plain", id=rec["user_id"]),
+                t("pn_rep_head", node=node_label(tg),
+                  at=time.strftime("%Y-%m-%d %H:%M")), ""]
+        body = "\n".join(head + list(rec["ips"])) + "\n"
+        fname = "shape-sharing-%s-%s.txt" % (
             _safe_name(rec["user_id"]), time.strftime("%Y-%m-%d"))
-        ok, err = tg_document(cfg, name, body.encode(),
+        ok, err = tg_document(cfg, fname, body.encode(),
                               t("pn_msg_file", user=html.escape(who),
                                 n=len(rec["ips"])),
                               mime="text/plain; charset=utf-8")
@@ -3267,6 +3315,7 @@ def panel_scan(cfg, now=None, act=True):
     for rec in found:
         rec.setdefault("limited", [])
         rec.setdefault("dropped", [])
+        rec.setdefault("blocked", False)
         # Кулдаун: один и тот же перепродавец не должен приходить в Telegram
         # каждые пять минут — иначе уведомления перестают читать.
         if now - float(seen.get(rec["user_id"]) or 0) < cooldown:
@@ -3277,9 +3326,16 @@ def panel_scan(cfg, now=None, act=True):
         # весь справочник в шесть тысяч записей каждые пять минут незачем.
         rec["person"] = panel_user(p, rec["user_id"])
 
-        if "limit" in actions:
+        # Блокировка старше обычного ограничения: если задано и то и другое,
+        # выигрывает более строгое. Обрыв к ней прилагается сам — без него
+        # уже установленные соединения просто стали бы медленными, а человек
+        # остался бы «в сети» до того, как они отвалятся по таймауту.
+        if "block" in actions:
+            rec["blocked"] = True
+            rec["limited"] = panel_limit(p, rec["ips"], PANEL_BLOCK_MBPS)
+        elif "limit" in actions:
             rec["limited"] = panel_limit(p, rec["ips"])
-        if "drop" in actions:
+        if "drop" in actions or "block" in actions:
             try:
                 panel_drop(p, rec["ips"])
                 rec["dropped"] = list(rec["ips"])

@@ -13,6 +13,7 @@
 не должна ничего ломать. Нода обязана оставаться самостоятельной.
 """
 import base64
+import io
 import importlib.util
 import json
 import os
@@ -637,6 +638,91 @@ check("одиночный запрос не делается", S.panel_user(conf
 check("и в панель за ним не ходили", PANEL["by_id"] == 0, PANEL["by_id"])
 check("по умолчанию имена включены", S.PANEL_DEFAULT["resolve"] is True)
 check("отчёт по умолчанию выключен", S.PANEL_DEFAULT["report"] is False)
+
+print("\n\033[1m30. Карточка нарушителя пригодна для работы руками\033[0m")
+fresh_cache()
+drop_state()
+sent.clear(); docs.clear()
+PANEL["directory"] = {"741": {"id": 741, "username": "Bashou",
+                             "telegramId": 637181482}}
+PANEL["users"] = [{"userId": 741,
+                   "ips": [{"ip": "1.2.3.%d" % i,
+                            "lastSeen": time.strftime(
+                                "%Y-%m-%dT%H:%M:%S.000Z",
+                                time.gmtime(time.time() - 30))}
+                           for i in range(25)]}]
+cfg_card = {"panel": conf(action="notify"),
+            "telegram": dict(S.TG_DEFAULT, enabled=True, token="x", chat_id="1")}
+S.panel_scan(cfg_card)
+card = sent[0] if sent else ""
+check("имя в карточке", "Bashou" in card, card[:200])
+check("Telegram ID в карточке", "637181482" in card, card[:200])
+check("номер в панели в карточке", "741" in card, card[:200])
+# Оба идентификатора должны копироваться одним касанием — в Telegram это <code>.
+check("Telegram ID копируется касанием",
+      "<code>637181482</code>" in card, card[:300])
+check("номер в панели копируется касанием",
+      "<code>741</code>" in card, card[:300])
+check("сказано, что ничего не предпринято",
+      "уведомление" in card or "notification" in card, card[-200:])
+
+print("\n\033[1m31. Блокировка перекрывает доступ и рвёт соединения\033[0m")
+drop_state()
+sent.clear(); docs.clear(); PANEL["drops"] = []
+applied.clear()
+S.read_users = lambda: {"1.2.3.%d" % i: {} for i in range(25)}
+S.whitelist_ips = lambda: set()
+cfg_block = {"panel": conf(action="notify,block", limit_min=60),
+             "telegram": dict(S.TG_DEFAULT, enabled=True, token="x", chat_id="1")}
+res = S.panel_scan(cfg_block)
+rec = res["offenders"][0]
+check("нарушитель помечен как заблокированный", rec.get("blocked") is True, rec)
+check("урезаны все адреса, которые видит нода", len(rec["limited"]) == 25,
+      len(rec["limited"]))
+check("скорость выставлена блокирующая",
+      applied and all(m == S.PANEL_BLOCK_MBPS for _, m in applied),
+      sorted({m for _, m in applied}))
+check("соединения оборваны вместе с блокировкой",
+      len(rec["dropped"]) == 25, len(rec["dropped"]))
+check("обрыв ушёл в панель", len(PANEL["drops"]) == 1, len(PANEL["drops"]))
+check("в сообщении сказано про перекрытый доступ",
+      sent and ("перекрыт" in sent[0] or "cut off" in sent[0]), sent[0][:400])
+check("и на сколько именно", sent and "60" in sent[0], sent[0][:400])
+
+print("\n\033[1m32. Блокировка — это малая скорость, а не ноль\033[0m")
+# Ноль в карте ядра означает «ограничения нет»: движок так и написан.
+# Блокировка нулём молча превратилась бы в полную свободу.
+check("скорость блокировки не ноль", S.PANEL_BLOCK_MBPS > 0)
+check("и она меньше десятой доли мегабита", S.PANEL_BLOCK_MBPS <= 0.1,
+      S.PANEL_BLOCK_MBPS)
+check("в байтах в секунду это меньше десяти килобайт",
+      S.PANEL_BLOCK_MBPS * S.BYTES_PER_MBPS < 10000,
+      S.PANEL_BLOCK_MBPS * S.BYTES_PER_MBPS)
+src = io.open(os.path.join(SRC, "bpf", "shaper.bpf.c"), encoding="utf-8").read()
+check("движок действительно пропускает трафик при нулевой скорости",
+      "if (rate == 0)" in src and "return TC_ACT_OK" in src)
+
+print("\n\033[1m33. Блокировка строже обычного ограничения\033[0m")
+drop_state()
+applied.clear(); sent.clear()
+cfg_both = {"panel": conf(action="notify,limit,block", limit_mbps=5),
+            "telegram": dict(S.TG_DEFAULT, enabled=True, token="x", chat_id="1")}
+S.panel_scan(cfg_both)
+check("при обоих действиях выигрывает блокировка",
+      applied and all(m == S.PANEL_BLOCK_MBPS for _, m in applied),
+      sorted({m for _, m in applied}))
+
+print("\n\033[1m34. Обычное ограничение блокировкой не стало\033[0m")
+drop_state()
+applied.clear(); sent.clear(); PANEL["drops"] = []
+cfg_soft = {"panel": conf(action="notify,limit", limit_mbps=1),
+            "telegram": dict(S.TG_DEFAULT, enabled=True, token="x", chat_id="1")}
+res = S.panel_scan(cfg_soft)
+check("скорость из настроек, а не блокирующая",
+      applied and all(m == 1 for _, m in applied), sorted({m for _, m in applied}))
+check("без drop соединения не рвутся", PANEL["drops"] == [], PANEL["drops"])
+check("и пометки о блокировке нет",
+      res["offenders"][0].get("blocked") is False, res["offenders"][0])
 
 srv.shutdown()
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")

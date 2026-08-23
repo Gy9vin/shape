@@ -13,6 +13,93 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.16
+
+**Blocking an offender, and a card you can act on straight away.**
+
+Finding a reseller is not enough — an internal `#741` tells you nothing about
+who to write to. The message now carries everything needed to sort it out, and
+access to the node can be cut off on the spot.
+
+### The card
+
+```
+🔎 Looks like a shared subscription · FRONT-3
+
+👤 Bashou
+🆔 Telegram: 637181482
+🔑 Panel ID: 741
+
+Simultaneous addresses: 437 over the last 10 min
+🚫 Access to the node cut off for 60 min, addresses: 412
+Connections dropped: 437
+```
+
+The Telegram ID and the panel ID are on their own lines and wrapped in `<code>`:
+in Telegram that copies with a single tap. You will be searching by them anyway,
+and nobody should retype nine digits off a screen.
+
+A Telegram handle like `@bashoyy` is not stored by the panel — there is no such
+field on its user card, so there is none on ours. The name and the numeric
+Telegram ID are there.
+
+### The new `block` action
+
+```bash
+shaperctl.py panel set --action-set notify,block --minutes 60
+```
+
+Cuts off access to the node: a minimal speed on every address of the offender
+the node can see, plus a drop of the current connections. It lifts itself after
+an hour.
+
+### Why blocking is 0.05 Mbit and not zero
+
+Zero in the kernel map means "no limit". The engine is written that way on
+purpose: between the check and the application the limit could have been removed
+from userspace, and a packet at zero speed would sail past all accounting.
+Blocking with zero would quietly turn into complete freedom — the exact opposite
+of the intent.
+
+So a minimal speed is used instead. The arithmetic:
+
+```
+0.05 Mbit/s          = 6250 bytes/s
+a 1500-byte packet   = 240 ms
+queue horizon        = 2 s  →  eight packets fit
+```
+
+Everything else is dropped and a TLS handshake never completes. From the outside
+it looks like the internet is gone.
+
+Dropping connections is part of blocking and needs no separate switch: without
+it, established connections would merely become slow and the person would stay
+"online" until they timed out.
+
+If both `limit` and `block` are set, `block` wins.
+
+### Details
+
+* when only `notify` is on, the card says so outright: nothing was done.
+  Previously you had to infer it from missing lines;
+* the address-list attachment now has a header — name, panel ID, node, time. The
+  file gets forwarded and opened away from the message, so it must stand alone;
+* blocking leaves the whitelist and existing penalties alone, same as ordinary
+  limiting.
+
+### Upgrading
+
+`block` never enables itself. The default action is still `notify`.
+
+### Tests
+
+21 new ones: the card's contents and the copyability of the identifiers,
+blocking together with the drop, its precedence over ordinary limiting, and the
+bounds of the blocking speed. Separately verified: the engine really does pass
+traffic at zero speed — the whole design rests on that fact. 914 in total.
+
+---
+
 ## 3.15
 
 **Names and Telegram IDs instead of internal numbers, and a node report: who is
