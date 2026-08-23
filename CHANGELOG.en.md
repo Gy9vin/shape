@@ -13,6 +13,45 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.17
+
+**The report is always a file, and the offender's addresses live in a collapsed
+quote.**
+
+Two fixes that came out of running this on live nodes.
+
+### The report arrived in two shapes
+
+A short report was sent as a message, a long one as an attachment. On Narnia
+with 61 users it was text in the chat; on Hogwarts with 76 it was a file. The
+same report looked different on neighbouring nodes, comparing them was awkward,
+and on a node that grew the shape changed by itself.
+
+The report is now **always a file**. The message carries the summary: node,
+users connected, addresses.
+
+### The offender's addresses are in a collapsed quote
+
+They used to be a code block: a hundred addresses stretched the chat, and a
+"copy" button sat on top of it, which makes no sense here — addresses are not
+copied in bulk.
+
+Now it is an expandable quote. Closed by default, opens with a tap, no file
+download needed. In the Bot API this is `expandable_blockquote`; in markup,
+`<blockquote expandable>`.
+
+The hard cap of twenty addresses went away with it: since the list is collapsed,
+showing fewer than fit in the message serves no purpose. About two hundred and
+fifty addresses go into the quote; the rest still arrive as an attachment.
+
+### Tests
+
+2 new, 6 rewritten for the new behaviour: the quote is expandable and is not a
+code block, a hundred addresses fit whole, four hundred go to a file, and the
+report arrives as an attachment regardless of size. 916 in total.
+
+---
+
 ## 3.16
 
 **Blocking an offender, and a card you can act on straight away.**

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.16-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.17-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.16
+# Shape v3.17
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -900,11 +900,17 @@ Simultaneous addresses: 437 over the last 10 min
 🚫 Access to the node cut off for 60 min, addresses: 412
 Connections dropped: 437
 
-1.2.3.4
-5.6.7.8
-…
-…and 417 more. The full list follows as a file.
+┌ 1.2.3.4
+│ 5.6.7.8
+│ …
+└ (a collapsed quote, tap to expand)
+…and 180 more. The full list follows as a file.
 ```
+
+The addresses sit in a **collapsed quote**: closed by default, so it does not
+stretch the chat over a hundred lines, yet it opens with a tap — no need to
+download the file. As many addresses go into the quote as fit in the message;
+the rest follow as an attachment.
 
 The Telegram ID and the panel ID sit on their own lines and copy with a single
 tap — that is how you find the person in the panel in seconds. The name comes
@@ -982,10 +988,9 @@ Elena (851400228) — 2
 Sorted by the number of simultaneous addresses: whoever is worth a look is on
 top, marked with `⚠`.
 
-A Telegram message holds 4096 characters, and a hundred and fifty people with
-their addresses do not fit — a long report is sent as a **file**, a short one
-stays a message. The sharing alert works the same way: the first twenty
-addresses inline, the full list attached.
+The report always arrives as a **file**, even a short one: that way it looks the
+same on every node and is easy to compare. The message itself carries only the
+summary — node, users connected, addresses.
 
 The report can go to its own topic so it does not clutter the alerts:
 

@@ -533,42 +533,43 @@ check("в сообщении имя, а не номер", any("user_1" in x for 
 check("и Telegram ID", any("850000001" in x for x in sent), sent)
 
 print("\n\033[1m23. Длинный список адресов уходит файлом\033[0m")
+# Четыреста адресов — это больше шести килобайт, в сообщение Telegram они не
+# помещаются ни в каком виде, даже свёрнутые.
 drop_state()
 sent.clear(); docs.clear()
-PANEL["users"] = make_users({1: 120}, age=60)
+PANEL["users"] = make_users({1: 400}, age=60)
 S.panel_scan(cfg_named)
 msg = sent[0] if sent else ""
 check("сообщение ушло", bool(msg))
 check("сообщение уложилось в предел Telegram", len(msg) < 4096, len(msg))
 check("в сообщении показаны не все адреса",
-      msg.count("10.1.") <= S.PANEL_IPS_INLINE, msg.count("10.1."))
-check("сказано, сколько осталось", "120" in msg or "100" in msg, msg[-200:])
-check("файл отправлен", len(docs) == 1, docs)
+      msg.count("10.1.") < 400, msg.count("10.1."))
+check("сказано, сколько осталось", "…и ещё" in msg or "more" in msg, msg[-200:])
+check("файл отправлен", len(docs) == 1, len(docs))
 check("в файле все адреса",
-      docs and docs[0]["body"].count("10.1.") == 120,
+      docs and docs[0]["body"].count("10.1.") == 400,
       docs[0]["body"].count("10.1.") if docs else 0)
 check("имя файла без сюрпризов",
       docs and docs[0]["name"].endswith(".txt") and "/" not in docs[0]["name"],
       docs[0]["name"] if docs else "")
 
-print("\n\033[1m24. Короткий список остаётся в сообщении\033[0m")
-# Граница ровно на PANEL_IPS_INLINE: столько ещё помещается в сообщение
-# целиком, и слать файл ради того же самого списка незачем.
+print("\n\033[1m24. Адреса лежат в свёрнутой цитате\033[0m")
+# Свёрнутая цитата закрыта по умолчанию: сотня адресов не растягивает ленту,
+# но раскрывается касанием, без скачивания файла.
 drop_state()
 sent.clear(); docs.clear()
-PANEL["users"] = make_users({1: S.PANEL_IPS_INLINE}, age=60)
+PANEL["users"] = make_users({1: 120}, age=60)
 S.panel_scan(cfg_named)
-check("на границе файл не понадобился", docs == [], docs)
-check("все адреса видны прямо в сообщении",
-      sent and sent[0].count("10.1.") == S.PANEL_IPS_INLINE,
-      sent[0].count("10.1.") if sent else 0)
-check("и приписки «ещё столько-то» нет", sent and "…" not in sent[0], sent)
-
-drop_state()
-sent.clear(); docs.clear()
-PANEL["users"] = make_users({1: S.PANEL_IPS_INLINE + 1}, age=60)
-S.panel_scan(cfg_named)
-check("на один адрес больше — уже файлом", len(docs) == 1, docs)
+msg = sent[0] if sent else ""
+check("цитата свёрнутая, а не обычная",
+      "<blockquote expandable>" in msg, msg[:400])
+check("цитата закрыта", "</blockquote>" in msg)
+check("это не блок кода: копировать адреса поштучно незачем",
+      "<pre>" not in msg, msg[:400])
+check("сто двадцать адресов уместились целиком",
+      msg.count("10.1.") == 120, msg.count("10.1."))
+check("и файл не понадобился", docs == [], docs)
+check("сообщение всё ещё в пределах Telegram", len(msg) < 4096, len(msg))
 
 print("\n\033[1m25. Отчёт по ноде\033[0m")
 fresh_cache()
@@ -580,7 +581,7 @@ cfg_rep = {"panel": conf(report=True, report_at="00:00"),
            "telegram": dict(S.TG_DEFAULT, enabled=True, token="x", chat_id="1")}
 okrep, err = S.panel_report(cfg_rep, force=True)
 check("отчёт отправлен", okrep, err)
-text = (docs[0]["body"] if docs else sent[0] if sent else "")
+text = docs[0]["body"] if docs else ""
 check("в отчёте есть все подключённые",
       all(("user_%d" % i) in text for i in (1, 2, 3)), text[:200])
 check("не подключённых в отчёте нет", "user_4" not in text)
@@ -628,7 +629,7 @@ PANEL["users"] = make_users({1: 2, 2: 3}, age=60)
 okrep, err = S.panel_report(cfg_rep, force=True)
 PANEL["users_code"] = 0
 check("отчёт не сорвался из-за отказа в справочнике", okrep, err)
-body = (docs[0]["body"] if docs else sent[0] if sent else "")
+body = docs[0]["body"] if docs else ""
 check("вместо имён внутренние номера", "#1" in body and "#2" in body, body[:200])
 
 print("\n\033[1m29. Имена можно выключить совсем\033[0m")

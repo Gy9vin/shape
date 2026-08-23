@@ -2910,8 +2910,7 @@ _PANEL_DIR_CACHE = {"at": 0.0, "map": {}}
 PANEL_DIR_TTL = 3600
 PANEL_PAGE = 1000           # предел панели на одну страницу
 PANEL_DIR_MAX_PAGES = 40    # страховка от бесконечной постраничности
-PANEL_IPS_INLINE = 20       # сколько адресов показывать прямо в сообщении
-PANEL_MSG_LIMIT = 3500      # больше этого уходит вложением, а не сообщением
+PANEL_MSG_LIMIT = 3500      # предел сообщения в Telegram 4096, берём с запасом
 
 
 def panel_person(u):
@@ -3060,11 +3059,13 @@ def panel_report(cfg, now=None, force=False):
              users=len(rows), ips=total_ips)
 
     thread = str(p.get("report_thread_id") or "").strip() or None
-    # Короткий отчёт читать удобнее сообщением, длинный туда просто не влезет.
-    if len(body) <= PANEL_MSG_LIMIT:
-        ok, err = tg_send(f"{head}\n\n<pre>{html.escape(body)}</pre>", cfg,
-                          force=True)
-        return ok, err
+    # Отчёт всегда файлом, даже когда он короткий.
+    #
+    # Раньше короткий уходил сообщением, длинный — вложением, и на разных
+    # нодах один и тот же отчёт выглядел по-разному: где-то текст в ленте,
+    # где-то файл. Сравнивать их между собой становилось неудобно, а на ноде,
+    # которая подросла, форма менялась сама собой. Единообразие здесь важнее
+    # экономии одного касания.
     name = "shape-%s-%s.txt" % (_safe_name(node_label(cfg["telegram"])),
                                 time.strftime("%Y-%m-%d", time.localtime(now)))
     return tg_document(cfg, name, body.encode(), head, thread=thread,
@@ -3217,14 +3218,27 @@ def panel_notify(cfg, rec):
     if not (rec.get("blocked") or rec.get("limited") or rec.get("dropped")):
         lines.append(t("pn_msg_nothing"))
 
-    shown = rec["ips"][:PANEL_IPS_INLINE]
+    # Адреса — в сворачиваемой цитате. Она закрыта по умолчанию, поэтому не
+    # растягивает ленту на сотню строк, но раскрывается касанием — файл
+    # скачивать не нужно. В Bot API это entity expandable_blockquote,
+    # в разметке HTML — <blockquote expandable>.
+    #
+    # Кладём столько адресов, сколько влезает в сообщение: раз список всё
+    # равно свёрнут, показывать меньше, чем можно, смысла нет.
+    head = "\n".join(lines)
+    shown, rest = [], list(rec["ips"])
+    room = PANEL_MSG_LIMIT - len(head)
+    while rest and room - (len(rest[0]) + 1) > 0:
+        room -= len(rest[0]) + 1
+        shown.append(rest.pop(0))
+
     if shown:
-        lines.append("")
-        lines.append("<pre>" + html.escape("\n".join(shown)) + "</pre>")
-    extra = len(rec["ips"]) - len(shown)
+        head += ("\n\n<blockquote expandable>"
+                 + html.escape("\n".join(shown)) + "</blockquote>")
+    extra = len(rest)
     if extra > 0:
-        lines.append(t("pn_msg_more", n=extra))
-    tg_send("\n".join(lines), cfg)
+        head += "\n" + t("pn_msg_more", n=extra)
+    tg_send(head, cfg)
 
     if extra > 0:
         who = panel_label(rec["user_id"], rec.get("person"))
