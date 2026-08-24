@@ -2182,7 +2182,11 @@ def cmd_watch(a):
                              "score": score, "reasons": reasons}
                     # Ярлык владельца прикрепляем в момент выдачи: позже
                     # человек может отключиться, и связь потеряется.
-                    who = owner_of(ip)
+                    #
+                    # Сначала свой список владельцев — он заполняется руками и
+                    # потому точнее. Не нашлось — спрашиваем панель: она знает
+                    # всех, но только пока адрес активен.
+                    who = owner_of(ip) or panel_owner(cfg, ip)
                     if who:
                         entry["subject"] = who
                     # Под замком: файл теперь правит ещё и API.
@@ -2907,6 +2911,13 @@ def panel_offenders(users, p, now=None):
 # забыли. Сторож живёт долго, часа кэша достаточно — имена меняются реже.
 
 _PANEL_DIR_CACHE = {"at": 0.0, "map": {}}
+
+# Кто стоит за адресом — по последнему опросу панели. Нужно ровно для одного:
+# когда сторож выдаёт штраф, сказать в сообщении не «203.0.113.7», а имя
+# человека. Сторож — процесс долгоживущий, и карта от опроса пятиминутной
+# давности у него под рукой; на диск она не пишется.
+_PANEL_IP_OWNER = {"at": 0.0, "map": {}}
+PANEL_IP_OWNER_TTL = 1800
 PANEL_DIR_TTL = 3600
 PANEL_PAGE = 1000           # предел панели на одну страницу
 PANEL_DIR_MAX_PAGES = 40    # страховка от бесконечной постраничности
@@ -2942,6 +2953,39 @@ def panel_user(p, uid):
         return panel_person(panel_call(p, "GET", "/api/users/%s" % uid))
     except PanelError:
         return None
+
+
+def panel_owner(cfg, ip, now=None):
+    """
+    Кто стоит за адресом, по данным панели. Формат тот же, что у owners.json.
+
+    Нужно для сообщения о штрафе: «Ограничен 203.0.113.7» говорит куда меньше,
+    чем «Ограничен Bashou · 203.0.113.7». Карта адресов берётся из последнего
+    опроса панели и стоит ноль запросов; имя спрашивается поимённо и только
+    когда штраф действительно выдан — то есть редко.
+
+    Ничего не нашлось — None, и сообщение уйдёт как раньше, с адресом.
+    """
+    p = cfg.get("panel") or {}
+    if not p.get("enabled"):
+        return None
+    now = now if now is not None else time.time()
+    if now - float(_PANEL_IP_OWNER.get("at") or 0) > PANEL_IP_OWNER_TTL:
+        return None
+    uid = (_PANEL_IP_OWNER.get("map") or {}).get(ip)
+    if not uid:
+        return None
+
+    out = {"user_id": str(uid)}
+    person = panel_user(p, uid)
+    if person:
+        if person.get("name"):
+            out["label"] = person["name"]
+        # subject_text прогоняет идентификатор через int() — нечисловое
+        # значение уронило бы отправку сообщения о штрафе.
+        if str(person.get("telegram_id") or "").isdigit():
+            out["telegram_id"] = person["telegram_id"]
+    return out
 
 
 def panel_directory(p, now=None, force=False):
@@ -3314,6 +3358,13 @@ def panel_scan(cfg, now=None, act=True):
     except PanelError as e:
         return {"ok": False, "error": str(e), "code": e.code,
                 "users": 0, "offenders": []}
+
+    # Побочный, но полезный итог опроса: карта «адрес → чей он». Стоила она
+    # ноль запросов — данные уже пришли, — а сторожу позволяет подписать штраф
+    # именем, а не голым адресом.
+    _PANEL_IP_OWNER.update(
+        {"at": now,
+         "map": {ip: u["user_id"] for u in users for ip, _ in u["ips"]}})
 
     found = panel_offenders(users, p, now)
     res = {"ok": True, "error": "", "code": 0,

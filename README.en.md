@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.18-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.19-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.18
+# Shape v3.19
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -176,6 +176,21 @@ the channel over the last minute.
 Whitelisted addresses are shown alongside the rest: the limit does not apply to
 them, but the load they create is just as real and worth knowing about. They
 used to be invisible everywhere.
+
+### Why "now" sometimes exceeds the limit
+
+The monitor shows 128% and even 202% of the limit. That is not the limiter
+failing but a consequence of where bytes are counted.
+
+The counter increments when a packet **enters** the shaper, not when it reaches
+the client. Downloads are paced by `fq`: a packet is given a departure time and
+waits its turn. A burst arrives, the counter has already counted it, and the
+client receives it spread over the following seconds.
+
+The neighbouring column proves it: the address showing 202% had **avg** of
+2.5 Mbit against a 10 Mbit limit. The one-minute average always stays under the
+limit — that is what actually arrives. "Now" is an instantaneous sample, and
+spikes in it are normal.
 
 That is usually enough to spot a downloader without any auto-limiting at all.
 

@@ -725,6 +725,51 @@ check("без drop соединения не рвутся", PANEL["drops"] == []
 check("и пометки о блокировке нет",
       res["offenders"][0].get("blocked") is False, res["offenders"][0])
 
+print("\n\033[1m35. Кто стоит за адресом — для сообщения о штрафе\033[0m")
+# Карта «адрес → чей он» набирается тем же опросом, что ищет раздачу, и стоит
+# ноль дополнительных запросов. Имя спрашивается только когда штраф выдан.
+fresh_cache()
+drop_state()
+S._PANEL_IP_OWNER.update({"at": 0.0, "map": {}})
+PANEL["directory"] = {"741": {"id": 741, "username": "Bashou",
+                             "telegramId": 637181482}}
+PANEL["users"] = [{"userId": 741,
+                   "ips": [{"ip": "1.2.3.4", "lastSeen": time.strftime(
+                       "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 30))}]}]
+cfg_own = {"panel": conf(action="notify"),
+           "telegram": dict(S.TG_DEFAULT, enabled=True, token="x", chat_id="1")}
+PANEL["by_id"] = 0
+S.panel_scan(cfg_own)
+check("карта адресов набралась попутно",
+      S._PANEL_IP_OWNER["map"].get("1.2.3.4") == "741", S._PANEL_IP_OWNER)
+check("на её сбор запросов не потрачено", PANEL["by_id"] == 0, PANEL["by_id"])
+
+who = S.panel_owner(cfg_own, "1.2.3.4")
+check("владелец найден", bool(who), who)
+check("имя подставлено", (who or {}).get("label") == "Bashou", who)
+check("telegram подставлен", (who or {}).get("telegram_id") == "637181482", who)
+check("номер в панели сохранён", (who or {}).get("user_id") == "741", who)
+check("подпись собирается без ошибок",
+      "Bashou" in S.subject_text(who, "1.2.3.4"),
+      S.subject_text(who, "1.2.3.4"))
+check("чужой адрес — никого", S.panel_owner(cfg_own, "9.9.9.9") is None)
+check("панель выключена — никого",
+      S.panel_owner({"panel": dict(S.PANEL_DEFAULT)}, "1.2.3.4") is None)
+
+# Устаревшая карта хуже отсутствующей: человек за адресом мог смениться.
+S._PANEL_IP_OWNER["at"] = time.time() - S.PANEL_IP_OWNER_TTL - 1
+check("протухшая карта не используется",
+      S.panel_owner(cfg_own, "1.2.3.4") is None)
+
+# Нечисловой telegram уронил бы отправку: subject_text прогоняет его через int.
+S._PANEL_IP_OWNER.update({"at": time.time(), "map": {"1.2.3.4": "742"}})
+PANEL["directory"]["742"] = {"id": 742, "username": "Кто-то",
+                             "telegramId": "не число"}
+who = S.panel_owner(cfg_own, "1.2.3.4")
+check("нечисловой telegram отброшен", "telegram_id" not in (who or {}), who)
+check("но имя всё равно есть", (who or {}).get("label") == "Кто-то", who)
+check("и подпись не падает", "Кто-то" in S.subject_text(who, "1.2.3.4"))
+
 srv.shutdown()
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)

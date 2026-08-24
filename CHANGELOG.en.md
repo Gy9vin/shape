@@ -13,6 +13,65 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.19
+
+**Seeders no longer slip past the watchdog, and the penalty message names the
+person.**
+
+### The download floor caught the wrong people
+
+An address with 3.4 Mbit down, 7.1 up and 1400-byte packets against a 10 Mbit
+limit is a torrent, plainly. The watchdog left it alone.
+
+The mandatory condition was the reason: it demanded **both** a download above
+50% of the limit **and** upload. But a seeder downloads less than it uploads, by
+definition. It never reached five megabits down, so the scoring stage was never
+even reached — no matter how much it seeded.
+
+In the torrent preset the download floor drops from 50% to **10%**. That is safe
+precisely because the same preset requires large upload packets: an ordinary
+download also passes the low floor but fails on packet size — acknowledgements
+stay short at any speed.
+
+The other presets are untouched: their download floor is still 50% and they do
+not require packets.
+
+### The penalty message says who it is
+
+Before: `Limited 203.0.113.7 → 1 Mbit/s`. Now: `Limited Bashou · 203.0.113.7`,
+with a link to the person in Telegram.
+
+The address-to-user map is collected by the same panel poll that looks for
+sharing: the data has already arrived, so it costs zero extra requests. The name
+is looked up individually and only when a penalty is actually issued — rarely.
+
+The local owners list (`owners.json`) still wins: it is filled in by hand and is
+therefore more reliable. The panel is consulted only when it is empty.
+
+The map lives in the watchdog's memory and is never written to disk. Older than
+half an hour and it is ignored: by then the address may belong to somebody else,
+and signing a penalty with the wrong name is worse than not signing it.
+
+### If penalty messages do not arrive
+
+Check that **both** switches are on: Telegram itself and events.
+
+```bash
+shaperctl.py telegram show
+shaperctl.py telegram set --events on
+```
+
+Without `events` penalties are issued silently — it is a separate setting, not
+part of the general one.
+
+### Tests
+
+16 new: the address map is collected without extra requests, name and Telegram
+are filled in, a stale map is ignored, a non-numeric identifier does not break
+sending, and preset thresholds stay put. 939 in total.
+
+---
+
 ## 3.18
 
 **The panel moved to the main screen, and that screen finally shows everything.**
