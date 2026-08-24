@@ -186,6 +186,8 @@ MSG = {
         "tg_need_proxy": "похоже на блокировку — задай прокси",
         "tg_sent": "сообщение отправлено",
         "tg_test_text": "Проверка связи прошла успешно.",
+        "edt_off": "СКАЧИВАНИЕ НЕ ОГРАНИЧИВАЕТСЯ: на интерфейсе {kinds}, а не fq",
+        "edt_fix": "только fq придерживает пакеты по времени отправки. Почините: modprobe sch_fq, затем systemctl restart shaper",
 
         # Панель Remnawave
         "pn_no_url": "адрес панели не задан",
@@ -497,6 +499,8 @@ MSG = {
         "tg_need_proxy": "looks like blocking — set a proxy",
         "tg_sent": "message sent",
         "tg_test_text": "Connection test passed.",
+        "edt_off": "DOWNLOADS ARE NOT LIMITED: the interface has {kinds}, not fq",
+        "edt_fix": "only fq holds packets until their departure time. Fix: modprobe sch_fq, then systemctl restart shaper",
 
         # Remnawave panel
         "pn_no_url": "the panel address is not set",
@@ -1137,6 +1141,12 @@ def cmd_show(a):
     else:
         print(f"  {t('speed'):<9}: {C['yel']}{t('unlimited')}{C['r']}")
     print(f"  {t('ports'):<9}: {ports}")
+    # Предупреждение стоит здесь, на самом ходовом экране: нода без fq
+    # выглядит здоровой во всём остальном, и заметить это больше негде.
+    ready, bad = edt_ready()
+    if not ready:
+        print(f"  {C['red']}⚠ {t('edt_off', kinds=bad)}{C['r']}")
+        print(f"    {C['gry']}{t('edt_fix')}{C['r']}")
     cmd_guard_show(cfg["speed_mbps"], cfg["guard"])
     # Строка для сверки нод между собой: одинаковый отпечаток — одинаковая
     # политика. Держим её приглушённой, повседневной работе она не мешает.
@@ -3823,6 +3833,46 @@ def active_iface():
     return None
 
 
+# Какие qdisc допустимы на интерфейсе, кроме самого fq: mq — контейнер очередей
+# многоочередной карты, clsact — точка подвеса фильтров, noqueue — заглушка.
+FQ_OK_KINDS = ("fq", "mq", "clsact", "noqueue")
+
+
+def edt_ready(iface=None):
+    """
+    Ограничивается ли скачивание. Возвращает (готово, что мешает).
+
+    Движок расставляет время отправки в skb->tstamp, но придержать пакет до
+    этого времени умеет только fq. Стоящий по умолчанию в Debian и Ubuntu
+    fq_codel поле игнорирует и отправляет всё сразу: движок работает, штрафы
+    выдаются, а скачивание при этом не ограничено ничем.
+
+    Снаружи это выглядит как «лимит 10, а в мониторе 160%», и без отдельной
+    проверки причину не найти — всё остальное показывает полное здоровье.
+
+    Неизвестно (нет интерфейса, нет tc) — (True, ""): пугать на пустом месте
+    хуже, чем промолчать.
+    """
+    iface = iface or active_iface()
+    if not iface:
+        return True, ""
+    try:
+        out = subprocess.run(["tc", "qdisc", "show", "dev", iface],
+                             capture_output=True, text=True, timeout=5)
+    except Exception:
+        return True, ""
+    if out.returncode != 0:
+        return True, ""
+
+    bad = []
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) > 1 and parts[0] == "qdisc" and parts[1] not in FQ_OK_KINDS:
+            if parts[1] not in bad:
+                bad.append(parts[1])
+    return (not bad), ", ".join(bad)
+
+
 def systemd_active(unit):
     """Только заранее известные имена юнитов — параметр не приходит извне."""
     if unit not in ("shaper", "shaper-watch", "shape-api"):
@@ -4010,6 +4060,15 @@ def build_metrics(users=None, unit_state=None, started=None, events=None):
         series("shape_last_day_bytes", "gauge", "Traffic of the last closed day",
                [({"direction": "download"}, hist[-1].get("down", 0)),
                 ({"direction": "upload"}, hist[-1].get("up", 0))])
+
+    # Готовность к ограничению скачивания. Метрика нужна именно отдельная:
+    # нода без fq выглядит совершенно здоровой — движок загружен, штрафы
+    # выдаются, трафик считается, — и только скачивание не ограничено ничем.
+    # На флоте в сотню нод найти такую иначе нечем.
+    if loaded:
+        add("shape_edt_ready", "gauge",
+            "1 if downloads are actually paced (fq present)",
+            1 if edt_ready(iface)[0] else 0)
 
     # Связь с панелью. Метрики отдаём только когда она включена: на ноде без
     # панели нули означали бы поломку, а её нет.

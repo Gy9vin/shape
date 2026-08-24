@@ -275,5 +275,66 @@ except SystemExit:
 except Exception as exc:
     check("guard --help отрабатывает", False, repr(exc))
 
+print("\n\033[1mГотовность к ограничению скачивания\033[0m")
+# Движок расставляет время отправки, но придержать пакет умеет только fq.
+# fq_codel — умолчание Debian и Ubuntu — это поле игнорирует, и скачивание
+# перестаёт ограничиваться, при том что всё остальное выглядит здоровым.
+# Поэтому проверяем разбор именно вывода tc, а не свои представления о нём.
+import subprocess as _sp
+import types as _types
+
+_REAL_RUN = _sp.run
+
+
+def _tc(output, code=0):
+    def run(cmd, *a, **kw):
+        if cmd[:1] == ["tc"]:
+            return _types.SimpleNamespace(returncode=code, stdout=output, stderr="")
+        return _REAL_RUN(cmd, *a, **kw)
+    return run
+
+
+MQ_FQ = """qdisc mq 0: root
+qdisc fq 8001: parent :1 limit 10000p flow_limit 100p
+qdisc fq 8002: parent :2 limit 10000p flow_limit 100p
+qdisc clsact ffff: parent ffff:fff1
+"""
+# Ровно то, что пришло с живой ноды: mq с fq_codel на очередях.
+MQ_CODEL = """qdisc mq 0: root
+qdisc fq_codel 0: parent :2 limit 10240p flows 1024 quantum 1514
+qdisc fq_codel 0: parent :1 limit 10240p flows 1024 quantum 1514
+qdisc clsact ffff: parent ffff:fff1
+"""
+PLAIN_FQ = """qdisc fq 8001: root refcnt 2 limit 10000p flow_limit 100p
+qdisc clsact ffff: parent ffff:fff1
+"""
+PFIFO = """qdisc pfifo_fast 0: root refcnt 2 bands 3
+qdisc clsact ffff: parent ffff:fff1
+"""
+
+_sp.run = _tc(MQ_FQ)
+check("mq с fq на очередях — готово", S.edt_ready("eth0") == (True, ""))
+_sp.run = _tc(PLAIN_FQ)
+check("одиночный fq — готово", S.edt_ready("eth0") == (True, ""))
+
+_sp.run = _tc(MQ_CODEL)
+ready, bad = S.edt_ready("eth0")
+check("fq_codel на очередях распознан как беда", ready is False)
+check("и назван по имени", bad == "fq_codel", bad)
+
+_sp.run = _tc(PFIFO)
+ready, bad = S.edt_ready("eth0")
+check("pfifo_fast тоже не годится", ready is False)
+check("и он тоже назван", bad == "pfifo_fast", bad)
+
+# Неизвестность не повод пугать: без интерфейса и при сломанном tc молчим.
+_sp.run = _tc("", code=1)
+check("сломанный tc не поднимает ложную тревогу",
+      S.edt_ready("eth0") == (True, ""))
+_sp.run = _REAL_RUN
+check("без интерфейса тоже молчим", S.edt_ready(None) == (True, ""))
+check("clsact и noqueue сами по себе не беда",
+      set(("clsact", "noqueue")) <= set(S.FQ_OK_KINDS))
+
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)

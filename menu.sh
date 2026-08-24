@@ -1461,7 +1461,24 @@ doctor() {
         echo -e "${G}✓ ${T[dr_mounted]}${N}" || echo -e "${R}✗ ${T[dr_notmounted]}${N}")"
     ifc="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
     echo -e "  ${T[dr_iface]}: ${B}${ifc:-${T[dr_undetected]}}${N}"
-    [[ -n "$ifc" ]] && echo -e "  ${T[dr_qdisc]}: $(tc qdisc show dev "$ifc" root 2>/dev/null | awk '{print $2}')"
+    # Смотреть только корневой qdisc мало: у многоочередной карты корень —
+    # это mq, а придерживать пакеты будут её дети. Именно там и оказывался
+    # fq_codel, из-за которого скачивание переставало ограничиваться, а
+    # доктор при этом показывал бодрое «mq».
+    if [[ -n "$ifc" ]]; then
+        local qall qbad
+        qall="$(tc qdisc show dev "$ifc" 2>/dev/null | awk '{print $2}' |
+                sort -u | tr '\n' ' ')"
+        qbad="$(tc qdisc show dev "$ifc" 2>/dev/null |
+                awk '$2!="fq" && $2!="mq" && $2!="clsact" && $2!="noqueue" {print $2}' |
+                sort -u | tr '\n' ' ')"
+        if [[ -n "$qbad" ]]; then
+            echo -e "  ${T[dr_qdisc]}: ${R}✗ ${qbad% }${N} — ${T[dr_qdisc_bad]}"
+            echo -e "  ${D}   ${T[dr_qdisc_fix]}${N}"
+        else
+            echo -e "  ${T[dr_qdisc]}: ${G}✓${N} ${qall% }"
+        fi
+    fi
     printf "  %-17s: %s\n" "${T[dr_watch]}" "$(systemctl is-active shaper-watch >/dev/null 2>&1 &&
         echo -e "${G}✓ ${T[dr_running]}${N}" || echo -e "${Y}⚠ ${T[dr_stopped]}${N}")"
     echo -e "  ${T[dr_maps]}: $([[ -d /sys/fs/bpf/shaper/maps ]] &&

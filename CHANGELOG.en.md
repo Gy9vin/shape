@@ -13,6 +13,129 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.21
+
+**A follow-up to 3.20: attaching to `mq` queues does not always work, and then a
+fallback is needed.**
+
+The manual fix on a live node failed:
+
+```
+# tc qdisc replace dev eth0 parent :1 fq
+Error: Failed to find specified qdisc.
+```
+
+The message is misleading. `fq` is present in the kernel — it is the **parent**
+that cannot be resolved: `mq` on that machine has handle `0:`, so `parent :1`
+means `0:1`, and the kernel treats zero as "unspecified". It cannot find a
+parent by that.
+
+The 3.20 engine honestly shouted that `fq` had not taken, but could not fix it —
+it knew only one way.
+
+### The fallback
+
+If foreign qdiscs remain on the interface after the attempt to attach to the
+queues, the engine replaces the root outright:
+
+```bash
+tc qdisc replace dev "$IFACE" root fq
+```
+
+One `fq` for the whole interface instead of a queue per CPU is a small loss of
+parallelism, unnoticeable at tens of megabits. Downloads with no limit at all is
+a far bigger loss.
+
+The order matters: the gentle way first, leaving `mq` alone unless necessary —
+it spreads queues across cores. Only if that fails, the root is replaced.
+
+The `tc` error is now printed rather than swallowed: it was exactly what
+explained the cause, and hiding it was a mistake.
+
+### Tests
+
+3 new: the fallback exists, runs after the check rather than instead of it, and
+the `tc` error reaches the operator. 959 in total.
+
+---
+
+## 3.20
+
+**Found the reason downloads could go completely unlimited. Check your nodes.**
+
+### What happened
+
+On a node with a 10 Mbit limit, addresses held 130–160% of the limit steadily,
+not in bursts. `tc` showed the root:
+
+```
+qdisc mq 0: root
+ qdisc fq_codel 0: parent :2 ...
+ qdisc fq_codel 0: parent :1 ...
+```
+
+The queues carried `fq_codel`, not `fq`. The engine writes a departure time into
+`skb->tstamp`, but **only `fq` holds a packet until that time**. `fq_codel` —
+the default on Debian and Ubuntu — ignores the field and sends everything at
+once.
+
+So downloads were not limited at all. Uploads still worked: they use a token
+bucket with drops and need no `fq`.
+
+### Why nobody noticed
+
+The engine assigned `fq` and swallowed the error:
+
+```bash
+tc qdisc replace dev "$IFACE" parent ":$i" fq 2>/dev/null || true
+ok "fq assigned to $n queues (mq)"
+```
+
+The success message printed regardless of the outcome. The doctor looked only at
+the root qdisc and cheerfully reported `mq` — technically true, while nobody
+checked the queues underneath.
+
+The node looked perfectly healthy otherwise: engine loaded, traffic counted,
+penalties issued, autostart in place. The only symptom was percentages in the
+monitor, easily written off as bursts.
+
+### What changed
+
+* the engine **verifies the result** instead of merely attempting: after the
+  attempt it re-reads the queues and, if `fq` did not take, shouts in red and
+  states plainly that downloads are not limited;
+* it tries `modprobe sch_fq` first — on some kernels the module is simply not
+  loaded;
+* this does not abort loading: accounting, uploads and the whitelist work
+  without `fq`, and a node with no shaper at all is worse than half a shaper;
+* the doctor inspects **all** queues, not just the root, and names the culprit;
+* the warning appears on the main status screen, where people actually look;
+* a new metric `shape_edt_ready`: across a hundred nodes there is no other way
+  to find one in this state. Zero means downloads are not limited.
+
+### How to check your nodes
+
+```bash
+/opt/shaper/shaperctl.py show
+```
+
+If all is well, nothing new appears. If not, you get a red line. The fix:
+
+```bash
+modprobe sch_fq && systemctl restart shaper
+```
+
+If `modprobe` complains, `sch_fq` is missing from the kernel — you need a
+different kernel image or the `linux-modules-extra` package.
+
+### Tests
+
+17 new: parsing real `tc` output in every variant (`mq` with `fq`, `mq` with
+`fq_codel`, plain `fq`, `pfifo_fast`), staying quiet when `tc` fails or there is
+no interface, and the honesty of the engine and the doctor. 956 in total.
+
+---
+
 ## 3.19
 
 **Seeders no longer slip past the watchdog, and the penalty message names the
