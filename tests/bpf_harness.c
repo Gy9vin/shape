@@ -133,6 +133,44 @@ static int build_v6_ext(int n_ext, unsigned sport, unsigned dport, int payload)
     return (int)(p - pkt) + 20 + payload;
 }
 
+/* IPIP: наружный IPv4 с protocol 4, внутри обычный IPv4+L4.
+ * out_dst/out_src — концы туннеля, dst/src — настоящие адреса. */
+static int build_ipip_v4(unsigned inner_proto, unsigned sport, unsigned dport,
+                         int payload, unsigned dst, unsigned src,
+                         unsigned out_dst, unsigned out_src)
+{
+    memset(pkt, 0, 2048);
+    pkt[12] = 0x08; pkt[13] = 0x00;                 /* ethertype IPv4 */
+    struct iphdr *out = (struct iphdr *)(pkt + 14);
+    out->version = 4; out->ihl = 5; out->protocol = IPPROTO_IPIP;
+    out->daddr = out_dst; out->saddr = out_src;
+    struct iphdr *in = (struct iphdr *)(pkt + 14 + 20);
+    in->version = 4; in->ihl = 5; in->protocol = inner_proto;
+    in->daddr = dst; in->saddr = src;
+    unsigned char *l4 = pkt + 14 + 20 + 20;
+    l4[0] = sport >> 8; l4[1] = sport & 0xFF;
+    l4[2] = dport >> 8; l4[3] = dport & 0xFF;
+    return 14 + 20 + 20 + (inner_proto == IPPROTO_TCP ? 20 : 8) + payload;
+}
+
+/* IPv6 внутри IPv4: protocol 41, TCP сразу за заголовком IPv6 */
+static int build_ipip_v6(unsigned sport, unsigned dport, int payload)
+{
+    memset(pkt, 0, 2048);
+    pkt[12] = 0x08; pkt[13] = 0x00;
+    struct iphdr *out = (struct iphdr *)(pkt + 14);
+    out->version = 4; out->ihl = 5; out->protocol = IPPROTO_IPV6;
+    struct ipv6hdr *in = (struct ipv6hdr *)(pkt + 14 + 20);
+    in->version = 6;
+    in->nexthdr = IPPROTO_TCP;
+    in->saddr.in6_u.u6_addr32[0] = 0x019A;
+    in->saddr.in6_u.u6_addr32[3] = 0x77;
+    unsigned char *l4 = pkt + 14 + 20 + 40;
+    l4[0] = sport >> 8; l4[1] = sport & 0xFF;
+    l4[2] = dport >> 8; l4[3] = dport & 0xFF;
+    return 14 + 20 + 40 + 20 + payload;
+}
+
 static int ok = 0, fail = 0;
 static void check(const char *name, int cond) {
     if (cond) { ok++; printf("  \033[32m✓\033[0m %s\n", name); }
@@ -333,6 +371,47 @@ int main(void)
     check("адрес из белого списка по UDP считается", sw != NULL);
     check("его байты растут", sw && sw->total_bytes > 1200);
     check("но задержка не применяется", skb.tstamp == 0);
+
+    printf("\n\033[1m9. IPIP-туннель (хостер отдаёт белый IP через туннель)\033[0m\n");
+    unsigned TUN_GW = 0x0D00007F, IC_DOWN = 0x1700007F, IC_UP = 0x1800007F;
+
+    /* download: снаружи пакет SERVER->GW, внутри SERVER->клиент */
+    len = build_ipip_v4(IPPROTO_TCP, 443, 51000, 1400,
+                        IC_DOWN, SERVER, TUN_GW, SERVER);
+    run_pkt(len, 0);
+    struct ip_key ki = {0}; ki.addr[0] = IC_DOWN;
+    check("IPIP download учтён по внутреннему адресу клиента",
+          bpf_map_lookup_elem(&user_state_map_down, &ki) != NULL);
+    struct ip_key ko = {0}; ko.addr[0] = TUN_GW;
+    check("наружный адрес туннеля в карту не попадает",
+          bpf_map_lookup_elem(&user_state_map_down, &ko) == NULL);
+
+    /* upload: снаружи GW->SERVER, внутри клиент->SERVER:443 */
+    len = build_ipip_v4(IPPROTO_TCP, 51000, 443, 100,
+                        SERVER, IC_UP, SERVER, TUN_GW);
+    run_pkt(len, 1);
+    struct ip_key ki2 = {0}; ki2.addr[0] = IC_UP;
+    check("IPIP upload учтён по внутреннему адресу клиента",
+          bpf_map_lookup_elem(&user_state_map_up, &ki2) != NULL);
+
+    fake_now = 6000000000ULL;
+    len = build_ipip_v4(IPPROTO_TCP, 443, 51000, 1400,
+                        IC_DOWN, SERVER, TUN_GW, SERVER);
+    run_pkt(len, 0); t0 = skb.tstamp;
+    run_pkt(len, 0); t1 = skb.tstamp;
+    check("IPIP download тормозится как обычный пакет",
+          (t1 - t0) > 1000000 && (t1 - t0) < 1400000);
+
+    len = build_ipip_v4(IPPROTO_TCP, 443, 51000, 1400,
+                        IC_DOWN, SERVER, TUN_GW, SERVER);
+    check("обрезанный внутренний IPv4 не роняет разбор",
+          run_pkt(14 + 20 + 10, 0) == TC_ACT_OK);
+
+    struct ip_key k6t = {0}; k6t.addr[0] = 0x019A; k6t.addr[3] = 0x77;
+    len = build_ipip_v6(51000, 443, 200);
+    run_pkt(len, 1);
+    check("IPv6 внутри туннеля (protocol 41) тоже учтён",
+          bpf_map_lookup_elem(&user_state_map_up, &k6t) != NULL);
 
     printf("\n\033[1mИтог: %d пройдено, %d провалено\033[0m\n", ok, fail);
     return fail ? 1 : 0;

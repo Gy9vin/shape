@@ -151,6 +151,28 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     if ((void *)(eth + 1) > data_end)
         return TC_ACT_OK;
 
+    /* Трафик ноды нередко приходит внутри IPIP-туннеля: хостер отдаёт белый
+     * IP через туннель, и на наружном интерфейсе каждый пакет обёрнут лишним
+     * заголовком с protocol 4 (IPv4-in-IPv4) или 41 (IPv6 внутри IPv4).
+     * Наружные адреса — это концы туннеля, а не клиенты, поэтому заголовок
+     * разворачивается на один уровень: иначе вместо TCP/UDP шейпер видит
+     * протокол туннеля, и весь трафик уходит мимо учёта и лимита.
+     * Границы внутреннего заголовка проверяются в ветках ниже. */
+    void *l3 = (void *)(eth + 1);
+    __u16 eth_type = eth->h_proto;
+    if (eth_type == bpf_htons(ETH_P_IP)) {
+        struct iphdr *outer = l3;
+        if ((void *)(outer + 1) > data_end)
+            return TC_ACT_OK;
+        if (outer->ihl >= 5 &&
+            (outer->protocol == IPPROTO_IPIP ||
+             outer->protocol == IPPROTO_IPV6)) {
+            l3 += (__u32)outer->ihl * 4;
+            if (outer->protocol == IPPROTO_IPV6)
+                eth_type = bpf_htons(ETH_P_IPV6);
+        }
+    }
+
     struct ip_key key = {0};
     __u16 sport = 0, dport = 0;
     __u8  proto = 0;
@@ -160,8 +182,8 @@ static __always_inline int process_packet(struct __sk_buff *skb,
      * включено правило «все порты», и пропускаем, если правило по портам. */
     __u32 no_ports = 0;
 
-    if (eth->h_proto == bpf_htons(ETH_P_IP)) {
-        struct iphdr *ip = (struct iphdr *)(eth + 1);
+    if (eth_type == bpf_htons(ETH_P_IP)) {
+        struct iphdr *ip = l3;
         if ((void *)(ip + 1) > data_end)
             return TC_ACT_OK;
         if (ip->ihl < 5)
@@ -178,8 +200,8 @@ static __always_inline int process_packet(struct __sk_buff *skb,
         if (ip->frag_off & bpf_htons(0x1FFF))
             no_ports = 1;
 
-    } else if (eth->h_proto == bpf_htons(ETH_P_IPV6)) {
-        struct ipv6hdr *ip6 = (struct ipv6hdr *)(eth + 1);
+    } else if (eth_type == bpf_htons(ETH_P_IPV6)) {
+        struct ipv6hdr *ip6 = l3;
         if ((void *)(ip6 + 1) > data_end)
             return TC_ACT_OK;
 

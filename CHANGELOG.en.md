@@ -13,6 +13,38 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.22
+
+**A node whose white IP arrives through an IPIP tunnel had no limit at all:
+the shaper could not see clients behind the tunnel.**
+
+Some hosts hand out a white address through an IPIP tunnel. Only tunneled
+packets reach the server in that case: each one is wrapped in an extra header
+with protocol 4, and the real client addresses sit inside. The shaper parsed
+the outer header, saw "tunnel protocol" instead of TCP/UDP and silently let
+all traffic pass uncounted and unlimited. The monitor stayed empty and speed
+was capped in neither direction.
+
+### Unwrapping the tunnel
+
+Packet parsing learned to strip one level of wrapping: if the outer header is
+a tunnel (IPv4-in-IPv4, protocol 4, or IPv6 inside IPv4, protocol 41), the
+inner packet is parsed next. The real client address becomes the key, so the
+monitor, penalties, whitelist and metrics work exactly as on a regular node.
+Filters stay on the same outer interface — no extra setup is needed.
+
+### Tests
+
+6 new ones in the BPF harness: accounting by the inner address both ways, the
+outer tunnel address never reaching the maps, throttling working as for an
+ordinary packet, a truncated wrapper not crashing parsing, and IPv6 inside
+the tunnel counted too.
+
+The update touches no settings: the limit, port, whitelist and penalties stay
+as they were.
+
+---
+
 ## 3.21
 
 **A follow-up to 3.20: attaching to `mq` queues does not always work, and then a

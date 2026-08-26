@@ -7,7 +7,7 @@ ETC_DIR="/etc/shaper"
 CONF="$ETC_DIR/shaper.conf"
 CTL="$APP_DIR/shaperctl.py"
 ENGINE="$APP_DIR/engine.sh"
-REPO_URL="https://github.com/SkunkBG/shape.git"
+REPO_URL="https://github.com/Gy9vin/shape.git"
 DONATE_URL="https://web.tribute.tg/d/OHz"
 VERSION="$(cat "$APP_DIR/VERSION" 2>/dev/null || echo '?')"
 
