@@ -42,7 +42,7 @@
 
 ```bash
 apt update && apt install -y git && rm -rf /tmp/shape && \
-git clone https://github.com/SkunkBG/shape.git /tmp/shape && \
+git clone https://github.com/Gy9vin/shape.git /tmp/shape && \
 bash /tmp/shape/install.sh && shaper
 ```
 
