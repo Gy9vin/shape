@@ -17,6 +17,7 @@ static unsigned long long fake_now = 1000000000ULL;
 void *bpf_map_lookup_elem(void *map, const void *key);
 long  bpf_map_update_elem(void *map, const void *key, const void *value,
                           unsigned long long flags);
+long  bpf_map_delete_elem(void *map, const void *key);
 static unsigned long long bpf_ktime_get_ns_impl(void) { return fake_now; }
 #define bpf_ktime_get_ns bpf_ktime_get_ns_impl
 
@@ -32,10 +33,11 @@ static unsigned long long bpf_ktime_get_ns_impl(void) { return fake_now; }
 #include "../bpf/shaper.bpf.c"
 
 /* ── карта в памяти ── */
-struct ent { void *map; unsigned char key[16]; unsigned char val[32]; int used; };
+struct ent { void *map; unsigned char key[32]; unsigned char val[32]; int used; };
 static struct ent table[4096];
 static int keysize(void *m) {
     if (m == (void *)&config_map || m == (void *)&port_map) return 4;
+    if (m == (void *)&pp_conn_map) return sizeof(struct pp_key);
     return 16;
 }
 void *bpf_map_lookup_elem(void *map, const void *key) {
@@ -57,6 +59,15 @@ long bpf_map_update_elem(void *map, const void *key, const void *value,
         if (!table[i].used) {
             table[i].used = 1; table[i].map = map;
             memcpy(table[i].key, key, ks); memcpy(table[i].val, value, 32);
+            return 0;
+        }
+    return -1;
+}
+long bpf_map_delete_elem(void *map, const void *key) {
+    int ks = keysize(map);
+    for (int i = 0; i < 4096; i++)
+        if (table[i].used && table[i].map == map && !memcmp(table[i].key, key, ks)) {
+            table[i].used = 0;
             return 0;
         }
     return -1;
@@ -169,6 +180,70 @@ static int build_ipip_v6(unsigned sport, unsigned dport, int payload)
     l4[0] = sport >> 8; l4[1] = sport & 0xFF;
     l4[2] = dport >> 8; l4[3] = dport & 0xFF;
     return 14 + 20 + 40 + 20 + payload;
+}
+
+/* TCP-пакет с настоящими флагами и точной полезной нагрузкой — для
+ * проверки PROXY protocol: у сборщиков выше поле doff равно нулю,
+ * поэтому полезная нагрузка из них не читается. */
+static int build_tcp_raw(unsigned dst, unsigned src, unsigned sport,
+                         unsigned dport, unsigned char flags,
+                         const void *payload, int payload_len)
+{
+    memset(pkt, 0, 2048);
+    pkt[12] = 0x08; pkt[13] = 0x00;
+    struct iphdr *ip = (struct iphdr *)(pkt + 14);
+    ip->version = 4; ip->ihl = 5; ip->protocol = IPPROTO_TCP;
+    ip->daddr = dst; ip->saddr = src;
+    unsigned char *t = pkt + 14 + 20;
+    t[0] = sport >> 8; t[1] = sport & 0xFF;
+    t[2] = dport >> 8; t[3] = dport & 0xFF;
+    t[12] = 5 << 4;                    /* doff = 5 */
+    t[13] = flags;
+    if (payload_len > 0)
+        memcpy(t + 20, payload, payload_len);
+    return 14 + 20 + 20 + payload_len;
+}
+
+/* ── сборщики заголовков PROXY protocol ── */
+static const unsigned char ppsig[12] = {
+    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D,
+    0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A
+};
+
+/* v2, TCP4: 16 байт головы + адреса и порты */
+static int ppv2_tcp4(void *buf, unsigned client)
+{
+    unsigned char *p = buf;
+    memcpy(p, ppsig, 12);
+    p[12] = 0x21;                     /* версия 2, команда PROXY */
+    p[13] = 0x11;                     /* семейство TCP4 */
+    p[14] = 0x00; p[15] = 0x0C;       /* длина адресной части = 12 */
+    p[16] = client >> 24; p[17] = (client >> 16) & 0xFF;
+    p[18] = (client >> 8) & 0xFF;  p[19] = client & 0xFF;
+    return 28;
+}
+
+/* v2, TCP6: клиент 2001:db8::99 */
+static int ppv2_tcp6(void *buf)
+{
+    unsigned char *p = buf;
+    memcpy(p, ppsig, 12);
+    p[12] = 0x21;
+    p[13] = 0x21;                     /* семейство TCP6 */
+    p[14] = 0x00; p[15] = 0x24;       /* длина = 36 */
+    memset(p + 16, 0, 16);            /* адрес клиента 2001:db8::99 */
+    p[16] = 0x20; p[17] = 0x01;
+    p[26] = 0x0D; p[27] = 0xB8;
+    p[31] = 0x99;
+    return 52;
+}
+
+/* v1: текстовая строка «PROXY TCP4 a.b.c.d …» */
+static int ppv1_tcp4(void *buf, unsigned client)
+{
+    return sprintf((char *)buf, "PROXY TCP4 %u.%u.%u.%u 10.0.0.9 1111 443\r\n",
+                   (client >> 24) & 0xFF, (client >> 16) & 0xFF,
+                   (client >> 8) & 0xFF, client & 0xFF);
 }
 
 static int ok = 0, fail = 0;
@@ -412,6 +487,91 @@ int main(void)
     run_pkt(len, 1);
     check("IPv6 внутри туннеля (protocol 41) тоже учтён",
           bpf_map_lookup_elem(&user_state_map_up, &k6t) != NULL);
+
+    printf("\n\033[1m10. PROXY protocol (клиенты за CDN/релеем)\033[0m\n");
+    unsigned p9080 = 9080;
+    map_put(&port_map, &p9080, &one);
+    unsigned RELAY = 0x1B00007F, PPCLI = 0x1C00007F, PPCLI2 = 0x1D00007F;
+    unsigned char pay[80];
+    static unsigned char pay1400[1400];
+    memset(pay1400, 0x41, sizeof pay1400);
+
+    /* upload: первый сегмент соединения несёт заголовок v2 */
+    int plen = ppv2_tcp4(pay, PPCLI);
+    len = build_tcp_raw(SERVER, RELAY, 60001, 9080, 0x18, pay, plen);
+    run_pkt(len, 1);
+    struct ip_key kpc = {0}; kpc.addr[0] = PPCLI;
+    struct ip_key kr = {0}; kr.addr[0] = RELAY;
+    check("upload за CDN учтён по настоящему клиенту",
+          bpf_map_lookup_elem(&user_state_map_up, &kpc) != NULL);
+    struct pp_key ckk = {0};
+    ckk.addr[0] = RELAY; ckk.port = 60001;
+    check("соединение релея запомнено",
+          bpf_map_lookup_elem(&pp_conn_map, &ckk) != NULL);
+    check("адрес релея в учёт не попадает",
+          bpf_map_lookup_elem(&user_state_map_up, &kr) == NULL);
+
+    /* середина потока: заголовка нет, ключ берётся из карты */
+    struct user_state *pcst = bpf_map_lookup_elem(&user_state_map_up, &kpc);
+    unsigned long long pcb = pcst ? pcst->total_bytes : 0;
+    len = build_tcp_raw(SERVER, RELAY, 60001, 9080, 0x18,
+                        "\x17\x03\x03\x00\x10", 5);
+    run_pkt(len, 1);
+    pcst = bpf_map_lookup_elem(&user_state_map_up, &kpc);
+    check("пакеты без заголовка сходятся к тому же клиенту",
+          pcst != NULL && pcst->total_bytes > pcb);
+
+    /* download: отдача идёт к релею, ключ — по клиенту */
+    fake_now = 7000000000ULL;
+    len = build_tcp_raw(RELAY, SERVER, 9080, 60001, 0x18, pay1400, 1400);
+    run_pkt(len, 0);
+    struct ip_key kpd = {0}; kpd.addr[0] = PPCLI;
+    check("download за CDN учтён по настоящему клиенту",
+          bpf_map_lookup_elem(&user_state_map_down, &kpd) != NULL);
+    run_pkt(len, 0); t0 = skb.tstamp;
+    run_pkt(len, 0); t1 = skb.tstamp;
+    check("download за CDN тормозится как обычный пакет",
+          (t1 - t0) > 1000000 && (t1 - t0) < 1400000);
+
+    /* FIN: запись соединения больше не нужна */
+    len = build_tcp_raw(SERVER, RELAY, 60001, 9080, 0x11, NULL, 0);
+    run_pkt(len, 1);
+    check("FIN удаляет соединение из карты",
+          bpf_map_lookup_elem(&pp_conn_map, &ckk) == NULL);
+
+    /* v2 с IPv6-клиентом */
+    plen = ppv2_tcp6(pay);
+    len = build_tcp_raw(SERVER, RELAY, 60002, 9080, 0x18, pay, plen);
+    run_pkt(len, 1);
+    struct ip_key k6pp = {0};
+    k6pp.addr[0] = 0x20010000UL; k6pp.addr[2] = 0xDB8; k6pp.addr[3] = 0x99;
+    check("IPv6-клиент из заголовка v2 учтён",
+          bpf_map_lookup_elem(&user_state_map_up, &k6pp) != NULL);
+
+    /* v1 — текстовый */
+    plen = ppv1_tcp4(pay, PPCLI2);
+    len = build_tcp_raw(SERVER, RELAY, 60003, 9080, 0x18, pay, plen);
+    run_pkt(len, 1);
+    struct ip_key kpc2 = {0}; kpc2.addr[0] = PPCLI2;
+    check("текстовый заголовок v1 тоже разобран",
+          bpf_map_lookup_elem(&user_state_map_up, &kpc2) != NULL);
+
+    /* без заголовка — прежнее поведение: ключ из IP-заголовка */
+    len = build_tcp_raw(SERVER, RELAY, 60004, 9080, 0x18,
+                        "\x16\x03\x01\x00\xAB", 5);
+    run_pkt(len, 1);
+    check("без заголовка трафик числится за релеем (как раньше)",
+          bpf_map_lookup_elem(&user_state_map_up, &kr) != NULL);
+
+    /* v2 команда LOCAL — «не проксировали», клиента в заголовке нет */
+    plen = ppv2_tcp4(pay, PPCLI);
+    pay[12] = 0x20;                   /* версия 2, команда LOCAL */
+    len = build_tcp_raw(SERVER, RELAY, 60005, 9080, 0x18, pay, plen);
+    run_pkt(len, 1);
+    struct pp_key ckk5 = {0};
+    ckk5.addr[0] = RELAY; ckk5.port = 60005;
+    check("команда LOCAL не заводит запись",
+          bpf_map_lookup_elem(&pp_conn_map, &ckk5) == NULL);
 
     printf("\n\033[1mИтог: %d пройдено, %d провалено\033[0m\n", ok, fail);
     return fail ? 1 : 0;

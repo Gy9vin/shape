@@ -19,6 +19,8 @@
  *                                            но их трафик всё равно считается)
  *   penalty_map    : ip -> struct penalty   (штраф нарушителю на время)
  *   user_state_map_down/up : ip -> struct user_state
+ *   pp_conn_map    : relay ip:port -> ip    (PROXY protocol: соединение
+ *                                            релея CDN ↔ настоящий клиент)
  *
  * Карты состояний — LRU: упёрлись в потолок, ядро само вытесняет давно
  * неактивные адреса. Фоновая чистка не нужна.
@@ -134,6 +136,85 @@ struct {
     __type(key,   struct ip_key);
     __type(value, struct user_state);
 } user_state_map_up SEC(".maps");
+
+/* PROXY protocol: «IP:порт релея» → настоящий адрес клиента.
+ * Запись заводит первый сегмент соединения, принёсший заголовок,
+ * FIN/RST её удаляют; порт релея уникален для соединения. LRU —
+ * страховка от утечки, если соединение оборвалось без FIN. */
+struct pp_key {
+    __u32 addr[4];    /* адрес релея: IPv4 в addr[0], IPv6 целиком */
+    __u16 port;       /* порт релея в этом соединении */
+    __u16 pad;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, MAX_USERS);
+    __type(key,   struct pp_key);
+    __type(value, struct ip_key);
+} pp_conn_map SEC(".maps");
+
+
+/* Разбор заголовка PROXY protocol из начала TCP-потока. Возвращает 1
+ * и адрес клиента в out, если заголовок нашёлся.
+ *
+ * v2 — бинарный: 12-байтовая сигнатура, затем версия/команда,
+ * семейство, длина и адреса. Команда LOCAL (соединение без клиента)
+ * игнорируется. v1 — текстовый «PROXY TCP4 a.b.c.d …». Варианты UDP
+ * не встречаются на практике: vless/reality ездят по TCP. */
+static __always_inline int parse_pp(__u8 *p, void *data_end, struct ip_key *out)
+{
+    if ((void *)(p + 28) > data_end)
+        return 0;                   /* короче минимальной головы v2/TCP4 */
+
+    if (p[0] == 0x0D && p[1] == 0x0A && p[2] == 0x0D && p[3] == 0x0A &&
+        p[4] == 0x00 && p[5] == 0x0D && p[6] == 0x0A && p[7] == 0x51 &&
+        p[8] == 0x55 && p[9] == 0x49 && p[10] == 0x54 && p[11] == 0x0A) {
+        if (p[12] >> 4 != 2)         /* версия */
+            return 0;
+        if ((p[12] & 0x0F) != 1)    /* команда PROXY, не LOCAL */
+            return 0;
+        if (p[13] == 0x11) {        /* TCP4: адрес клиента с 16-го байта */
+            out->addr[0] = ((__u32)p[16] << 24) | ((__u32)p[17] << 16) |
+                           ((__u32)p[18] << 8) | (__u32)p[19];
+            return 1;
+        }
+        if (p[13] == 0x21) {        /* TCP6: 16 байт адреса */
+            if ((void *)(p + 32) > data_end)
+                return 0;
+#pragma unroll
+            for (int i = 0; i < 4; i++)
+                out->addr[i] = ((__u32)p[16 + i * 4] << 24) |
+                               ((__u32)p[17 + i * 4] << 16) |
+                               ((__u32)p[18 + i * 4] << 8) |
+                               (__u32)p[19 + i * 4];
+            return 1;
+        }
+        return 0;
+    }
+
+    /* v1: «PROXY TCP4 a.b.c.d …» — до 15 знаков на адрес */
+    if (p[0] == 'P' && p[1] == 'R' && p[2] == 'O' && p[3] == 'X' &&
+        p[4] == 'Y' && p[5] == ' ' && p[6] == 'T' && p[7] == 'C' &&
+        p[8] == 'P' && p[9] == '4' && p[10] == ' ') {
+        __u32 ip = 0, oct = 0;
+        int dots = 0;
+#pragma unroll
+        for (int i = 11; i < 26; i++) {
+            __u8 ch = p[i];
+            if (ch >= '0' && ch <= '9' && oct < 0xFF)
+                oct = oct * 10 + (ch - '0');
+            else if (ch == '.' && dots < 3) {
+                ip = (ip << 8) | (oct & 0xFF); oct = 0; dots++;
+            } else if (ch == ' ' && dots == 3) {
+                out->addr[0] = (ip << 8) | (oct & 0xFF);
+                return 1;
+            } else
+                return 0;
+        }
+    }
+    return 0;
+}
 
 
 /*
@@ -292,6 +373,51 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     if (no_ports || !bpf_map_lookup_elem(&port_map, &key_port)) {
         if (!bpf_map_lookup_elem(&port_map, &zero))  /* порт 0 = все порты */
             return TC_ACT_OK;
+    }
+
+    /* ── PROXY protocol (клиенты за CDN/релеем) ──
+     * CDN терминирует TCP клиента и открывает к ноде своё соединение:
+     * на уровне пакетов отправитель — адрес релея, и все клиенты узла
+     * делили бы один лимит. Настоящий адрес клиента приходит только в
+     * заголовке PROXY protocol — первых байтах потока; их же читает
+     * Xray с acceptProxyProtocol. Заголовок парсится один раз на
+     * сегменте, который его принёс, пара «IP:порт релея» запоминается,
+     * и все пакеты соединения — в обе стороны — шейпятся по адресу
+     * клиента из заголовка. Прямым клиентам без заголовка это не
+     * мешает: сигнатура не совпадает — ключ берётся из IP-заголовка,
+     * как раньше. Ничего настраивать не нужно. */
+    if (proto == IPPROTO_TCP && !no_ports) {
+        struct pp_key ck = {0};
+        __builtin_memcpy(ck.addr, key.addr, sizeof(ck.addr));
+        ck.port = (direction == 0) ? dport : sport;
+
+        if (direction == 1) {
+            /* Upload: если записи нет, сегмент мог принести заголовок. */
+            struct ip_key *client = bpf_map_lookup_elem(&pp_conn_map, &ck);
+            if (client) {
+                __builtin_memcpy(key.addr, client->addr, sizeof(key.addr));
+            } else {
+                struct tcphdr *tcp = l4;
+                __u8 doff = ((__u8 *)tcp)[12] >> 4;
+                __u8 *pl = (__u8 *)tcp + ((__u32)doff << 2);
+                struct ip_key real = {0};
+                if (parse_pp(pl, data_end, &real)) {
+                    bpf_map_update_elem(&pp_conn_map, &ck, &real, BPF_ANY);
+                    __builtin_memcpy(key.addr, real.addr, sizeof(key.addr));
+                }
+            }
+        } else {
+            /* Download: отдача идёт к релею — ключ по клиенту. */
+            struct ip_key *client = bpf_map_lookup_elem(&pp_conn_map, &ck);
+            if (client)
+                __builtin_memcpy(key.addr, client->addr, sizeof(key.addr));
+        }
+
+        /* Соединение закрылось — запись не нужна: релей может отдать
+         * тот же порт другому клиенту. FIN/RST есть в обоих
+         * направлениях, порядок не важен. */
+        if (((__u8 *)l4)[13] & (0x01 | 0x04))
+            bpf_map_delete_elem(&pp_conn_map, &ck);
     }
 
     __u64 now = bpf_ktime_get_ns();

@@ -13,6 +13,47 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.23
+
+**A node behind a CDN: all clients shared one limit — the shaper saw only the
+relay address.**
+
+CDN-style protection terminates the client's TCP connection and opens its
+own to the node. At the packet level the sender is always the relay, so the
+whole node's traffic piled up into a single bucket keyed by its address: all
+clients shared one limit at once and the monitor showed a single IP. The real
+addresses do exist — they are carried by the PROXY protocol header in the
+first bytes of the stream, the very same header Xray reads with
+`acceptProxyProtocol`.
+
+### PROXY protocol parsing
+
+The eBPF filter now reads that header just like Xray: the first segment of a
+connection is matched by signature, with v2 (binary) and v1 (text) supported.
+The real client address is taken from the header, the pair
+"relay IP:port → client" is stored in an LRU map, and every packet of the
+connection — in both directions — is shaped by the client: the monitor,
+penalties and whitelist work with real addresses. FIN/RST drops the entry.
+With no header present the behaviour is unchanged — the key comes from the IP
+header, so direct nodes notice nothing.
+
+Works with any number of CDN entry addresses: an entry is created per
+connection, not per relay. Nothing to configure — the header is detected by
+signature.
+
+### Tests
+
+11 new ones in the BPF harness: upload and download behind the CDN accounted
+by the real client, the relay staying out of accounting, mid-stream packets
+converging to the same client, throttling working as usual, FIN dropping the
+entry, an IPv6 client from a v2 header, the text v1, no header keeping the old
+behaviour, and the LOCAL command creating no entry.
+
+The update touches no settings: the limit, port, whitelist and penalties stay
+as they were.
+
+---
+
 ## 3.22
 
 **A node whose white IP arrives through an IPIP tunnel had no limit at all:
