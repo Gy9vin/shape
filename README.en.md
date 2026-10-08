@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.28-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.29-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.28
+# Shape v3.29
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -530,6 +530,11 @@ Things to keep in mind:
   named ports are shaped. On the external interface `0` works as before.
 - Download limiting on `lo` relies on `fq`; the engine sets it up itself and
   restores the native `noqueue` on unload.
+- After the shaper is (re)loaded (install, upgrade, `systemctl restart shaper`)
+  already-open HAProxy→xray connections are counted under `127.0.0.1` until
+  they reconnect: the shaper cannot see their real addresses. Restart HAProxy
+  (`systemctl restart haproxy`) — clients reconnect automatically. `monitor`
+  now shows this traffic as a separate part of the speed line, plus a hint.
 
 ---
 

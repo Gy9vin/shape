@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.28-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.29-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
@@ -13,7 +13,7 @@
   <b>Русский</b> · <a href="README.en.md">English</a>
 </p>
 
-# Shape v3.28
+# Shape v3.29
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -538,6 +538,11 @@ backend xray
   названные порты. На внешнем интерфейсе `0` работает как прежде.
 - Ограничение скачивания на `lo` держит `fq`; движок ставит его сам
   и возвращает родной `noqueue` при выгрузке.
+- После загрузки шейпера (установка, обновление, `systemctl restart shaper`)
+  уже открытые соединения HAProxy→xray считаются на `127.0.0.1`, пока не
+  переподключатся: настоящих адресов шейпер у них не видит. Перезапусти HAProxy
+  (`systemctl restart haproxy`) — клиенты переподключатся сами. `monitor`
+  теперь показывает такой трафик отдельной частью строки скорости и подсказкой.
 
 ---
 

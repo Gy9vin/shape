@@ -13,6 +13,30 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.29
+
+**In HAProxy-on-this-node mode `monitor` showed almost the whole channel under
+`127.0.0.1`.** HAProxy→xray connections opened before the shaper was
+(re)loaded cannot be tied to the real client: the maps are wiped on load, and
+the client address is taken from the PROXY header only on new connections.
+Until they reconnect, all their traffic goes through the single address
+`127.0.0.1` under one limit.
+
+In `monitor` the speed line now adds up to the channel: next to "mobile" and
+"other" there is a third part `· unattributed (127.0.0.1) ↓ X ↑ Y` (only when
+there is traffic on it). If the download on `127.0.0.1` is 1 Mbit/s or more, a
+yellow hint appears below it: restart HAProxy (`systemctl restart haproxy`) —
+clients reconnect on their own and their addresses are visible again. The
+README section "HAProxy on the same node" has a new bullet about this.
+
+`tests/mobile_tests.py` - 83 checks (+6): loopback sums, the third part of the
+speed line, the hint and its 1 Mbit/s threshold.
+
+An update does not touch settings: the limit, ports, whitelist and penalties
+stay as they were.
+
+---
+
 ## 3.28
 
 **`monitor` did not show how much of the channel mobile clients take.** The

@@ -313,7 +313,7 @@ check("status: колонки скачано/отдано не поехали",
       (l1, l2))
 
 
-def mon_out():
+def mon_out(lo_down=None):
     state = {"n": 0}
     snaps = [dict(USERS)]
     cur = {k: dict(v) for k, v in USERS.items()}
@@ -321,6 +321,9 @@ def mon_out():
         v["down"] += 12_500_000
         v["up"] += 2_500_000
         v["up_pkts"] += 100
+    if lo_down is not None and "127.0.0.1" in cur:
+        cur["127.0.0.1"]["down"] = USERS["127.0.0.1"]["down"] + lo_down
+        cur["127.0.0.1"]["up"] = USERS["127.0.0.1"]["up"]
     seq = iter([dict(USERS), cur])
 
     def users():
@@ -361,11 +364,14 @@ check("сводка: пустой список", S.mobile_summary([]) [:2] == (0
 rows_sp = [("185.1.0.7", 10.0, 1.0, 0, 0, 0), ("185.2.0.1", 5.5, 0.5, 0, 0, 0),
            ("8.8.4.4", 3.0, 0.25, 0, 0, 0), ("1.1.1.1", 0.0, 0.0, 0, 0, 0),
            ("127.0.0.1", 99.0, 99.0, 0, 0, 0), ("::1", 99.0, 99.0, 0, 0, 0)]
-(m_dl, m_ul), (o_dl, o_ul) = S.mobile_speed(rows_sp)
+(m_dl, m_ul), (o_dl, o_ul), (l_dl, l_ul) = S.mobile_speed(rows_sp)
 check("скорость: сумма по мобильным", (m_dl, m_ul) == (15.5, 1.5), (m_dl, m_ul))
 check("скорость: сумма по остальным, loopback не в счёт",
       (o_dl, o_ul) == (3.0, 0.25), (o_dl, o_ul))
-check("скорость: пустой список — нули", S.mobile_speed([]) == ((0.0, 0.0), (0.0, 0.0)))
+check("скорость: суммы по loopback (127.0.0.1 и ::1) возвращаются отдельно",
+      (l_dl, l_ul) == (198.0, 198.0), (l_dl, l_ul))
+check("скорость: пустой список — нули",
+      S.mobile_speed([]) == ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0)))
 
 plain_st = ANSI.sub("", run(S.cmd_status, st_args())[1])
 head = plain_st.splitlines()[1]
@@ -396,6 +402,25 @@ check("monitor: разбивка по операторам одной строк
 sp_ln = [l for l in plain.splitlines() if "мобильные ↓" in l]
 check("monitor: строка скорости мобильных и остальных",
       bool(sp_ln) and "остальные ↓" in sp_ln[0] and "Mbit/s" in sp_ln[0], plain)
+check("monitor: без трафика 127.0.0.1 третьей части нет",
+      bool(sp_ln) and "без адреса" not in sp_ln[0] and not any("HAProxy" in l for l in plain.splitlines()), plain)
+
+USERS["127.0.0.1"] = {"down": 9_000_000, "up": 1_000_000, "up_pkts": 9, "seen": 0}
+plain = ANSI.sub("", mon_out())
+sp_ln = [l for l in plain.splitlines() if "мобильные ↓" in l]
+check("monitor: при трафике 127.0.0.1 в строке скорости есть «без адреса (127.0.0.1) ↓ … ↑ …»",
+      bool(sp_ln) and "· без адреса (127.0.0.1) ↓ 1000.0 ↑ 200.0" in sp_ln[0], sp_ln)
+check("monitor: при 127.0.0.1 ≥ 1 Mbit/s есть подсказка перезапустить HAProxy",
+      any("systemctl restart haproxy" in l and l.strip().startswith("↳") for l in plain.splitlines()), plain)
+plain = ANSI.sub("", mon_out(lo_down=25_000))   # 2 Mbit/s (монитор меряет за 0.1 с)
+plain_lo = ANSI.sub("", mon_out(lo_down=6_250))   # 0.5 Mbit/s: часть есть, подсказки нет
+sp_lo = [l for l in plain_lo.splitlines() if "мобильные ↓" in l]
+check("monitor: 127.0.0.1 < 1 Mbit/s — третья часть есть, подсказки нет",
+      bool(sp_lo) and "без адреса" in sp_lo[0] and "systemctl restart haproxy" not in plain_lo, plain_lo)
+check("monitor: 127.0.0.1 = 2 Mbit/s — подсказка есть",
+      "systemctl restart haproxy" in plain, plain)
+del USERS["127.0.0.1"]
+
 drop_cache()
 plain = ANSI.sub("", mon_out())
 check("monitor без кеша: строк про мобильных нет", "мобильных" not in plain, plain)
