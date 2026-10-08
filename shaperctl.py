@@ -8,6 +8,7 @@ shaperctl — управление eBPF-шейпером через pinned BPF-�
 
 import argparse
 import base64
+import bisect
 import calendar
 import contextlib
 import fcntl
@@ -27,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import sys
+import threading
 import time
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -50,6 +52,34 @@ EVENT_SEQ   = os.path.join(VAR_DIR, "events.seq")
 # позже сюда будет складывать карту резолвер панели. Shape сам никуда за
 # этими данными не ходит: его дело — подставить ярлык в сообщение.
 OWNERS_FILE = os.path.join(VAR_DIR, "owners.json")
+# Метка «сеть мобильного оператора» у клиента в мониторе. Список ASN взят из
+# github.com/wh3r3ar3you/mobile443-filter; править его — здесь. Ростелеком
+# (12389) намеренно не включён: сеть слишком широкая, метка потеряла бы смысл.
+# Метка значит «адрес из сети мобильного оператора», а не «гарантированно
+# сотовый IP»: у части операторов в тех же ASN живёт и фиксированный доступ.
+MOBILE_ASNS = {
+    "МТС":        [8359],
+    "Билайн":     [3216, 16345, 42842],
+    "МегаФон":    [31133, 47395, 35298, 31224, 31213, 31208, 31205, 31195,
+                   31163, 25159],
+    "T2":         [12958, 15378, 42437, 48092, 48190, 41330, 39374],
+    "Миранда":    [201776, 47203],
+    "СберМобайл": [206673],
+    "Севастар":   [35816],
+    "Т-Мобайл":   [205638, 214257, 202498],
+    "Win Mobile": [203451],
+    "Волна":      [203561],
+    "MCS":        [47204],
+    "Мотив":      [31499],
+    "Феникс":     [214721, 204108],
+    "Севтелеком": [59833],
+}
+MOBILE_FILE = os.path.join(VAR_DIR, "mobile_nets.json")
+MOBILE_URL = "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
+MOBILE_HTTP_TIMEOUT = 8     # на один запрос, секунд
+MOBILE_MAX_AGE = 86400      # кеш старше суток обновляем
+MOBILE_RETRY = 3600         # после неудачи сторож пробует не чаще раза в час
+MOBILE_MAX_FAILS = 3        # подряд отказов, после чего считаем сеть недоступной
 # По строке JSON на прошедшие сутки. За год ~40 КБ.
 # Постоянный идентификатор ноды. Имя хоста и адрес для этого не годятся:
 # их меняют, а после смены метрики выглядят как метрики новой ноды и история
@@ -78,6 +108,9 @@ MAX_PORTS = 64              # должно совпадать с max_entries por
 CONFIG_FMT = "<Q"           # struct config, 8 байт
 PEN_FMT = "<2Q"             # struct penalty: rate_bytes_per_sec, until_ns
 USER_FMT, USER_SIZE = "<4Q", 32   # struct user_state
+# struct port_stat_key: адрес (16 байт) + порт; struct port_stat — счётчики
+PSTAT_KEY_FMT, PSTAT_KEY_SIZE = "<4I I", 20
+PSTAT_VAL_FMT, PSTAT_VAL_SIZE = "<2Q", 16
 
 C = {
     "r": "\033[0m", "b": "\033[1m", "dim": "\033[2m",
@@ -379,6 +412,13 @@ MSG = {
         "own_set": "{ip}: сведения сохранены",
         "own_removed": "{ip}: сведения удалены",
         "own_bad_tg": "telegram_id — это число",
+        "h_mobile": "сети мобильных операторов: update | status | lookup IP",
+        "mob_none": "RIPEstat не ответил ни по одной сети — старый список оставлен",
+        "mob_updated": "сети операторов обновлены: {n}, без ответа ASN: {bad}",
+        "mob_failed": "нет ответа",
+        "mob_not": "не из сети мобильного оператора",
+        "mob_nocache": "список сетей операторов не загружен: shaperctl.py mobile update",
+        "mob_updated_at": "обновлено", "mob_total": "сетей",
         "hist_none": "история пока пуста, первая запись появится в полночь",
         "hist_day": "Дата", "hist_limited": "ограничений",
         "hist_total": "всего за {n} сут",
@@ -419,6 +459,9 @@ MSG = {
         "mon_leg_hold": "держит больше 30 с",
         "mon_leg_wl": "белый список",
         "mon_leg_limited": "ограничен",
+        "mon_ports": "По портам",
+        "mon_port": "порт",
+        "mon_other": "прочее",
         "mon_legend": "жёлтым — держит нагрузку больше 30 с, красным — упёрся в лимит",
     },
     "en": {
@@ -707,6 +750,13 @@ MSG = {
         "own_set": "{ip}: details saved",
         "own_removed": "{ip}: details removed",
         "own_bad_tg": "telegram_id must be a number",
+        "h_mobile": "mobile operator networks: update | status | lookup IP",
+        "mob_none": "RIPEstat answered for no network - the old list is kept",
+        "mob_updated": "operator networks updated: {n}, ASNs without answer: {bad}",
+        "mob_failed": "no answer",
+        "mob_not": "not a mobile operator network",
+        "mob_nocache": "operator network list not loaded: shaperctl.py mobile update",
+        "mob_updated_at": "updated", "mob_total": "networks",
         "hist_none": "history is empty, the first row appears at midnight",
         "hist_day": "Date", "hist_limited": "limits",
         "hist_total": "total over {n} days",
@@ -747,6 +797,9 @@ MSG = {
         "mon_leg_hold": "holding over 30 s",
         "mon_leg_wl": "whitelisted",
         "mon_leg_limited": "limited",
+        "mon_ports": "By port",
+        "mon_port": "port",
+        "mon_other": "other",
         "mon_legend": "yellow — holding load over 30 s, red — hitting the limit",
     },
 }
@@ -891,6 +944,33 @@ def parse_user_state(v):
                 "seen":  _int(v.get("last_seen_ns", 0)),
                 "pkts":  _int(v.get("packets", 0))}
     return {"total": 0, "seen": 0, "pkts": 0}
+
+
+def parse_port_stat_key(k):
+    """struct port_stat_key -> (адрес строкой, порт) или (None, None)."""
+    b = _raw(k)
+    if b is not None and len(b) >= PSTAT_KEY_SIZE:
+        words = struct.unpack("<4I", b[:16])
+        port = struct.unpack("<I", b[16:20])[0]
+    elif isinstance(k, dict):
+        words = tuple((list(map(_int, k.get("addr", []))) + [0, 0, 0, 0])[:4])
+        port = _int(k.get("port", 0))
+    else:
+        return None, None
+    kb = struct.pack("<4I", *words)
+    if words[1] == 0 and words[2] == 0 and words[3] == 0:
+        return str(ipaddress.IPv4Address(kb[:4])), port
+    return str(ipaddress.IPv6Address(kb)), port
+
+
+def parse_port_stat(v):
+    b = _raw(v)
+    if b is not None and len(b) >= PSTAT_VAL_SIZE:
+        nbytes, pkts = struct.unpack(PSTAT_VAL_FMT, b[:PSTAT_VAL_SIZE])
+        return nbytes, pkts
+    if isinstance(v, dict):
+        return _int(v.get("bytes", 0)), _int(v.get("packets", 0))
+    return 0, 0
 
 
 def fmt_bytes(n):
@@ -1347,6 +1427,22 @@ def read_users():
     return users
 
 
+def read_port_stats():
+    """{ip: {порт: [байт вниз, байт вверх]}} из port_stat_map_down/up."""
+    stats = {}
+    for map_name, direction in (("port_stat_map_down", 0),
+                                ("port_stat_map_up", 1)):
+        for k, v in map_dump(map_name):
+            ip, port = parse_port_stat_key(k)
+            if ip is None:
+                continue
+            nbytes, _pkts = parse_port_stat(v)
+            e = stats.setdefault(ip, {})
+            row = e.setdefault(port, [0, 0])
+            row[direction] = nbytes
+    return stats
+
+
 def cmd_status(a):
     require_engine()
     cfg = load_config()
@@ -1372,7 +1468,8 @@ def cmd_status(a):
     if a.json:
         print(json.dumps([
             {"ip": ip, "downloaded_bytes": c["down"], "uploaded_bytes": c["up"],
-             "download_mbps": dl, "upload_mbps": ul, "idle_sec": round(idle, 1)}
+             "download_mbps": dl, "upload_mbps": ul, "idle_sec": round(idle, 1),
+             "mobile": mobile_of(ip)}
             for ip, c, dl, ul, idle in rows], indent=2))
         return
 
@@ -1398,13 +1495,34 @@ def cmd_status(a):
     shown = rows if a.full else rows[:a.top]
     for ip, c, dl, _ul, idle in shown:
         mark = f"{C['gry']}·{C['r']}" if idle > 300 else " "
-        line = f" {mark}{ip:<30}{fmt_bytes(c['down']):>12}{fmt_bytes(c['up']):>12}"
+        op = mobile_of(ip)
+        # Метку красим серым, поэтому ширину колонки добиваем вручную.
+        ip_col = (f"{ip} {C['gry']}{op}{C['r']}" + " " * max(0, 29 - len(ip) - len(op))
+                  if op else f"{ip:<30}")
+        line = f" {mark}{ip_col}{fmt_bytes(c['down']):>12}{fmt_bytes(c['up']):>12}"
         if a.live:
             line += f"{dl:>9.1f} Mbit/s"
         print(line)
 
     if not a.full and len(rows) > a.top:
         print(f"  {C['gry']}{t('more_ips', n=len(rows) - a.top)}{C['r']}")
+
+    # Разбивка по портам: сумма по всем адресам, самые тяжёлые сверху.
+    port_tot = {}
+    for ip, ports in read_port_stats().items():
+        for port, (d, u) in ports.items():
+            row = port_tot.setdefault(port, [0, 0])
+            row[0] += d
+            row[1] += u
+    if port_tot:
+        print(f"\n  {t('mon_ports')}")
+        print(f"  {C['gry']}{'─' * 70}{C['r']}")
+        head = f"  {t('mon_port'):<12}{t('downloaded'):>22}{t('uploaded'):>22}"
+        print(f"{C['gry']}{head}{C['r']}")
+        for port in sorted(port_tot, key=lambda p: sum(port_tot[p]), reverse=True)[:10]:
+            d, u = port_tot[port]
+            label = str(port) if port else t("mon_other")
+            print(f"  {label:<12}{fmt_bytes(d):>22}{fmt_bytes(u):>22}")
     print(f"  {C['gry']}{t('idle_note')}{C['r']}\n")
 
 
@@ -1503,6 +1621,7 @@ def cmd_monitor(a):
 
     history, since, chan = {}, {}, []
     prev, prev_t = read_users(), time.monotonic()
+    prev_ports = read_port_stats()
     pens, pens_at = load_penalties(), 0.0
     wl = whitelist_ips()
     width = 78
@@ -1512,10 +1631,29 @@ def cmd_monitor(a):
         while True:
             time.sleep(a.interval)
             cur = read_users()
+            cur_ports = read_port_stats()
             now_t = time.monotonic()
             dt = max(0.1, now_t - prev_t)
             rt = rates(prev, cur, dt)
             prev, prev_t = cur, now_t
+
+            # Скорости по парам «адрес × порт» за прошедший интервал.
+            port_rt = {}
+            for ip, ports in cur_ports.items():
+                pports = prev_ports.get(ip, {})
+                for port, (d, u) in ports.items():
+                    pd, pu = pports.get(port, (0, 0))
+                    pdl = max(0, d - pd) * 8 / 1e6 / dt
+                    pul = max(0, u - pu) * 8 / 1e6 / dt
+                    if pdl + pul > 0.005:
+                        port_rt.setdefault(ip, {})[port] = (pdl, pul)
+            port_tot = {}
+            for ip, ports in port_rt.items():
+                for port, (pdl, pul) in ports.items():
+                    row = port_tot.setdefault(port, [0.0, 0.0])
+                    row[0] += pdl
+                    row[1] += pul
+            prev_ports = cur_ports
 
             # Список штрафов меняется редко — перечитываем раз в пять секунд.
             if now_t - pens_at > 5:
@@ -1586,6 +1724,7 @@ def cmd_monitor(a):
                 else:
                     mark = " "
                 pct = f"{share * 100:>3.0f}%" if limit > 0 else "   "
+                op = mobile_of(ip)
                 # Отдачу красим по своей шкале: у мобильных операторов канал
                 # вверх узкий, и заметная отдача — первый признак раздачи.
                 ul_col = C["gry"]
@@ -1610,8 +1749,35 @@ def cmd_monitor(a):
                            f"{pkt_col}{pkt_txt:>7}{C['r']}"
                            f"{C['gry']}{avg:>8.1f}{C['r']}"
                            f"{hold_col}{hold_txt:>7}{C['r']}"
-                           f"  {col}{bar(dl, scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}")
+                           f"  {col}{bar(dl, scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}"
+                           f"{(' ' + C['cyan'] + op + C['r']) if op else ''}")
+                # Разбивка по портам под адресом: показываем, когда адрес
+                # реально работает больше чем по одному порту.
+                ports = port_rt.get(ip, {})
+                if len(ports) >= 2:
+                    parts = []
+                    for p in sorted(ports, key=lambda x: sum(ports[x]),
+                                    reverse=True)[:4]:
+                        pdl, pul = ports[p]
+                        label = str(p) if p else t("mon_other")
+                        parts.append(f"{label} ↓{pdl:.1f} ↑{pul:.1f}")
+                    out.append(f"{C['dim']}       ├ {'   '.join(parts)}"
+                               f"{C['r']}")
 
+            # Сводка «По портам»: сколько канала занимает каждый порт
+            # в сумме по всем адресам. Имеет смысл при нескольких портах.
+            if port_tot and len(port_tot) >= 1:
+                top_port = max(sum(v) for v in port_tot.values())
+                out.append(f"  {C['gry']}{'─' * width}{C['r']}")
+                out.append(f"   {C['b']}{t('mon_ports')}{C['r']}")
+                for p in sorted(port_tot,
+                                key=lambda x: sum(port_tot[x]),
+                                reverse=True)[:6]:
+                    pdl, pul = port_tot[p]
+                    label = str(p) if p else t("mon_other")
+                    out.append(f"   {C['cyan']}{label:<12}{C['r']}"
+                               f"↓ {pdl:>6.1f}   ↑ {pul:>5.1f} Mbit/s"
+                               f"   {C['cyan']}{bar(pdl, top_port, 14)}{C['r']}")
             out.append(f"  {C['gry']}{'─' * width}{C['r']}")
             shown = min(len(active), a.top)
             out.append(f"   {C['gry']}{t('mon_shown', a=shown, b=len(active))}"
@@ -1860,6 +2026,157 @@ def owner_of(ip, owners=None):
         return out or None
     except Exception:
         return None
+
+
+# ───────────────────── метка «мобильный оператор» ─────────────────────
+# Кеш: {"updated": ts, "nets": [["185.1.0.0/24", "МТС"], ...]}. Наполняется
+# командой `mobile update` и сторожем; сам поиск сети не трогает.
+
+_MOBILE_IDX = None          # {4: (starts, ends, ops), 6: ...}; None — ещё не грузили
+_MOBILE_RETRY_AT = 0.0
+_MOBILE_THREAD = None
+
+
+def mobile_read():
+    """Содержимое кеша или None, если его нет или он битый."""
+    try:
+        with open(MOBILE_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("nets"), list):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _mobile_build(data):
+    """
+    Диапазоны целых по версиям, по возрастанию начала. Вложенные в более
+    широкие отбрасываются: ответ «любой покрывающий» от этого не меняется, а
+    у оставшихся концы тоже растут, так что хватает одного шага bisect.
+    """
+    raw = {4: [], 6: []}
+    for rec in (data or {}).get("nets", []):
+        try:
+            net = ipaddress.ip_network(rec[0], strict=False)
+            raw[net.version].append((int(net.network_address),
+                                     int(net.broadcast_address), str(rec[1])))
+        except Exception:
+            continue
+    idx = {}
+    for ver, items in raw.items():
+        items.sort(key=lambda x: (x[0], -x[1]))
+        starts, ends, ops, top = [], [], [], -1
+        for st, en, op in items:
+            if en > top:
+                starts.append(st)
+                ends.append(en)
+                ops.append(op)
+                top = en
+        idx[ver] = (starts, ends, ops)
+    return idx
+
+
+def mobile_of(ip):
+    """Название оператора, если адрес в его сети, иначе None. Не бросает."""
+    global _MOBILE_IDX
+    try:
+        if _MOBILE_IDX is None:
+            _MOBILE_IDX = _mobile_build(mobile_read())
+        addr = ipaddress.ip_address(str(ip).strip())
+        if addr.version == 6 and addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
+        starts, ends, ops = _MOBILE_IDX[addr.version]
+        n = int(addr)
+        i = bisect.bisect_right(starts, n) - 1
+        if i >= 0 and ends[i] >= n:
+            return ops[i]
+    except Exception:
+        pass
+    return None
+
+
+def mobile_fetch_asn(asn):
+    """Анонсируемые префиксы одной AS из RIPEstat. Сетевую ошибку не глушит."""
+    req = urllib.request.Request(MOBILE_URL.format(asn=int(asn)),
+                                 headers={"User-Agent": "shape"})
+    with urllib.request.urlopen(req, timeout=MOBILE_HTTP_TIMEOUT) as r:
+        data = json.loads(r.read())
+    out = []
+    for rec in (data.get("data") or {}).get("prefixes") or []:
+        try:
+            out.append(str(ipaddress.ip_network(rec["prefix"], strict=False)))
+        except Exception:
+            continue
+    return out
+
+
+def mobile_update():
+    """
+    Обновить кеш. -> (число сетей, список ASN без ответа).
+    Если не получено ничего — старый кеш остаётся, бросает RuntimeError.
+    """
+    global _MOBILE_IDX
+    nets, failed, fails = [], [], 0
+    for op, asns in MOBILE_ASNS.items():
+        for asn in asns:
+            if fails >= MOBILE_MAX_FAILS:     # сети нет — не ждём остальных
+                failed.append(asn)
+                continue
+            try:
+                prefixes = mobile_fetch_asn(asn)
+            except Exception:
+                failed.append(asn)
+                fails += 1
+                continue
+            fails = 0
+            nets.extend([p, op] for p in prefixes)
+    if not nets:
+        raise RuntimeError(t("mob_none"))
+    os.makedirs(VAR_DIR, exist_ok=True)
+    tmp = MOBILE_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"updated": round(time.time()), "nets": nets}, f,
+                  ensure_ascii=False)
+    os.replace(tmp, MOBILE_FILE)
+    _MOBILE_IDX = None
+    return len(nets), failed
+
+
+def mobile_due(now=None):
+    """
+    Раз в цикл сторожа: не пора ли обновить кеш. Обновление идёт в отдельном
+    потоке, чтобы сеть не задерживала решения сторожа; любая ошибка — только
+    в журнал.
+    """
+    global _MOBILE_RETRY_AT, _MOBILE_THREAD
+    try:
+        now = now if now is not None else time.time()
+        if now < _MOBILE_RETRY_AT:
+            return
+        if _MOBILE_THREAD is not None and _MOBILE_THREAD.is_alive():
+            return
+        data = mobile_read()
+        try:
+            age = now - float((data or {}).get("updated") or 0)
+        except (TypeError, ValueError):
+            age = MOBILE_MAX_AGE + 1
+        if data is not None and age < MOBILE_MAX_AGE:
+            return
+        _MOBILE_RETRY_AT = now + MOBILE_RETRY
+
+        def job():
+            try:
+                n, failed = mobile_update()
+                print(t("mob_updated", n=n, bad=len(failed)), flush=True)
+            except Exception as e:
+                print(f"mobile: {e}", flush=True)
+
+        _MOBILE_THREAD = threading.Thread(target=job, daemon=True)
+        _MOBILE_THREAD.start()
+    except Exception as e:
+        print(f"mobile: {e}", flush=True)
 
 
 def subject_text(subject, ip):
@@ -2262,6 +2579,7 @@ def cmd_watch(a):
                 today = day_now
             digest_due(cfg)
             backup_due(cfg)
+            mobile_due()
             # Опрос панели. Внутри свой дедлайн и своя пауза после ошибки:
             # недоступная панель не должна ни ронять сторож, ни задерживать
             # выдачу штрафов дольше одного пропущенного прохода.
@@ -4400,6 +4718,46 @@ def cmd_owners(a):
     print(f"{C['grn']}✓ {t('own_set', ip=ip)}{C['r']}")
 
 
+def cmd_mobile(a):
+    """Кеш сетей мобильных операторов: update / status / lookup."""
+    if a.action == "update":
+        try:
+            n, failed = mobile_update()
+        except Exception as e:
+            die(str(e))
+        print(f"{C['grn']}✓ {t('mob_updated', n=n, bad=len(failed))}{C['r']}")
+        if failed:
+            print(f"{C['yel']}  {t('mob_failed')}: "
+                  f"{', '.join('AS' + str(x) for x in failed)}{C['r']}")
+        return
+
+    if a.action == "lookup":
+        ip = valid_ip(a.ip)
+        if ip is None:
+            die(t("bad_ip", ip=str(a.ip)[:60]))
+        op = mobile_of(ip)
+        print(f"{ip}: {op}" if op else f"{ip}: {t('mob_not')}")
+        return
+
+    data = mobile_read()
+    if data is None:
+        print(f"\n  {C['gry']}{t('mob_nocache')}{C['r']}\n")
+        return
+    count = {}
+    for rec in data["nets"]:
+        if isinstance(rec, list) and len(rec) == 2:
+            count[str(rec[1])] = count.get(str(rec[1]), 0) + 1
+    try:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(data["updated"])))
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        when = "—"
+    print(f"\n  {t('mob_updated_at')}: {C['b']}{when}{C['r']} · "
+          f"{t('mob_total')}: {sum(count.values())}")
+    for op in sorted(count, key=lambda k: -count[k]):
+        print(f"  {op:<14}{count[op]:>6}")
+    print()
+
+
 def limit_row(ip, p):
     """Одна запись в машинном виде. Используется и CLI, и API."""
     return {"ip": ip, "mbps": float(p.get("mbps", 0)),
@@ -5063,6 +5421,11 @@ def build_parser():
     ow.add_argument("--telegram-id", dest="telegram_id", default=None)
     ow.add_argument("--json", action="store_true")
     ow.set_defaults(func=cmd_owners)
+
+    mo = sub.add_parser("mobile", help=t("h_mobile"))
+    mo.add_argument("action", choices=["update", "status", "lookup"])
+    mo.add_argument("ip", nargs="?", default="")
+    mo.set_defaults(func=cmd_mobile)
 
     mt = sub.add_parser("metrics", help=t("h_metrics"))
     mt.add_argument("--out", default=None, help=t("h_met_out"))

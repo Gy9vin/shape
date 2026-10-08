@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.24-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.25-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.24
+# Shape v3.25
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -176,6 +176,25 @@ the channel over the last minute.
 Whitelisted addresses are shown alongside the rest: the limit does not apply to
 them, but the load they create is just as real and worth knowing about. They
 used to be invisible everywhere.
+
+**Operator tag.** To the right of an address (next to it in `status`) a short
+operator name — MTS, Beeline, MegaFon, T2 and so on — is shown when the
+address belongs to a mobile operator's network. It means "operator network",
+not "guaranteed cellular client": the same ASNs also carry fixed-line access.
+Rostelecom is left out on purpose — its network is too broad. The ASN list
+(`MOBILE_ASNS`) comes from [mobile443-filter](https://github.com/wh3r3ar3you/mobile443-filter)
+and is edited at the top of `shaperctl.py`. Prefixes come from RIPEstat and are
+cached in `/var/lib/shape/mobile_nets.json`; the watchdog refreshes them daily
+on its own, or by hand:
+
+```bash
+shaperctl.py mobile update        # fetch prefixes (if RIPEstat is silent the old list stays)
+shaperctl.py mobile status        # last update, networks per operator
+shaperctl.py mobile lookup 85.26.0.1
+```
+
+No file or a broken one — the tags are simply not shown. In `status --json`
+the `mobile` field is the operator name or `null`.
 
 ### Why "now" sometimes exceeds the limit
 

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.24-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.25-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
@@ -13,7 +13,7 @@
   <b>Русский</b> · <a href="README.en.md">English</a>
 </p>
 
-# Shape v3.24
+# Shape v3.25
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -186,6 +186,24 @@ shaper
 Адреса из белого списка видны наравне с остальными: лимит к ним не
 применяется, но нагрузку они создают такую же, и знать о ней надо. Раньше
 их не было видно вообще нигде.
+
+**Метка оператора.** Справа от адреса (в `status` — рядом с ним) стоит
+короткое название оператора — МТС, Билайн, МегаФон, T2 и другие, — если адрес
+из сети мобильного оператора. Это сеть оператора, а не гарантия, что клиент
+сидит именно на сотовой связи: в тех же ASN бывает и проводной доступ.
+Ростелеком в список намеренно не входит — сеть слишком широкая. Список ASN
+(`MOBILE_ASNS`) взят из [mobile443-filter](https://github.com/wh3r3ar3you/mobile443-filter)
+и правится в начале `shaperctl.py`. Префиксы берутся из RIPEstat и лежат в
+`/var/lib/shape/mobile_nets.json`; сторож обновляет их раз в сутки сам, вручную:
+
+```bash
+shaperctl.py mobile update        # скачать префиксы (без ответа от RIPEstat — старый список остаётся)
+shaperctl.py mobile status        # когда обновлено, сколько сетей по операторам
+shaperctl.py mobile lookup 85.26.0.1
+```
+
+Нет файла или он битый — метки просто не показываются. В `status --json`
+поле `mobile` — название оператора или `null`.
 
 ### Почему «сейчас» бывает выше лимита
 

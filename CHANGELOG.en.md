@@ -13,6 +13,48 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.25
+
+**The monitor did not show which ports a client uses, or whether the client
+is on a mobile operator network.**
+
+### Per-"client x port" statistics
+
+The eBPF filter has new maps, `port_stat_map_down` and `port_stat_map_up`:
+bytes and packets are counted separately for every "client, port" pair (only
+ports from the shaper's list). Behind a CDN and inside a tunnel the key is the
+real client, not the relay; whitelisted clients are not slowed down but are
+counted too.
+
+- `shaperctl.py status` - a new "By ports" block.
+- `monitor` - a per-port breakdown under the client address.
+
+### "Mobile operator network" label
+
+Next to the address, `status` and `monitor` can now show an operator label,
+and `status --json` has a `"mobile"` field. The ASN list comes from
+github.com/wh3r3ar3you/mobile443-filter; Rostelecom (12389) is not included.
+Prefixes of these ASNs are fetched from RIPEstat and stored in
+`/var/lib/shape/mobile_nets.json`; the watcher refreshes them once a day, and
+after a failure no more than once an hour.
+
+- `shaperctl.py mobile update|status|lookup` - manual refresh, state and
+  address lookup.
+
+The label means "an operator's network", not "guaranteed cellular". It limits
+nothing - it is only a mark.
+
+### Checks
+
+New suite `tests/mobile_tests.py` - 60 checks. The BPF harness now has 78
+checks in total, and section 11 "Per-port statistics" is new: download and
+upload per port, a second port counted separately, the sum over ports equals
+the client's total counter, a foreign port is not counted, behind a CDN the
+key is the real client, the whitelist is counted.
+
+An update does not touch settings: the limit, ports, whitelist and penalties
+stay as they were.
+
 ## 3.24
 
 **A node with HAProxy on the same machine: the shaper did not see the real

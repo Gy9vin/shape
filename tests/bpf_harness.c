@@ -48,6 +48,8 @@ static struct ent table[4096];
 static int keysize(void *m) {
     if (m == (void *)&config_map || m == (void *)&port_map) return 4;
     if (m == (void *)&pp_conn_map) return sizeof(struct pp_key);
+    if (m == (void *)&port_stat_map_down || m == (void *)&port_stat_map_up)
+        return sizeof(struct port_stat_key);
     return 16;
 }
 void *bpf_map_lookup_elem(void *map, const void *key) {
@@ -763,6 +765,67 @@ int main(void)
         if (table[i].used && table[i].map == (void *)&port_map &&
             (*(unsigned *)table[i].key == 0 || *(unsigned *)table[i].key == 7777))
             table[i].used = 0;
+    /* ── 11. Статистика «клиент × порт» ── */
+    printf("\n\033[1m11. Статистика по портам\033[0m\n");
+    unsigned PSCLI = 0x0500007F;
+    int len443 = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, PSCLI, SERVER);
+    run_pkt(len443, 0);
+    run_pkt(len443, 0);
+    struct port_stat_key pk443 = {0};
+    pk443.addr[0] = PSCLI; pk443.port = 443;
+    struct port_stat *ps = bpf_map_lookup_elem(&port_stat_map_down, &pk443);
+    check("download разложен по порту 443",
+          ps && ps->bytes == 2 * (unsigned long long)len443 && ps->packets == 2);
+
+    int len9080 = build_v4(IPPROTO_TCP, 9080, 51001, 0, 800, PSCLI, SERVER);
+    run_pkt(len9080, 0);
+    struct port_stat_key pk9080 = {0};
+    pk9080.addr[0] = PSCLI; pk9080.port = 9080;
+    struct port_stat *ps2 = bpf_map_lookup_elem(&port_stat_map_down, &pk9080);
+    struct ip_key kps = {0};
+    kps.addr[0] = PSCLI;
+    struct user_state *su11 = bpf_map_lookup_elem(&user_state_map_down, &kps);
+    check("второй порт считается отдельно",
+          ps2 && ps2->bytes == (unsigned long long)len9080);
+    check("сумма по портам равна общему счётчику клиента",
+          su11 && ps && ps2 && su11->total_bytes == ps->bytes + ps2->bytes);
+
+    run_pkt(build_v4(IPPROTO_TCP, 51002, 443, 0, 300, SERVER, 0x0600007F), 1);
+    struct port_stat_key pu443 = {0};
+    pu443.addr[0] = 0x0600007F; pu443.port = 443;
+    check("upload тоже разложен по порту",
+          bpf_map_lookup_elem(&port_stat_map_up, &pu443) != NULL);
+
+    run_pkt(build_v4(IPPROTO_TCP, 51003, 8080, 0, 300, SERVER, 0x0700007F), 1);
+    struct port_stat_key pw = {0};
+    pw.addr[0] = 0x0700007F; pw.port = 8080;
+    check("чужой порт в статистику не попадает",
+          bpf_map_lookup_elem(&port_stat_map_up, &pw) == NULL);
+
+    /* за CDN статистика ведётся по настоящему клиенту */
+    plen = ppv2_tcp4(pay, PPCLI);
+    len = build_tcp_raw(SERVER, RELAY, 60007, 9080, 0x18, pay, plen);
+    run_pkt(len, 1);
+    len = build_tcp_raw(RELAY, SERVER, 9080, 60007, 0x18, pay, 28);
+    run_pkt(len, 0);
+    struct port_stat_key pr = {0}, ppc = {0};
+    pr.addr[0] = RELAY;   pr.port = 9080;
+    ppc.addr[0] = __builtin_bswap32(PPCLI);  ppc.port = 9080;
+    check("за CDN статистика по настоящему клиенту, не по релею",
+          bpf_map_lookup_elem(&port_stat_map_down, &pr) == NULL &&
+          bpf_map_lookup_elem(&port_stat_map_down, &ppc) != NULL);
+
+    /* белый список: не тормозим, но считаем по портам */
+    struct ip_key kw11 = {0};
+    kw11.addr[0] = 0x0800007F;
+    map_put(&whitelist_map, &kw11, &one);
+    run_pkt(build_v4(IPPROTO_TCP, 443, 51004, 0, 1400, 0x0800007F, SERVER), 0);
+    run_pkt(build_v4(IPPROTO_TCP, 443, 51004, 0, 1400, 0x0800007F, SERVER), 0);
+    struct port_stat_key pw11 = {0};
+    pw11.addr[0] = 0x0800007F; pw11.port = 443;
+    check("белый список: по портам считается, но не тормозится",
+          bpf_map_lookup_elem(&port_stat_map_down, &pw11) != NULL && skb.tstamp == 0);
+    bpf_map_delete_elem(&whitelist_map, &kw11);
 
     printf("\n\033[1mИтог: %d пройдено, %d провалено\033[0m\n", ok, fail);
     return fail ? 1 : 0;

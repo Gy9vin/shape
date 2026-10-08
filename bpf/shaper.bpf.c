@@ -19,6 +19,10 @@
  *                                            но их трафик всё равно считается)
  *   penalty_map    : ip -> struct penalty   (штраф нарушителю на время)
  *   user_state_map_down/up : ip -> struct user_state
+ *   port_stat_map_down/up : ip+port -> struct port_stat
+ *                                          (статистика «клиент × порт»:
+ *                                           монитор показывает, какой порт
+ *                                           какую долю съедает)
  *   pp_conn_map    : relay ip:port -> ip    (PROXY protocol: соединение
  *                                            релея CDN ↔ настоящий клиент)
  *
@@ -158,6 +162,34 @@ struct {
     __type(value, struct ip_key);
 } pp_conn_map SEC(".maps");
 
+/* Статистика «клиент × порт»: сколько прошло через каждый порт.
+ * Ключ клиента в user_state остаётся общим на все порты — лимит
+ * по-прежнему один на адрес, а эта карта только для монитора.
+ * Порт 0 — фрагменты и правило «все порты». */
+struct port_stat_key {
+    __u32 addr[4];    /* адрес клиента: IPv4 в addr[0], IPv6 целиком */
+    __u32 port;       /* порт сервера */
+};
+
+struct port_stat {
+    __u64 bytes;
+    __u64 packets;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, MAX_USERS);
+    __type(key,   struct port_stat_key);
+    __type(value, struct port_stat);
+} port_stat_map_down SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, MAX_USERS);
+    __type(key,   struct port_stat_key);
+    __type(value, struct port_stat);
+} port_stat_map_up SEC(".maps");
+
 
 /* Разбор заголовка PROXY protocol из начала TCP-потока. Возвращает 1
  * и адрес клиента в out, если заголовок нашёлся.
@@ -231,7 +263,8 @@ static __always_inline int parse_pp(__u8 *p, void *data_end, struct ip_key *out)
  */
 static __always_inline int process_packet(struct __sk_buff *skb,
                                           __u32 direction,
-                                          void *user_map)
+                                          void *user_map,
+                                          void *stat_map)
 {
     void *data     = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
@@ -477,6 +510,25 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     __u64 now = bpf_ktime_get_ns();
     __u32 len = skb->len;
 
+    /* Статистика «клиент × порт». Ведётся и для белого списка: монитор
+     * должен показать, какой порт какую долю съедает, независимо от
+     * лимита. Отдельная карта, чтобы ключ клиента в user_state остался
+     * общим на все порты — лимит по-прежнему один на адрес. */
+    struct port_stat_key pk = {0};
+    __builtin_memcpy(pk.addr, key.addr, sizeof(pk.addr));
+    pk.port = key_port;
+    struct port_stat *ps = bpf_map_lookup_elem(stat_map, &pk);
+    if (ps) {
+        __sync_fetch_and_add(&ps->bytes, len);
+        __sync_fetch_and_add(&ps->packets, 1);
+    } else {
+        struct port_stat fresh = {
+            .bytes   = len,
+            .packets = 1,
+        };
+        bpf_map_update_elem(stat_map, &pk, &fresh, BPF_ANY);
+    }
+
     struct user_state *st = bpf_map_lookup_elem(user_map, &key);
     if (!st) {
         struct user_state fresh = {
@@ -544,13 +596,13 @@ static __always_inline int process_packet(struct __sk_buff *skb,
 SEC("classifier/down")
 int shaper_down(struct __sk_buff *skb)
 {
-    return process_packet(skb, 0, &user_state_map_down);
+    return process_packet(skb, 0, &user_state_map_down, &port_stat_map_down);
 }
 
 SEC("classifier/up")
 int shaper_up(struct __sk_buff *skb)
 {
-    return process_packet(skb, 1, &user_state_map_up);
+    return process_packet(skb, 1, &user_state_map_up, &port_stat_map_up);
 }
 
 char _license[] SEC("license") = "GPL";
