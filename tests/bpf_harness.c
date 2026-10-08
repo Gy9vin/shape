@@ -21,11 +21,21 @@ long  bpf_map_delete_elem(void *map, const void *key);
 static unsigned long long bpf_ktime_get_ns_impl(void) { return fake_now; }
 #define bpf_ktime_get_ns bpf_ktime_get_ns_impl
 
+/* bpf_skb_pull_data: на живом ядре подтягивает начало нагрузки из страниц
+ * (frags) в линейную часть, то есть сдвигает data_end. Здесь «линейная
+ * часть» задаётся linear_len: пакет целиком лежит в буфере, а data_end
+ * обрезается — так выглядит loopback и GSO/GRO, где нагрузка в страницах. */
+struct __sk_buff;
+long bpf_skb_pull_data(struct __sk_buff *skb, unsigned int len);
+static int pull_calls = 0;      /* сколько раз программа просила подтянуть */
+static int pull_fail = 0;       /* 1 = хелпер возвращает ошибку */
+
 #define SEC(NAME)
 #define __uint(name, val) int (*name)[val]
 #define __type(name, val) typeof(val) *name
 #define bpf_htons(x) __builtin_bswap16(x)
 #define bpf_ntohs(x) __builtin_bswap16(x)
+#define bpf_htonl(x) __builtin_bswap32(x)
 #ifndef __always_inline
 #define __always_inline inline __attribute__((always_inline))
 #endif
@@ -92,9 +102,24 @@ static void pkt_alloc(void) {
     }
 }
 
+/* 0 = пакет линейный целиком; иначе столько байт от начала кадра. */
+static int linear_len = 0;
+
+long bpf_skb_pull_data(struct __sk_buff *s, unsigned int want) {
+    pull_calls++;
+    if (pull_fail)
+        return -14;
+    if (want > s->len)
+        return -12;
+    unsigned long have = s->data_end - s->data;
+    if (want > have)
+        s->data_end = s->data + want;
+    return 0;
+}
+
 static int run_pkt(int len, int direction) {
     skb.data = (unsigned long)pkt;
-    skb.data_end = (unsigned long)pkt + len;
+    skb.data_end = (unsigned long)pkt + (linear_len && linear_len < len ? linear_len : len);
     skb.len = len;
     skb.tstamp = 0;
     return direction == 0 ? shaper_down(&skb) : shaper_up(&skb);
@@ -202,6 +227,29 @@ static int build_tcp_raw(unsigned dst, unsigned src, unsigned sport,
     if (payload_len > 0)
         memcpy(t + 20, payload, payload_len);
     return 14 + 20 + 20 + payload_len;
+}
+
+/* Как build_tcp_raw, но внутри IPIP-туннеля (protocol 4). */
+static int build_ipip_tcp_raw(unsigned dst, unsigned src, unsigned sport,
+                              unsigned dport, unsigned char flags,
+                              const void *payload, int payload_len)
+{
+    memset(pkt, 0, 2048);
+    pkt[12] = 0x08; pkt[13] = 0x00;
+    struct iphdr *out = (struct iphdr *)(pkt + 14);
+    out->version = 4; out->ihl = 5; out->protocol = IPPROTO_IPIP;
+    out->daddr = 0x0A0000C8; out->saddr = 0x0A0000C9;
+    struct iphdr *in = (struct iphdr *)(pkt + 14 + 20);
+    in->version = 4; in->ihl = 5; in->protocol = IPPROTO_TCP;
+    in->daddr = dst; in->saddr = src;
+    unsigned char *t = pkt + 14 + 20 + 20;
+    t[0] = sport >> 8; t[1] = sport & 0xFF;
+    t[2] = dport >> 8; t[3] = dport & 0xFF;
+    t[12] = 5 << 4;
+    t[13] = flags;
+    if (payload_len > 0)
+        memcpy(t + 20, payload, payload_len);
+    return 14 + 20 + 20 + 20 + payload_len;
 }
 
 /* ── сборщики заголовков PROXY protocol ── */
@@ -500,7 +548,7 @@ int main(void)
     int plen = ppv2_tcp4(pay, PPCLI);
     len = build_tcp_raw(SERVER, RELAY, 60001, 9080, 0x18, pay, plen);
     run_pkt(len, 1);
-    struct ip_key kpc = {0}; kpc.addr[0] = PPCLI;
+    struct ip_key kpc = {0}; kpc.addr[0] = __builtin_bswap32(PPCLI);
     struct ip_key kr = {0}; kr.addr[0] = RELAY;
     check("upload за CDN учтён по настоящему клиенту",
           bpf_map_lookup_elem(&user_state_map_up, &kpc) != NULL);
@@ -525,7 +573,7 @@ int main(void)
     fake_now = 7000000000ULL;
     len = build_tcp_raw(RELAY, SERVER, 9080, 60001, 0x18, pay1400, 1400);
     run_pkt(len, 0);
-    struct ip_key kpd = {0}; kpd.addr[0] = PPCLI;
+    struct ip_key kpd = {0}; kpd.addr[0] = __builtin_bswap32(PPCLI);
     check("download за CDN учтён по настоящему клиенту",
           bpf_map_lookup_elem(&user_state_map_down, &kpd) != NULL);
     run_pkt(len, 0); t0 = skb.tstamp;
@@ -544,7 +592,8 @@ int main(void)
     len = build_tcp_raw(SERVER, RELAY, 60002, 9080, 0x18, pay, plen);
     run_pkt(len, 1);
     struct ip_key k6pp = {0};
-    k6pp.addr[0] = 0x20010000UL; k6pp.addr[2] = 0xDB8; k6pp.addr[3] = 0x99;
+    k6pp.addr[0] = __builtin_bswap32(0x20010000UL); k6pp.addr[2] = __builtin_bswap32(0xDB8);
+    k6pp.addr[3] = __builtin_bswap32(0x99);
     check("IPv6-клиент из заголовка v2 учтён",
           bpf_map_lookup_elem(&user_state_map_up, &k6pp) != NULL);
 
@@ -552,7 +601,7 @@ int main(void)
     plen = ppv1_tcp4(pay, PPCLI2);
     len = build_tcp_raw(SERVER, RELAY, 60003, 9080, 0x18, pay, plen);
     run_pkt(len, 1);
-    struct ip_key kpc2 = {0}; kpc2.addr[0] = PPCLI2;
+    struct ip_key kpc2 = {0}; kpc2.addr[0] = __builtin_bswap32(PPCLI2);
     check("текстовый заголовок v1 тоже разобран",
           bpf_map_lookup_elem(&user_state_map_up, &kpc2) != NULL);
 
@@ -572,6 +621,148 @@ int main(void)
     ckk5.addr[0] = RELAY; ckk5.port = 60005;
     check("команда LOCAL не заводит запись",
           bpf_map_lookup_elem(&pp_conn_map, &ckk5) == NULL);
+
+    printf("\n\033[1m11. PROXY protocol при нагрузке в нелинейной части skb\033[0m\n");
+    /* loopback (HAProxy на той же ноде) и GSO/GRO: в линейной части только
+     * заголовки Ethernet+IP+TCP, байты нагрузки лежат в страницах. */
+    unsigned HDRS = 14 + 20 + 20;
+    unsigned RELAY2 = 0x2B00007F, PPCLI3 = 0x2C00007F;
+    linear_len = HDRS;
+
+    /* контроль: без pull_data заголовок в такой раскладке не виден */
+    plen = ppv2_tcp4(pay, PPCLI3);
+    len = build_tcp_raw(SERVER, RELAY2, 61001, 9080, 0x18, pay, plen);
+    pull_fail = 1; pull_calls = 0;
+    run_pkt(len, 1);
+    struct ip_key kr2 = {0}; kr2.addr[0] = RELAY2;
+    struct pp_key c61001 = {0}; c61001.addr[0] = RELAY2; c61001.port = 61001;
+    check("pull_data отказал: пакет не ломается, ключ по IP-заголовку",
+          pull_calls == 1 && bpf_map_lookup_elem(&user_state_map_up, &kr2) != NULL &&
+          bpf_map_lookup_elem(&pp_conn_map, &c61001) == NULL);
+    pull_fail = 0;
+
+    /* v2 TCP4, нагрузка не в линейной части */
+    map_put(&pp_conn_map, &c61001, &(struct ip_key){0}); bpf_map_delete_elem(&pp_conn_map, &c61001);
+    pull_calls = 0;
+    run_pkt(len, 1);
+    struct ip_key kpc3 = {0}; kpc3.addr[0] = __builtin_bswap32(PPCLI3);
+    check("v2 из нелинейной части прочитан (клиент, а не релей)",
+          pull_calls == 1 && bpf_map_lookup_elem(&user_state_map_up, &kpc3) != NULL);
+    check("соединение запомнено после pull_data",
+          bpf_map_lookup_elem(&pp_conn_map, &c61001) != NULL);
+
+    /* запись есть — pull_data больше не нужен ни на одном пакете */
+    pull_calls = 0;
+    len = build_tcp_raw(SERVER, RELAY2, 61001, 9080, 0x18, pay1400, 1400);
+    run_pkt(len, 1);
+    run_pkt(len, 1);
+    check("при известном соединении pull_data не вызывается", pull_calls == 0);
+
+    /* FIN из нелинейного пакета по-прежнему чистит карту */
+    len = build_tcp_raw(SERVER, RELAY2, 61001, 9080, 0x11, NULL, 0);
+    run_pkt(len, 1);
+    check("FIN удаляет соединение и в нелинейной раскладке",
+          bpf_map_lookup_elem(&pp_conn_map, &c61001) == NULL);
+
+    /* чистый ACK и короткая нагрузка: заголовку взяться неоткуда */
+    pull_calls = 0;
+    len = build_tcp_raw(SERVER, RELAY2, 61002, 9080, 0x10, NULL, 0);
+    run_pkt(len, 1);
+    check("пакет без нагрузки не вызывает pull_data", pull_calls == 0);
+    len = build_tcp_raw(SERVER, RELAY2, 61002, 9080, 0x18, "\x16\x03\x01\x00\xAB", 5);
+    run_pkt(len, 1);
+    check("нагрузка короче заголовка PROXY не вызывает pull_data", pull_calls == 0);
+
+    /* v2 TCP6 — самая длинная двоичная голова (52 байта) */
+    plen = ppv2_tcp6(pay);
+    len = build_tcp_raw(SERVER, RELAY2, 61003, 9080, 0x18, pay, plen);
+    pull_calls = 0;
+    run_pkt(len, 1);
+    check("IPv6-клиент из нелинейной части прочитан",
+          pull_calls == 1 && bpf_map_lookup_elem(&user_state_map_up, &k6pp) != NULL);
+
+    /* v1 — текстовая строка */
+    plen = ppv1_tcp4(pay, PPCLI2);
+    len = build_tcp_raw(SERVER, RELAY2, 61004, 9080, 0x18, pay, plen);
+    struct pp_key c61004 = {0}; c61004.addr[0] = RELAY2; c61004.port = 61004;
+    run_pkt(len, 1);
+    check("текстовый v1 из нелинейной части прочитан",
+          bpf_map_lookup_elem(&pp_conn_map, &c61004) != NULL);
+
+    /* нагрузка меньше, чем PP_PULL_LEN: просим ровно столько, сколько есть */
+    plen = ppv2_tcp4(pay, PPCLI3);
+    len = build_tcp_raw(SERVER, RELAY2, 61005, 9080, 0x18, pay, plen);
+    struct pp_key c61005 = {0}; c61005.addr[0] = RELAY2; c61005.port = 61005;
+    run_pkt(len, 1);
+    check("нагрузка ровно в 28 байт (граница) читается",
+          bpf_map_lookup_elem(&pp_conn_map, &c61005) != NULL);
+
+    /* IPIP-туннель: смещение нагрузки включает наружный IP-заголовок */
+    plen = ppv2_tcp4(pay, PPCLI3);
+    len = build_ipip_tcp_raw(SERVER, RELAY2, 61006, 9080, 0x18, pay, plen);
+    linear_len = 14 + 20 + 20 + 20;
+    struct pp_key c61006 = {0}; c61006.addr[0] = RELAY2; c61006.port = 61006;
+    run_pkt(len, 1);
+    check("PROXY внутри IPIP при нелинейной нагрузке прочитан",
+          bpf_map_lookup_elem(&pp_conn_map, &c61006) != NULL);
+
+    /* download-направление не требует pull_data вовсе */
+    linear_len = HDRS;
+    pull_calls = 0;
+    len = build_tcp_raw(RELAY2, SERVER, 9080, 61005, 0x18, pay1400, 1400);
+    run_pkt(len, 0);
+    check("download pull_data не вызывает", pull_calls == 0);
+
+    /* линейный пакет (как раньше) pull_data не трогает */
+    linear_len = 0;
+    pull_calls = 0;
+    plen = ppv2_tcp4(pay, PPCLI3);
+    len = build_tcp_raw(SERVER, RELAY2, 61007, 9080, 0x18, pay, plen);
+    run_pkt(len, 1);
+    check("линейный пакет: заголовок читается без pull_data", pull_calls == 0 &&
+          bpf_map_lookup_elem(&user_state_map_up, &kpc3) != NULL);
+
+    printf("\n\033[1m12. Loopback: правило «все порты» не действует (двойной учёт)\033[0m\n");
+    unsigned p7777 = 7777;
+    struct ip_key kall = {0}; kall.addr[0] = 0x3C00007F;
+    map_put(&port_map, &zero, &one);                /* правило «все порты» */
+    len = build_v4(IPPROTO_TCP, 51000, 7777, 0, 100, SERVER, 0x3C00007F);
+
+    skb.ifindex = 2;                                /* обычный интерфейс */
+    run_pkt(len, 1);
+    check("на внешнем интерфейсе «все порты» работает",
+          bpf_map_lookup_elem(&user_state_map_up, &kall) != NULL);
+
+    for (int i = 0; i < 4096; i++)
+        if (table[i].used && table[i].map == (void *)&user_state_map_up)
+            table[i].used = 0;
+    skb.ifindex = 1;                                /* lo */
+    run_pkt(len, 1);
+    check("на lo «все порты» игнорируется",
+          bpf_map_lookup_elem(&user_state_map_up, &kall) == NULL);
+
+    len = build_v4(IPPROTO_TCP, 0, 0, 0x00B9, 1400, 0x3C00007F, SERVER);
+    run_pkt(len, 0);
+    check("на lo фрагмент без портов тоже не считается",
+          bpf_map_lookup_elem(&user_state_map_down, &kall) == NULL);
+
+    map_put(&port_map, &p7777, &one);               /* явный порт */
+    len = build_v4(IPPROTO_TCP, 51000, 7777, 0, 100, SERVER, 0x3C00007F);
+    run_pkt(len, 1);
+    check("на lo явный порт шейпится как обычно",
+          bpf_map_lookup_elem(&user_state_map_up, &kall) != NULL);
+    struct user_state *lost = bpf_map_lookup_elem(&user_state_map_up, &kall);
+    unsigned long long before_lo = lost ? lost->packets : 0;
+    run_pkt(len, 1);
+    lost = bpf_map_lookup_elem(&user_state_map_up, &kall);
+    check("один пакет на lo считается один раз",
+          lost != NULL && lost->packets == before_lo + 1);
+
+    skb.ifindex = 0;
+    for (int i = 0; i < 4096; i++)
+        if (table[i].used && table[i].map == (void *)&port_map &&
+            (*(unsigned *)table[i].key == 0 || *(unsigned *)table[i].key == 7777))
+            table[i].used = 0;
 
     printf("\n\033[1mИтог: %d пройдено, %d провалено\033[0m\n", ok, fail);
     return fail ? 1 : 0;

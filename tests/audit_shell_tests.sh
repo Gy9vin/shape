@@ -147,7 +147,7 @@ check "ошибка назначения больше не выдаётся за
 check "движок пробует подгрузить модуль" \
       'grep -q "modprobe sch_fq" "$SRC/engine.sh"'
 check "без fq загрузка не срывается" \
-      'grep -q "setup_fq || true" "$SRC/engine.sh"'
+      'grep -qE "setup_fq (\"[\$]ifc\" )?\|\| true" "$SRC/engine.sh"'
 # Подвеситься к очередям mq выходит не всегда: при дескрипторе «0:» ядро не
 # может разрешить parent :1 и отвечает «Failed to find specified qdisc».
 # Тогда единственный путь — заменить корень целиком.
@@ -204,6 +204,50 @@ check "и убрана из Сервиса" \
 check "в Сервисе вернулась прежняя нумерация" \
       'grep -qE "^ *11\) screen_backup ;;" "$SRC/menu.sh" &&
        grep -qE "^ *12\) screen_uninstall ;;" "$SRC/menu.sh"'
+
+echo -e "\n${B}Список интерфейсов в engine.sh (режим HAProxy: «eth0 lo»)${N}"
+# Берём настоящий кусок разбора IFACE из engine.sh и гоняем его на разных значениях.
+IFTMP="$(mktemp -d)"
+sed -n '/^iface_ok()/,/^IFACE="\${IFACES\[\*\]-}"/p' "$SRC/engine.sh" > "$IFTMP/ifaces.sh"
+parse_ifaces() {   # $1 = значение IFACE; печатает «N|список|stderr»
+    bash -c 'set -u; CONF=/etc/shaper/shaper.conf; err() { echo "ERR:$*" >&2; }; IFACE="$1"; source "$2";
+             echo "${#IFACES[@]}|${IFACES[*]-}"' _ "$1" "$IFTMP/ifaces.sh" 2>&1
+}
+check "кусок разбора найден в engine.sh" '[[ -s "$IFTMP/ifaces.sh" ]]'
+check "один интерфейс работает как раньше" '[[ "$(parse_ifaces eth0)" == "1|eth0" ]]'
+check "список через пробел" '[[ "$(parse_ifaces "eth0 lo")" == "2|eth0 lo" ]]'
+check "лишние пробелы и табы не мешают" '[[ "$(parse_ifaces "  eth0 	 lo  ")" == "2|eth0 lo" ]]'
+check "дубль схлопывается" '[[ "$(parse_ifaces "lo eth0 lo")" == "2|lo eth0" ]]'
+check "пустой IFACE — пусто (дальше автоопределение)" '[[ "$(parse_ifaces "")" == "0|" ]]'
+out="$(parse_ifaces 'eth0 $(touch /tmp/shell_pwned) lo')"
+check "инъекция в имени отброшена, остальное цело" \
+      '[[ "$out" == *"2|eth0 lo" ]] && [[ ! -e /tmp/shell_pwned ]]'
+check "о негодном имени сказано" '[[ "$out" == *ERR:* ]]'
+out="$(cd / && parse_ifaces '*')"
+check "шаблон «*» не раскрывается в имена файлов" '[[ "$out" == *"0|" ]]'
+check "полностью негодное значение — пусто, а не падение" \
+      '[[ "$(parse_ifaces "a/../b")" == *"0|" ]]'
+
+echo -e "\n${B}engine.sh и режим HAProxy: фильтры на каждом интерфейсе${N}"
+check "фильтры вешаются в цикле по интерфейсам" \
+      'grep -q "for ifc in \"\${IFACES\[@\]}\"" "$SRC/engine.sh"'
+check "fq ставится для каждого интерфейса отдельно" \
+      'grep -q "setup_fq \"\$ifc\"" "$SRC/engine.sh"'
+check "в .active_iface пишется весь список" \
+      'grep -q "IFACE=.*IFACES\[\*\].*active_iface" "$SRC/engine.sh"'
+check "выгрузка снимает фильтры и с интерфейса из прошлого запуска" \
+      'grep -q "unload_targets" "$SRC/engine.sh"'
+check "на lo при выгрузке возвращается родной qdisc" \
+      'grep -q "tc qdisc del dev lo root" "$SRC/engine.sh"'
+check "о правиле «0» вместе с lo предупреждают" 'grep -q "lo_note" "$SRC/engine.sh"'
+check "программа игнорирует правило «0» на loopback" \
+      'grep -q "skb->ifindex == LOOPBACK_IFINDEX" "$SRC/bpf/shaper.bpf.c"'
+check "uninstall.sh обходит весь список интерфейсов" \
+      'grep -q "for iface in \$ifaces" "$SRC/uninstall.sh"'
+check "в меню есть экран режима HAProxy в Сервисе" \
+      'grep -q "^screen_haproxy()" "$SRC/menu.sh" && grep -qE "^ *13\) screen_haproxy ;;" "$SRC/menu.sh"'
+check "меню делает всё через shaperctl, а не правит IFACE само" \
+      'grep -q "\"\$CTL\" haproxy on" "$SRC/menu.sh" && ! grep -q "conf_set IFACE" "$SRC/menu.sh"'
 
 echo -e "\n${B}Итог: $ok пройдено, $fail провалено${N}"
 [[ $fail -eq 0 ]]

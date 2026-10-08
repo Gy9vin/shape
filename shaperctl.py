@@ -337,6 +337,21 @@ MSG = {
         "h_ports": "через запятую, 0 = все порты",
         "h_speed": "Мбит/с на IP-адрес, 0 = снять ограничение",
         "h_show": "показать текущие настройки",
+        "h_haproxy": "режим HAProxy на этой же ноде (шейпер ещё и на lo)",
+        "hp_need_port": "Укажи внутренний порт xray за HAProxy: --port N",
+        "hp_bad_port": "Порт должен быть числом от 1 до 65535: {p}. Порт 0 («все порты») на lo не действует",
+        "hp_no_iface": "Не удалось определить внешний интерфейс — задай IFACE в shaper.conf",
+        "hp_bad_iface": "Недопустимое имя интерфейса в shaper.conf: {i}",
+        "hp_on": "Режим HAProxy включён: шейпер на {ifs}, порты {ports}",
+        "hp_off": "Режим HAProxy выключен: шейпер на {ifs}",
+        "hp_status_on": "режим HAProxy: включён (интерфейсы: {ifs})",
+        "hp_status_off": "режим HAProxy: выключен (интерфейсы: {ifs})",
+        "hp_dropped": "Порт {p} убран из списка",
+        "hp_last_port": "Порт {p} оставлен: список портов не может быть пустым",
+        "hp_zero_note": "В списке портов есть 0: на lo оно не действует — там шейпятся только названные порты",
+        "hp_restart": "Перезапускаю шейпер, чтобы фильтры встали на новые интерфейсы…",
+        "hp_restart_fail": "Не удалось перезапустить сервис — выполни: systemctl restart shaper",
+        "hp_too_many": "Слишком много портов (максимум {n})",
         "h_restore": "залить настройки в карты",
         "h_monitor": "кто грузит канал прямо сейчас",
         "h_interval": "период обновления, сек",
@@ -650,6 +665,21 @@ MSG = {
         "h_ports": "comma separated, 0 = all ports",
         "h_speed": "Mbit/s per IP address, 0 = remove the limit",
         "h_show": "show current settings",
+        "h_haproxy": "HAProxy-on-this-node mode (shaper on lo as well)",
+        "hp_need_port": "Give the internal xray port behind HAProxy: --port N",
+        "hp_bad_port": "The port must be a number from 1 to 65535: {p}. Port 0 (\"all ports\") has no effect on lo",
+        "hp_no_iface": "Could not detect the external interface — set IFACE in shaper.conf",
+        "hp_bad_iface": "Invalid interface name in shaper.conf: {i}",
+        "hp_on": "HAProxy mode on: shaper on {ifs}, ports {ports}",
+        "hp_off": "HAProxy mode off: shaper on {ifs}",
+        "hp_status_on": "HAProxy mode: on (interfaces: {ifs})",
+        "hp_status_off": "HAProxy mode: off (interfaces: {ifs})",
+        "hp_dropped": "Port {p} removed from the list",
+        "hp_last_port": "Port {p} kept: the port list cannot be empty",
+        "hp_zero_note": "The port list has 0: it has no effect on lo — only named ports are shaped there",
+        "hp_restart": "Restarting the shaper so filters attach to the new interfaces…",
+        "hp_restart_fail": "Could not restart the service — run: systemctl restart shaper",
+        "hp_too_many": "Too many ports (max {n})",
         "h_restore": "push settings into the maps",
         "h_monitor": "who is loading the channel right now",
         "h_interval": "refresh period, seconds",
@@ -1154,6 +1184,137 @@ def cmd_show(a):
     print(f"  {C['gry']}{t('id_node')} {nid or t('id_none')}"
           f"  ·  {t('id_config')} {config_hash(cfg)}{C['r']}")
     print()
+
+
+# ─────────────── режим HAProxy: шейпер ещё и на loopback ───────────────
+# HAProxy на этой же ноде снимает TLS и отдаёт xray трафик на 127.0.0.1 с
+# send-proxy-v2: настоящий адрес клиента виден только в заголовке PROXY, а
+# пакеты идут по loopback. Поэтому режим — это «lo» в IFACE плюс внутренний
+# порт xray в списке портов. Внешний интерфейс остаётся: напрямую
+# подключённые инбаунды шейпятся на нём, как раньше.
+IFACE_RE = re.compile(r"^[A-Za-z0-9._@-]{1,15}$")
+
+
+def conf_path():
+    return os.path.join(ETC_DIR, "shaper.conf")
+
+
+def read_conf_ifaces():
+    """IFACE из shaper.conf списком. Как в bash: побеждает последняя строка."""
+    val = ""
+    try:
+        with open(conf_path()) as f:
+            for line in f:
+                m = re.match(r'\s*IFACE="([^"]*)"\s*$', line)
+                if m:
+                    val = m.group(1)
+    except OSError:
+        pass
+    out = []
+    for name in val.split():
+        if not IFACE_RE.match(name):
+            die(t("hp_bad_iface", i=name))
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def write_conf_ifaces(ifaces):
+    """Переписывает строку IFACE, остальной shaper.conf не трогает."""
+    new = 'IFACE="%s"\n' % " ".join(ifaces)
+    lines, done = [], False
+    try:
+        with open(conf_path()) as f:
+            for line in f:
+                if re.match(r"\s*IFACE=", line):
+                    if not done:
+                        lines.append(new)
+                        done = True
+                    continue
+                lines.append(line)
+    except OSError:
+        pass
+    if not done:
+        lines.append(new)
+    os.makedirs(ETC_DIR, exist_ok=True)
+    tmp = conf_path() + ".tmp"
+    with open(tmp, "w") as f:
+        f.writelines(lines)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, conf_path())
+
+
+def detect_external_iface():
+    try:
+        out = subprocess.run(["ip", "route", "get", "1.1.1.1"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    m = re.search(r" dev (\S+)", out)
+    return m.group(1) if m and IFACE_RE.match(m.group(1)) else None
+
+
+def haproxy_restart():
+    print(f"  {C['gry']}{t('hp_restart')}{C['r']}")
+    try:
+        r = subprocess.run(["systemctl", "restart", "shaper"], timeout=120)
+        ok = r.returncode == 0
+    except Exception:
+        ok = False
+    if not ok:
+        print(f"  {C['yel']}{t('hp_restart_fail')}{C['r']}")
+
+
+def cmd_haproxy(a):
+    ifaces = read_conf_ifaces()
+    cfg = load_config()
+
+    if a.action == "status":
+        key = "hp_status_on" if "lo" in ifaces else "hp_status_off"
+        print(t(key, ifs=" ".join(ifaces) or "auto"))
+        return
+
+    if a.action == "on":
+        if a.port is None:
+            die(t("hp_need_port"))
+        if not str(a.port).isdigit() or not 1 <= int(a.port) <= 65535:
+            die(t("hp_bad_port", p=a.port))
+        port = int(a.port)
+        if not ifaces:
+            ext = detect_external_iface()
+            if not ext:
+                die(t("hp_no_iface"))
+            ifaces = [ext]
+        if "lo" not in ifaces:
+            ifaces.append("lo")
+        if port not in cfg["ports"] and len(cfg["ports"]) >= MAX_PORTS:
+            die(t("too_many_ports", n=MAX_PORTS))
+        write_conf_ifaces(ifaces)
+        if port not in cfg["ports"]:
+            cfg["ports"] = list(cfg["ports"]) + [port]
+        save_config(cfg)
+        print(t("hp_on", ifs=" ".join(ifaces),
+                ports=", ".join(map(str, cfg["ports"]))))
+        if 0 in cfg["ports"]:
+            print(f"  {C['yel']}{t('hp_zero_note')}{C['r']}")
+    else:  # off
+        ifaces = [i for i in ifaces if i != "lo"]
+        write_conf_ifaces(ifaces)
+        if a.drop_port is not None:
+            if not str(a.drop_port).isdigit():
+                die(t("port_nan", p=a.drop_port))
+            drop = int(a.drop_port)
+            rest = [p for p in cfg["ports"] if p != drop]
+            if drop in cfg["ports"] and not rest:
+                print(f"  {C['yel']}{t('hp_last_port', p=drop)}{C['r']}")
+            elif drop in cfg["ports"]:
+                cfg["ports"] = rest
+                save_config(cfg)
+                print(t("hp_dropped", p=drop))
+        print(t("hp_off", ifs=" ".join(ifaces) or "auto"))
+
+    if not a.no_restart:
+        haproxy_restart()
 
 
 def cmd_restore(a):
@@ -3822,15 +3983,26 @@ def shape_version():
         return "unknown"
 
 
-def active_iface():
+def active_ifaces():
+    """Интерфейсы, на которых висит шейпер (в .active_iface — список)."""
     try:
         with open(os.path.join(ETC_DIR, ".active_iface")) as f:
-            m = re.search(r'IFACE="([A-Za-z0-9._@-]{1,15})"', f.read())
+            m = re.search(r'IFACE="([A-Za-z0-9._@ -]*)"', f.read())
             if m:
-                return m.group(1)
+                return [i for i in m.group(1).split() if IFACE_RE.match(i)]
     except Exception:
         pass
-    return None
+    return []
+
+
+def active_iface():
+    """Основной (внешний) интерфейс: первый, не loopback. Для отображения
+    и для запросов адресов — lo нужен шейперу, но не как «интерфейс ноды»."""
+    ifs = active_ifaces()
+    for i in ifs:
+        if i != "lo":
+            return i
+    return ifs[0] if ifs else None
 
 
 # Какие qdisc допустимы на интерфейсе, кроме самого fq: mq — контейнер очередей
@@ -3853,23 +4025,26 @@ def edt_ready(iface=None):
     Неизвестно (нет интерфейса, нет tc) — (True, ""): пугать на пустом месте
     хуже, чем промолчать.
     """
-    iface = iface or active_iface()
-    if not iface:
-        return True, ""
-    try:
-        out = subprocess.run(["tc", "qdisc", "show", "dev", iface],
-                             capture_output=True, text=True, timeout=5)
-    except Exception:
-        return True, ""
-    if out.returncode != 0:
+    # Без явного интерфейса проверяются все, на которых висит шейпер: в
+    # режиме HAProxy это внешний интерфейс и lo, и fq нужен на каждом.
+    ifaces = [iface] if iface else active_ifaces()
+    if not ifaces:
         return True, ""
 
     bad = []
-    for line in out.stdout.splitlines():
-        parts = line.split()
-        if len(parts) > 1 and parts[0] == "qdisc" and parts[1] not in FQ_OK_KINDS:
-            if parts[1] not in bad:
-                bad.append(parts[1])
+    for ifc in ifaces:
+        try:
+            out = subprocess.run(["tc", "qdisc", "show", "dev", ifc],
+                                 capture_output=True, text=True, timeout=5)
+        except Exception:
+            continue
+        if out.returncode != 0:
+            continue
+        for line in out.stdout.splitlines():
+            parts = line.split()
+            if len(parts) > 1 and parts[0] == "qdisc" and parts[1] not in FQ_OK_KINDS:
+                if parts[1] not in bad:
+                    bad.append(parts[1])
     return (not bad), ", ".join(bad)
 
 
@@ -4068,7 +4243,7 @@ def build_metrics(users=None, unit_state=None, started=None, events=None):
     if loaded:
         add("shape_edt_ready", "gauge",
             "1 if downloads are actually paced (fq present)",
-            1 if edt_ready(iface)[0] else 0)
+            1 if edt_ready()[0] else 0)
 
     # Связь с панелью. Метрики отдаём только когда она включена: на ноде без
     # панели нули означали бы поломку, а её нет.
@@ -4763,6 +4938,13 @@ def build_parser():
     a.set_defaults(func=cmd_apply)
 
     sub.add_parser("show", help=t("h_show")).set_defaults(func=cmd_show)
+
+    hp = sub.add_parser("haproxy", help=t("h_haproxy"))
+    hp.add_argument("action", choices=["on", "off", "status"])
+    hp.add_argument("--port", default=None)
+    hp.add_argument("--drop-port", dest="drop_port", default=None)
+    hp.add_argument("--no-restart", dest="no_restart", action="store_true")
+    hp.set_defaults(func=cmd_haproxy)
     sub.add_parser("restore", help=t("h_restore")).set_defaults(func=cmd_restore)
 
     m = sub.add_parser("monitor", help=t("h_monitor"))

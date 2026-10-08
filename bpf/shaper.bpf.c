@@ -61,6 +61,10 @@
 #endif
 
 #define MAX_USERS      8192
+#define LOOPBACK_IFINDEX 1     /* как в ядре: lo всегда первый */
+#define PP_MIN_LEN     28      /* меньше заголовок PROXY protocol не бывает */
+#define PP_PULL_LEN    108     /* сколько нагрузки подтянуть: v1 до 107, v2 TCP6 — 52 */
+#define PP_PULL_MAX_OFF 512    /* дальше такого смещения нагрузку не ищем */
 /* Если EDT уводит отправку больше чем на 2 с вперёд — очередь безнадёжна. */
 #define EDT_HORIZON_NS 2000000000ULL
 /* Допустимый всплеск на upload: 200 мс «в долг». */
@@ -161,7 +165,11 @@ struct {
  * v2 — бинарный: 12-байтовая сигнатура, затем версия/команда,
  * семейство, длина и адреса. Команда LOCAL (соединение без клиента)
  * игнорируется. v1 — текстовый «PROXY TCP4 a.b.c.d …». Варианты UDP
- * не встречаются на практике: vless/reality ездят по TCP. */
+ * не встречаются на практике: vless/reality ездят по TCP.
+ *
+ * Адрес кладётся в сетевом порядке байт, как ip->saddr, — иначе ключ из
+ * заголовка не совпал бы с ключом того же клиента из IP-заголовка (белый
+ * список, штрафы) и в статусе читался бы наоборот: 4.3.2.1 вместо 1.2.3.4. */
 static __always_inline int parse_pp(__u8 *p, void *data_end, struct ip_key *out)
 {
     if ((void *)(p + 28) > data_end)
@@ -175,8 +183,8 @@ static __always_inline int parse_pp(__u8 *p, void *data_end, struct ip_key *out)
         if ((p[12] & 0x0F) != 1)    /* команда PROXY, не LOCAL */
             return 0;
         if (p[13] == 0x11) {        /* TCP4: адрес клиента с 16-го байта */
-            out->addr[0] = ((__u32)p[16] << 24) | ((__u32)p[17] << 16) |
-                           ((__u32)p[18] << 8) | (__u32)p[19];
+            out->addr[0] = bpf_htonl(((__u32)p[16] << 24) | ((__u32)p[17] << 16) |
+                                     ((__u32)p[18] << 8) | (__u32)p[19]);
             return 1;
         }
         if (p[13] == 0x21) {        /* TCP6: 16 байт адреса */
@@ -184,10 +192,10 @@ static __always_inline int parse_pp(__u8 *p, void *data_end, struct ip_key *out)
                 return 0;
 #pragma unroll
             for (int i = 0; i < 4; i++)
-                out->addr[i] = ((__u32)p[16 + i * 4] << 24) |
-                               ((__u32)p[17 + i * 4] << 16) |
-                               ((__u32)p[18 + i * 4] << 8) |
-                               (__u32)p[19 + i * 4];
+                out->addr[i] = bpf_htonl(((__u32)p[16 + i * 4] << 24) |
+                                         ((__u32)p[17 + i * 4] << 16) |
+                                         ((__u32)p[18 + i * 4] << 8) |
+                                         (__u32)p[19 + i * 4]);
             return 1;
         }
         return 0;
@@ -207,7 +215,7 @@ static __always_inline int parse_pp(__u8 *p, void *data_end, struct ip_key *out)
             else if (ch == '.' && dots < 3) {
                 ip = (ip << 8) | (oct & 0xFF); oct = 0; dots++;
             } else if (ch == ' ' && dots == 3) {
-                out->addr[0] = (ip << 8) | (oct & 0xFF);
+                out->addr[0] = bpf_htonl((ip << 8) | (oct & 0xFF));
                 return 1;
             } else
                 return 0;
@@ -371,6 +379,13 @@ static __always_inline int process_packet(struct __sk_buff *skb,
      */
     __u32 key_port = (direction == 0) ? sport : dport;
     if (no_ports || !bpf_map_lookup_elem(&port_map, &key_port)) {
+        /* На loopback (режим «HAProxy на этой же ноде») каждый пакет проходит
+         * и egress, и ingress. Явный порт это переживает — он матчится по
+         * направлению, — а правило «все порты» нет: пакет посчитался бы
+         * дважды, да ещё и без PROXY-ключа. Поэтому на lo правило «0» не
+         * действует, шейпятся только названные порты. */
+        if (skb->ifindex == LOOPBACK_IFINDEX)
+            return TC_ACT_OK;
         if (!bpf_map_lookup_elem(&port_map, &zero))  /* порт 0 = все порты */
             return TC_ACT_OK;
     }
@@ -390,6 +405,9 @@ static __always_inline int process_packet(struct __sk_buff *skb,
         struct pp_key ck = {0};
         __builtin_memcpy(ck.addr, key.addr, sizeof(ck.addr));
         ck.port = (direction == 0) ? dport : sport;
+        /* Флаги читаем сразу: ниже bpf_skb_pull_data может сделать указатель
+         * l4 недействительным, а FIN/RST нужны уже после разбора. */
+        __u8 tcp_flags = ((__u8 *)l4)[13];
 
         if (direction == 1) {
             /* Upload: если записи нет, сегмент мог принести заголовок. */
@@ -401,6 +419,42 @@ static __always_inline int process_packet(struct __sk_buff *skb,
                 __u8 doff = ((__u8 *)tcp)[12] >> 4;
                 __u8 *pl = (__u8 *)tcp + ((__u32)doff << 2);
                 struct ip_key real = {0};
+
+                /* Полезная нагрузка не всегда лежит в линейной части skb:
+                 * у локального TCP (loopback — HAProxy на той же ноде) и у
+                 * GSO/GRO-сегментов с некоторых сетевых карт в линейной части
+                 * только заголовки, а данные — в страницах (frags). data_end
+                 * указывает на конец линейной части, и parse_pp не видит ни
+                 * байта. Подтягиваем начало нагрузки в линейную часть — один
+                 * раз на соединение, пока записи в pp_conn_map нет. Не вышло
+                 * — продолжаем как раньше, с ключом из IP-заголовка.
+                 *
+                 * bpf_skb_pull_data делает все прежние указатели на пакет
+                 * недействительными: смещения запоминаем числами до вызова,
+                 * указатели берём заново после. */
+                __u32 pl_off = (__u32)((__u8 *)pl - (__u8 *)data);
+                if ((void *)(pl + PP_MIN_LEN) > data_end &&
+                    pl_off <= PP_PULL_MAX_OFF &&
+                    skb->len >= pl_off + PP_MIN_LEN) {
+                    __u32 want = pl_off + PP_PULL_LEN;
+                    if (want > skb->len)
+                        want = skb->len;
+                    /* Результат не проверяем: и при неудаче верификатор
+                     * считает прежние указатели недействительными, так что
+                     * заново берём их в любом случае. Не вышло — parse_pp
+                     * на коротком data_end вернёт 0, как раньше. */
+                    bpf_skb_pull_data(skb, want);
+                    data     = (void *)(long)skb->data;
+                    data_end = (void *)(long)skb->data_end;
+                    /* Верификатору нужны доказанные границы заново:
+                     * barrier не даёт компилятору выбросить проверку
+                     * как «и так известную». */
+                    asm volatile("" : "+r"(pl_off));
+                    if (pl_off > PP_PULL_MAX_OFF)
+                        return TC_ACT_OK;
+                    pl = data + pl_off;
+                }
+
                 if (parse_pp(pl, data_end, &real)) {
                     bpf_map_update_elem(&pp_conn_map, &ck, &real, BPF_ANY);
                     __builtin_memcpy(key.addr, real.addr, sizeof(key.addr));
@@ -416,7 +470,7 @@ static __always_inline int process_packet(struct __sk_buff *skb,
         /* Соединение закрылось — запись не нужна: релей может отдать
          * тот же порт другому клиенту. FIN/RST есть в обоих
          * направлениях, порядок не важен. */
-        if (((__u8 *)l4)[13] & (0x01 | 0x04))
+        if (tcp_flags & (0x01 | 0x04))
             bpf_map_delete_elem(&pp_conn_map, &ck);
     }
 

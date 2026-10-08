@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.23-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.24-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.23
+# Shape v3.24
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -448,6 +448,69 @@ used addresses on its own. No background cleanup needed.
 
 ---
 
+## HAProxy on the same node
+
+Two ways to connect, and they can be combined on one node:
+
+| Mode | `IFACE` | Ports |
+|---|---|---|
+| Direct | the external interface (`eth0`, `ens3`) | the xray inbound ports |
+| Behind HAProxy | `lo` — HAProxy reaches xray via `127.0.0.1` | the **internal** xray port behind the proxy, not `0` |
+| Both at once | `eth0 lo` | the external ports and the internal port together |
+
+The scheme: a rented front → HAProxy on the node (`:443`, terminates TLS and
+takes the real address from `X-Forwarded-For`) → xray on `127.0.0.1:1443`. xray
+learns the client address only from the PROXY protocol header, and the shaper
+reads the same header: every client gets its own limit, and the monitor shows
+real addresses instead of `127.0.0.1`.
+
+Turn it on: menu → Service → **[13] HAProxy mode** (it asks for the internal
+xray port) or by hand:
+
+```bash
+shaperctl.py haproxy on --port 1443    # lo into IFACE, port 1443 into the list, restart
+shaperctl.py haproxy status
+shaperctl.py haproxy off --drop-port 1443
+# by hand: IFACE="eth0 lo" in /etc/shaper/shaper.conf,
+#   shaperctl.py apply --ports 1443,… and systemctl restart shaper
+```
+
+The shaper installs and configures nothing in HAProxy itself. A minimal example:
+
+```
+frontend f
+    mode http
+    bind :443 ssl crt /etc/haproxy/site.pem
+    # the real client address comes from the front's header; optionally add
+    # "if { req.hdr(X-Secret) -m found }" so that only the front is trusted
+    http-request set-src req.hdr_ip(X-Forwarded-For,-1)
+    default_backend xray
+
+backend xray
+    mode http
+    server x 127.0.0.1:1443 send-proxy-v2
+```
+
+In xray the inbound listens locally only and expects the PROXY protocol:
+
+```json
+{ "listen": "127.0.0.1", "port": 1443, "protocol": "vless",
+  "streamSettings": { "network": "ws", "security": "none",
+                      "sockopt": { "acceptProxyProtocol": true } } }
+```
+
+Things to keep in mind:
+
+- HAProxy's own port `443` does not belong in the port list: every client
+  reaches it from the front's address. Only the internal xray port is needed.
+- On `lo` the "port 0 = all ports" rule has no effect: every packet there goes
+  through both egress and ingress, and "all ports" would count it twice. Only
+  named ports are shaped. On the external interface `0` works as before.
+- Download limiting on `lo` relies on `fq`; the engine sets it up itself and
+  restores the native `noqueue` on unload.
+
+---
+
 ## Units
 
 Speed is in **Mbit/s** everywhere, the way providers write it. Inside eBPF it is
@@ -476,6 +539,9 @@ shaperctl.py status                        # accumulated traffic per IP
 shaperctl.py status --live                 # + current speed over 3 s
 shaperctl.py status --full                 # all IPs
 shaperctl.py status --json                 # for your own scripts
+
+shaperctl.py haproxy on --port 1443        # HAProxy-on-this-node mode
+shaperctl.py haproxy off --drop-port 1443
 
 shaperctl.py whitelist add 203.0.113.10
 shaperctl.py whitelist list
@@ -801,7 +867,7 @@ through the shaper.
 /opt/shaper/               the code
 /opt/shaper/api/           the API (optional)
 /etc/shaper/config.json    limit, ports, auto-limiter, notifications (600)
-/etc/shaper/shaper.conf    interface and interface-level settings
+/etc/shaper/shaper.conf    IFACE — an interface or a list ("eth0 lo"), UI language
 /etc/shaper/whitelist.txt  the whitelist
 /etc/shaper/penalties.json who is limited, until when and why
 /etc/shaper/daily.json     daily activity and volume counters

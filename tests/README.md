@@ -13,6 +13,7 @@ python3 export_tests.py         # резервная копия: формат, �
 python3 upgrade_tests.py        # обновление: старое состояние читается новым кодом
 python3 api_tests.py            # API: проверки по HTTP
 python3 panel_tests.py          # связь с панелью и отчёт: поддельная панель по HTTP
+python3 haproxy_tests.py        # режим HAProxy: список интерфейсов, порты, перезапуск
 bash    api_independence_tests.sh   # Shape работает без API
 gcc -O1 -Wno-unknown-pragmas -I stub -o /tmp/h bpf_harness.c && /tmp/h
 ```
@@ -20,7 +21,8 @@ gcc -O1 -Wno-unknown-pragmas -I stub -o /tmp/h bpf_harness.c && /tmp/h
 `bpf_harness.c` собирает **настоящий** `bpf/shaper.bpf.c` обычным gcc с
 подменёнными картами и прогоняет через него пакеты, которых на живой ноде не
 дождёшься: фрагменты IPv4, цепочки заголовков расширения IPv6, обрезанные
-кадры, ICMP, истёкшие штрафы, IPIP-туннели, PROXY protocol.
+кадры, ICMP, истёкшие штрафы, IPIP-туннели, PROXY protocol (в том числе когда
+нагрузка лежит в нелинейной части skb), loopback.
 
 Всё это же гоняет GitHub Actions на каждый push — там дополнительно
 собирается eBPF настоящим clang и проверяется, что версия согласована в

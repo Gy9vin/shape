@@ -13,6 +13,76 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.24
+
+**A node with HAProxy on the same machine: the shaper did not see the real
+clients — all traffic was booked to 127.0.0.1.**
+
+The "rented front → HAProxy on the node → xray" scheme works like this:
+HAProxy terminates TLS, takes the client address from `X-Forwarded-For` and
+hands traffic to xray on `127.0.0.1` with `send-proxy-v2`. The shaper sits on
+`lo`, and in `status` every client looked like `127.0.0.1` and shared a single
+limit.
+
+### PROXY protocol when the payload sits in the non-linear part of the skb
+
+For local TCP (loopback, HAProxy on the same node) and for GSO/GRO packets on
+some NICs the linear part of the skb holds only headers, while the data bytes
+live in pages (frags). `data_end` pointed at the end of the headers, and the
+PROXY parser saw not a single payload byte. Now, on a segment with no entry in
+`pp_conn_map` and enough payload, the program calls `bpf_skb_pull_data` once,
+pulls the start of the payload into the linear part and reads the header as
+usual. Only for ports in the list and only until the connection is remembered:
+there is no call for known connections or for download. If the pull fails
+nothing changes — the key comes from the IP header as before. The IPIP tunnel
+offset and IPv6 extension header chains are taken into account.
+
+### The key from the PROXY header had its bytes in the wrong order
+
+The client address from the header was stored "most significant byte first",
+while the address from the IP header is in network order. In practice
+`1.2.3.4` showed up in the status as `4.3.2.1`, and the whitelist and penalties
+did not apply to such a client because they looked up a different key. The key
+from the header now matches the key of the same client without PROXY.
+
+### HAProxy mode: the shaper on a list of interfaces
+
+`IFACE` in `shaper.conf` may now be a space-separated list: `IFACE="eth0 lo"`.
+The engine attaches filters and sets up `fq` on every interface, unload detaches
+from all of them (including those from the previous run), and `lo` gets its
+native `noqueue` back after unload. A single interface and an empty value work
+as before.
+
+- Service → **[13] HAProxy mode**: turns the mode on and off — adds and removes
+  `lo` in `IFACE`, asks for the internal xray port behind HAProxy and adds it
+  to the port list. The mode is visible in the menu header.
+- The same from the console: `shaperctl.py haproxy on --port 1443`,
+  `haproxy off [--drop-port 1443]`, `haproxy status`.
+- The two can be combined: some inbounds directly on the external interface,
+  some behind HAProxy on `lo`.
+- On `lo` the "port 0 = all ports" rule has no effect: every packet there goes
+  through both egress and ingress, and "all ports" would count it twice. Only
+  explicit ports are shaped, and `engine.sh` warns about it on load.
+- The `fq` check in `doctor`, the metrics and `show` covers every interface.
+
+The README has a new section, "HAProxy on the same node", with a minimal
+`haproxy.cfg` and the xray inbound.
+
+### Checks
+
+18 new ones in the BPF harness: payload in the non-linear part (v2 TCP4 and
+TCP6, v1, the 28-byte boundary, inside IPIP), `pull_data` is not called without
+payload, for a known connection or on download, a failed `pull_data` does not
+break the packet, FIN still clears the map, the key is in network order, `lo`
+ignores the "0" rule. A new suite, `haproxy_tests.py` (46 checks): writing
+`shaper.conf`, ports, restart, bad input, reading the interface list, `fq` on
+each. The shell suite runs the `IFACE` list parsing on the live `engine.sh`
+code, including injections and globs. A live Docker run: HAProxy → xray on
+`lo`, keys `1.2.3.4` and `5.6.7.8`, speed ≈ the limit per address.
+
+The update leaves settings alone: the limit, ports, whitelist and penalties
+stay as they were, and a single `IFACE` works the old way.
+
 ## 3.23
 
 **A node behind a CDN: all clients shared one limit — the shaper saw only the

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.23-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.24-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
@@ -13,7 +13,7 @@
   <b>Русский</b> · <a href="README.en.md">English</a>
 </p>
 
-# Shape v3.23
+# Shape v3.24
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -457,6 +457,69 @@ EDT (Earliest Departure Time) вместо классических очеред
 
 ---
 
+## HAProxy на этой же ноде
+
+Два способа подключения, их можно сочетать на одной ноде:
+
+| Режим | `IFACE` | Порты |
+|---|---|---|
+| Напрямую | внешний интерфейс (`eth0`, `ens3`) | порты xray-инбаундов |
+| За HAProxy | `lo` — HAProxy ходит в xray по `127.0.0.1` | **внутренний** порт xray за прокси, не `0` |
+| Оба сразу | `eth0 lo` | внешние порты и внутренний порт вместе |
+
+Схема: арендованный фронт → HAProxy на ноде (`:443`, снимает TLS и берёт
+настоящий адрес из `X-Forwarded-For`) → xray на `127.0.0.1:1443`. Адрес
+клиента xray узнаёт только из заголовка PROXY protocol, и шейпер читает тот же
+заголовок: каждый клиент получает свой лимит, а в мониторе видны настоящие
+адреса, а не `127.0.0.1`.
+
+Включить: меню → Сервис → **[13] Режим HAProxy** (спросит внутренний порт
+xray) или вручную:
+
+```bash
+shaperctl.py haproxy on --port 1443    # lo в IFACE, порт 1443 в список, перезапуск
+shaperctl.py haproxy status
+shaperctl.py haproxy off --drop-port 1443
+# то же руками: IFACE="eth0 lo" в /etc/shaper/shaper.conf,
+#   shaperctl.py apply --ports 1443,… и systemctl restart shaper
+```
+
+Шейпер сам ничего не ставит и не настраивает в HAProxy. Минимальный пример:
+
+```
+frontend f
+    mode http
+    bind :443 ssl crt /etc/haproxy/site.pem
+    # настоящий адрес клиента — из заголовка фронта; при желании добавь
+    # условие «if { req.hdr(X-Секрет) -m found }», чтобы верить только фронту
+    http-request set-src req.hdr_ip(X-Forwarded-For,-1)
+    default_backend xray
+
+backend xray
+    mode http
+    server x 127.0.0.1:1443 send-proxy-v2
+```
+
+В xray инбаунд слушает только локально и ждёт PROXY protocol:
+
+```json
+{ "listen": "127.0.0.1", "port": 1443, "protocol": "vless",
+  "streamSettings": { "network": "ws", "security": "none",
+                      "sockopt": { "acceptProxyProtocol": true } } }
+```
+
+Что учесть:
+
+- Порт `443` самого HAProxy в список портов не нужен: на него все клиенты
+  приходят с адреса фронта. Нужен только внутренний порт xray.
+- На `lo` правило «порт 0 = все порты» не действует: каждый пакет проходит там
+  и egress, и ingress, и «все порты» посчитало бы его дважды. Шейпятся только
+  названные порты. На внешнем интерфейсе `0` работает как прежде.
+- Ограничение скачивания на `lo` держит `fq`; движок ставит его сам
+  и возвращает родной `noqueue` при выгрузке.
+
+---
+
 ## Единицы
 
 Скорость везде в **Мбит/с** (мегабитах в секунду), как её пишут провайдеры.
@@ -485,6 +548,9 @@ shaperctl.py status                        # накопленный трафик
 shaperctl.py status --live                 # + текущая скорость за 3 с
 shaperctl.py status --full                 # все IP
 shaperctl.py status --json                 # для своих скриптов
+
+shaperctl.py haproxy on --port 1443        # режим HAProxy на этой же ноде
+shaperctl.py haproxy off --drop-port 1443
 
 shaperctl.py whitelist add 203.0.113.10
 shaperctl.py whitelist list
@@ -672,7 +738,7 @@ systemd/shaper-watch.service   сторож нарушителей
 ```
 /opt/shaper/               программа
 /etc/shaper/config.json    порты и скорость
-/etc/shaper/shaper.conf    единственная настройка — IFACE
+/etc/shaper/shaper.conf    IFACE — интерфейс или список («eth0 lo»)
 /etc/shaper/whitelist.txt  белый список
 /etc/shaper/penalties.json кто ограничен, до какого времени и за что
 /etc/shaper/daily.json     суточные счётчики активности и объёма

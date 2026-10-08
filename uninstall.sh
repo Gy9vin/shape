@@ -68,22 +68,30 @@ else
 fi
 
 # Подстраховка на случай, когда engine.sh отсутствует или упал.
-iface="$(sed -n 's/^IFACE="\([A-Za-z0-9._@-]\{1,15\}\)"$/\1/p' \
-         "$ETC_DIR/.active_iface" 2>/dev/null | head -1)"
-if [[ -n "$iface" && -d "/sys/class/net/$iface" ]]; then
+#
+# IFACE в .active_iface бывает списком через пробел («eth0 lo» — режим
+# HAProxy), поэтому обходим все имена.
+ifaces="$(sed -n 's/^IFACE="\([A-Za-z0-9._@ -]*\)"$/\1/p' \
+          "$ETC_DIR/.active_iface" 2>/dev/null | head -1)"
+good=""
+for iface in $ifaces; do
+    [[ "$iface" =~ ^[A-Za-z0-9._@-]{1,15}$ && -d "/sys/class/net/$iface" ]] || continue
+    good+="$iface "
     tc filter del dev "$iface" egress  2>/dev/null || true
     tc filter del dev "$iface" ingress 2>/dev/null || true
     tc qdisc  del dev "$iface" clsact  2>/dev/null || true
-fi
+done
 rm -rf "$BPF_PIN" 2>/dev/null || true
 
 left=""
-[[ -n "$iface" ]] && left="$(tc filter show dev "$iface" egress 2>/dev/null)"
-if [[ -n "$left" ]]; then
-    warn "на $iface остались фильтры — посмотрите: tc filter show dev $iface egress"
-else
-    ok "фильтров на интерфейсе не осталось"
-fi
+for iface in $good; do
+    left="$(tc filter show dev "$iface" egress 2>/dev/null)"
+    if [[ -n "$left" ]]; then
+        warn "на $iface остались фильтры — посмотрите: tc filter show dev $iface egress"
+        break
+    fi
+done
+[[ -n "$left" ]] || ok "фильтров на интерфейсе не осталось"
 
 step "SSH-туннель"
 # Туннель ставится мастером из меню и тоже принадлежит Shape: оставить его

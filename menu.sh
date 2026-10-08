@@ -135,6 +135,11 @@ status_line() {
         echo -e "  🔴  ${T[st_shaper]} ${R}${T[st_stopped]}${N}  ${D}${T[st_nolimit]}${N}"
     fi
 
+    # Шейпер на lo — значит включён режим HAProxy на этой же ноде.
+    if (( run_on )) && [[ " $ifc " == *" lo "* ]]; then
+        echo -e "  🔀  ${T[st_haproxy]} ${G}${T[st_g_on]}${N}   ${D}${T[st_haproxy_d]}${N}"
+    fi
+
     if (( auto_on )); then
         echo -e "  🔁  ${T[st_auto]} ${G}${T[st_auto_on]}${N}    ${D}${T[st_auto_ok]}${N}"
     else
@@ -1670,6 +1675,72 @@ screen_uninstall() {
     done
 }
 
+# ── Режим HAProxy ─────────────────────────────────────────────────────
+# Включённый режим — это слово «lo» в IFACE. Вся логика (запись IFACE,
+# порт в список, перезапуск) в `shaperctl.py haproxy`, меню только спрашивает.
+hp_ifaces() { sed -n 's/^IFACE="\(.*\)"$/\1/p' "$CONF" 2>/dev/null | tail -1; }
+hp_enabled() { [[ " $(hp_ifaces) " == *" lo "* ]]; }
+
+screen_haproxy() {
+    local port drop ans
+    while :; do
+        title "${T[hp_title]}"
+        echo -e "  ${D}${T[hp_h1]}${N}"
+        echo -e "  ${D}${T[hp_h2]}${N}"
+        echo -e "  ${D}${T[hp_h3]}${N}"
+        echo -e "  ${D}${T[hp_h4]}${N}"
+        echo -e "  ${D}${T[hp_h5]}${N}"
+        echo -e "  ${D}${T[hp_h6]}${N}"
+        echo
+        if hp_enabled; then
+            echo -e "  ${T[hp_now]} ${G}${T[hp_state_on]}${N}  ${D}${T[hp_ifaces]}: $(hp_ifaces)${N}"
+            echo -e "  ${T[st_port]} ${B}$(cfg ports '')${N}"
+        else
+            echo -e "  ${T[hp_now]} ${Y}${T[hp_state_off]}${N}  ${D}${T[hp_ifaces]}: $(hp_ifaces || true)${N}"
+        fi
+        echo -e "  ${D}${T[hp_conf_hint]}${N}"
+        echo
+        if hp_enabled; then
+            echo -e "  ${B}[1]${N}  ${T[hp_add]}"
+            echo -e "  ${B}[2]${N}  ${T[hp_dis]}"
+        else
+            echo -e "  ${B}[1]${N}  ${T[hp_en]}"
+        fi
+        echo -e "  ${B}[0]${N}  ${T[m0]}"
+        echo
+        case "$(ask "${T[choice]}" 0)" in
+            1) echo
+               show_listening
+               echo
+               port="$(ask "${T[hp_port_ask]}")"
+               if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+                   echo -e "  ${R}${T[hp_bad_port]}${N}"; pause; continue
+               fi
+               read -rp "  ${T[apply_q]}: " ans
+               [[ "$ans" =~ ^[NnНн] ]] && { echo "  ${T[cancelled]}"; pause; continue; }
+               echo -e "  ${D}${T[hp_applying]}${N}"
+               "$CTL" haproxy on --port "$port"
+               pause ;;
+            2) hp_enabled || continue
+               echo
+               drop="$(ask "${T[hp_drop_ask]}")"
+               if [[ -n "$drop" ]] && ! [[ "$drop" =~ ^[0-9]+$ ]]; then
+                   echo -e "  ${R}${T[hp_bad_port]}${N}"; pause; continue
+               fi
+               read -rp "  ${T[apply_q]}: " ans
+               [[ "$ans" =~ ^[NnНн] ]] && { echo "  ${T[cancelled]}"; pause; continue; }
+               echo -e "  ${D}${T[hp_applying]}${N}"
+               if [[ -n "$drop" ]]; then
+                   "$CTL" haproxy off --drop-port "$drop"
+               else
+                   "$CTL" haproxy off
+               fi
+               pause ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 screen_service() {
     local auto_lbl
     while :; do
@@ -1707,6 +1778,11 @@ screen_service() {
         fi
         echo -e " [11] 💾 ${T[bk_title]}"
         echo -e " [12] 🗑  ${R}${T[un_title]}${N}"
+        if hp_enabled; then
+            echo -e " [13] 🔀 ${T[sv_haproxy]} ${G}${T[tg_on]}${N}"
+        else
+            echo -e " [13] 🔀 ${T[sv_haproxy]} ${D}${T[g_off]}${N}"
+        fi
         echo -e "  [0] ← ${T[m0]}"
         echo
         case "$(ask "${T[choice]}")" in
@@ -1732,6 +1808,7 @@ screen_service() {
            10) screen_api ;;
            11) screen_backup ;;
            12) screen_uninstall ;;
+           13) screen_haproxy ;;
             0|"") return ;;
         esac
     done

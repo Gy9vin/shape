@@ -29,17 +29,36 @@ IFACE="${IFACE:-}"
 # ограничена 15 символами, и ничего кроме букв, цифр, точки, дефиса и @ там
 # быть не может (@ бывает у VLAN-интерфейсов вида eth0@if2).
 iface_ok() { [[ "$1" =~ ^[A-Za-z0-9._@-]{1,15}$ ]]; }
-if [[ -n "$IFACE" ]] && ! iface_ok "$IFACE"; then
-    err "недопустимое имя интерфейса в $CONF — определяю автоматически"
-    IFACE=""
-fi
+
+# IFACE — один интерфейс или список через пробел: «eth0 lo». Список нужен,
+# когда часть инбаундов смотрит наружу напрямую (eth0), а часть спрятана за
+# HAProxy на этой же ноде (127.0.0.1 — интерфейс lo). Каждое имя проверяется
+# отдельно; негодные отбрасываются, а если не осталось ни одного — интерфейс
+# определяется автоматически, как и при пустом IFACE.
+IFACES=()
+read -ra _ifl <<< "$IFACE"        # без раскрытия шаблонов вроде «*»
+for _i in "${_ifl[@]-}"; do
+    [[ -n "$_i" ]] || continue
+    if iface_ok "$_i"; then
+        [[ " ${IFACES[*]-} " == *" $_i "* ]] || IFACES+=("$_i")
+    else
+        err "недопустимое имя интерфейса в $CONF: «$_i» — пропускаю"
+    fi
+done
+IFACE="${IFACES[*]-}"
 
 need_iface() {
-    [[ -n "$IFACE" ]] || IFACE="$(ip route get 1.1.1.1 2>/dev/null |
-                                  sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
-    [[ -n "$IFACE" ]] || die "не удалось определить интерфейс, задай IFACE в $CONF"
-    iface_ok "$IFACE" || die "недопустимое имя интерфейса: $IFACE"
-    [[ -d "/sys/class/net/$IFACE" ]] || die "интерфейс $IFACE не существует"
+    if [[ ${#IFACES[@]} -eq 0 ]]; then
+        IFACE="$(ip route get 1.1.1.1 2>/dev/null |
+                 sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
+        [[ -n "$IFACE" ]] || die "не удалось определить интерфейс, задай IFACE в $CONF"
+        iface_ok "$IFACE" || die "недопустимое имя интерфейса: $IFACE"
+        IFACES=("$IFACE")
+    fi
+    local i
+    for i in "${IFACES[@]}"; do
+        [[ -d "/sys/class/net/$i" ]] || die "интерфейс $i не существует"
+    done
 }
 
 # ── Сборка ────────────────────────────────────────────────────────────
@@ -80,6 +99,7 @@ fq_offenders() {
 }
 
 setup_fq() {
+    local IFACE="$1"    # один интерфейс; имя затеняет общий список
     # EDT работает, только если пакет уходит через fq: единственный qdisc,
     # который читает skb->tstamp и придерживает пакет до назначенного времени.
     #
@@ -176,37 +196,68 @@ load() {
     # Без fq загрузку не отменяем: учёт, отдача и белый список работают и
     # так, а нода без шейпера вообще — хуже, чем нода с половиной шейпера.
     # Но и молчать нельзя, поэтому setup_fq кричит сам.
-    setup_fq || true
-    tc qdisc add dev "$IFACE" clsact 2>/dev/null || true
+    #
+    # lo получает fq так же, как внешний интерфейс: пакет HAProxy → xray
+    # ходит по loopback, и скачивание клиента задерживается именно там.
+    local ifc
+    for ifc in "${IFACES[@]}"; do
+        setup_fq "$ifc" || true
+        tc qdisc add dev "$ifc" clsact 2>/dev/null || true
 
-    tc filter add dev "$IFACE" egress  bpf da pinned "$PIN_PROGS/shaper_down" \
-        || die "не прицепился фильтр на egress"
-    tc filter add dev "$IFACE" ingress bpf da pinned "$PIN_PROGS/shaper_up" \
-        || die "не прицепился фильтр на ingress"
-    ok "фильтры повешены на $IFACE (egress + ingress)"
+        tc filter add dev "$ifc" egress  bpf da pinned "$PIN_PROGS/shaper_down" \
+            || die "не прицепился фильтр на egress ($ifc)"
+        tc filter add dev "$ifc" ingress bpf da pinned "$PIN_PROGS/shaper_up" \
+            || die "не прицепился фильтр на ingress ($ifc)"
+        ok "фильтры повешены на $ifc (egress + ingress)"
+    done
+    lo_note
 
     "$APP_DIR/shaperctl.py" restore | sed 's/^/  /'
     [[ -f "$ETC_DIR/whitelist.txt" ]] && "$APP_DIR/shaperctl.py" whitelist sync | sed 's/^/  /'
 
-    echo "IFACE=\"$IFACE\"" > "$ETC_DIR/.active_iface"
+    echo "IFACE=\"${IFACES[*]}\"" > "$ETC_DIR/.active_iface"
     # Событие в общий журнал: его читает API, а в будущем — центральная система.
     "$APP_DIR/shaperctl.py" event engine_started --source engine \
         --message "iface=$IFACE" 2>/dev/null || true
     ok "шейпер запущен"
 }
 
-unload_quiet() {
-    local ifc="${IFACE:-}"
-    if [[ -z "$ifc" && -f "$ETC_DIR/.active_iface" ]]; then
+# Интерфейсы, на которых что-то могло остаться от прошлого запуска: текущий
+# список из конфига плюс тот, что записан при последней загрузке. Объединение
+# нужно, чтобы после правки IFACE (например, выключили режим HAProxy и убрали
+# lo) перезапуск снял фильтры и с интерфейса, которого в конфиге уже нет.
+unload_targets() {
+    local -a cand=("${IFACES[@]-}")
+    local i seen=" "
+    if [[ -f "$ETC_DIR/.active_iface" ]]; then
         # Файл пишем сами, но читаем его как чужой: он попадает в source.
-        ifc="$(sed -n 's/^IFACE="\([A-Za-z0-9._@-]\{1,15\}\)"$/\1/p' \
-               "$ETC_DIR/.active_iface" | head -1)"
+        local line
+        line="$(sed -n 's/^IFACE="\([A-Za-z0-9._@ -]*\)"$/\1/p' \
+                "$ETC_DIR/.active_iface" | head -1)"
+        read -ra _act <<< "$line"
+        cand+=("${_act[@]-}")
     fi
-    if [[ -n "$ifc" ]] && iface_ok "$ifc" && [[ -d "/sys/class/net/$ifc" ]]; then
+    for i in "${cand[@]-}"; do
+        [[ -n "$i" ]] && iface_ok "$i" && [[ -d "/sys/class/net/$i" ]] || continue
+        [[ "$seen" == *" $i "* ]] && continue
+        seen+="$i "
+        echo "$i"
+    done
+}
+
+unload_quiet() {
+    local ifc
+    while read -r ifc; do
+        [[ -n "$ifc" ]] || continue
         tc filter del dev "$ifc" egress  2>/dev/null || true
         tc filter del dev "$ifc" ingress 2>/dev/null || true
         tc qdisc  del dev "$ifc" clsact  2>/dev/null || true
-    fi
+        # fq на внешнем интерфейсе безвреден и остаётся. На loopback его
+        # поставили мы, а родной qdisc там noqueue: возвращаем как было.
+        if [[ "$ifc" == lo ]] && tc qdisc show dev lo root 2>/dev/null | grep -q ' fq '; then
+            tc qdisc del dev lo root 2>/dev/null || true
+        fi
+    done < <(unload_targets)
     rm -rf "$PIN_PROGS" "$PIN_MAPS" 2>/dev/null || true
 }
 
@@ -216,13 +267,38 @@ unload() {
     ok "шейпер выгружен (qdisc fq оставлен — он безвреден)"
 }
 
+# На loopback каждый пакет проходит и egress, и ingress, а правило «порт 0 =
+# все порты» не различает направления, как это делают явные порты: один
+# пакет считался бы дважды. Поэтому в самой программе на lo правило «0» не
+# действует (см. shaper.bpf.c) — шейпятся только явно названные порты. Если
+# в списке есть и 0, и lo, говорим об этом сразу, а не оставляем сюрпризом.
+lo_note() {
+    [[ " ${IFACES[*]-} " == *" lo "* ]] || return 0
+    if python3 - "$ETC_DIR/config.json" 2>/dev/null <<'PY'
+import json, sys
+try:
+    ports = json.load(open(sys.argv[1])).get("ports", [])
+except Exception:
+    ports = []
+sys.exit(0 if 0 in ports else 1)
+PY
+    then
+        warn "в портах есть 0 («все порты»): на lo оно не действует — там шейпятся только явные порты"
+    fi
+    return 0
+}
+
 state() {
     need_iface
-    local loaded=no filters
+    local loaded=no filters n=0 bad=0 i
     [[ -d "$PIN_MAPS" ]] && loaded=yes
-    filters="$(tc filter show dev "$IFACE" egress 2>/dev/null | grep -c shaper || true)"
-    echo "iface=$IFACE loaded=$loaded egress_filters=$filters"
-    [[ "$loaded" == yes && "$filters" -gt 0 ]]
+    for i in "${IFACES[@]}"; do
+        n="$(tc filter show dev "$i" egress 2>/dev/null | grep -c shaper || true)"
+        [[ "$n" -gt 0 ]] || bad=1
+        filters="${filters:+$filters,}$n"
+    done
+    echo "iface=${IFACES[*]} loaded=$loaded egress_filters=${filters:-0}"
+    [[ "$loaded" == yes && "$bad" -eq 0 ]]
 }
 
 case "${1:-}" in
