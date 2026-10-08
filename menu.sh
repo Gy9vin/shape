@@ -90,7 +90,7 @@ screen_lang() {
 # Все значения читаются одним вызовом python: экран перерисовывается часто,
 # плодить по семь процессов на кадр незачем. Разделитель — вертикальная черта.
 read_state() {
-    python3 - <<'PY' 2>/dev/null || echo "0|?|0|50|15|10|1|60|3|50|0|0"
+    python3 - <<'PY' 2>/dev/null || echo "0|?|0|50|15|10|1|60|3|50|0|0|0"
 import json
 try:
     c = json.load(open("/etc/shaper/config.json"))
@@ -111,6 +111,7 @@ print("|".join([
     f"{g['penalty_mbps']:g}", f"{g['penalty_min']:g}", f"{g['score_needed']:g}",
     f"{g['download_gb_per_day']:g}", f"{g['download_gb_per_hour']:g}",
     f"{float(c.get('nonmobile_mbps', 0) or 0):g}",
+    "1" if c.get('nonmobile_block') is True else "0",
 ]))
 PY
 }
@@ -118,8 +119,21 @@ PY
 # Включён ли немобильный лимит (скорость в конфиге больше нуля).
 nm_on() { awk -v v="$(cfg nonmobile_mbps 0)" 'BEGIN { exit !(v + 0 > 0) }'; }
 
+# Включена ли блокировка немобильных (в конфиге строго true).
+nmb_on() { [[ "$(read_state | cut -d'|' -f13)" == "1" ]]; }
+
+# Есть ли в списке портов 0 («все порты»). С ним блок включать нельзя: он
+# срезал бы и саму ноду (SSH, DNS, обновления).
+nmb_ports_all() {
+    python3 -c "
+import json, sys
+try: p = json.load(open('$ETC_DIR/config.json')).get('ports', [443])
+except Exception: p = [443]
+sys.exit(0 if 0 in p else 1)" 2>/dev/null
+}
+
 status_line() {
-    local ifc speed ports g_on bdl bul bmin pen dur score dgb dgbh nm dlv ulv vol
+    local ifc speed ports g_on bdl bul bmin pen dur score dgb dgbh nm nb dlv ulv vol
     local auto_on=0 run_on=0
 
     "$ENGINE" state >/dev/null 2>&1 && run_on=1
@@ -129,7 +143,7 @@ status_line() {
     [[ -z "$ifc" ]] && ifc="$(ip route get 1.1.1.1 2>/dev/null |
                               sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
 
-    IFS='|' read -r speed ports g_on bdl bul bmin pen dur score dgb dgbh nm \
+    IFS='|' read -r speed ports g_on bdl bul bmin pen dur score dgb dgbh nm nb \
         <<< "$(read_state)"
     [[ "$ports" == "*" ]] && ports="${T[st_all]}"
 
@@ -147,6 +161,11 @@ status_line() {
     # Немобильный лимит: скорость для клиентов вне сетей мобильных операторов.
     if awk -v v="${nm:-0}" 'BEGIN { exit !(v + 0 > 0) }'; then
         echo -e "  🐢  ${T[st_nm]} ${G}${nm} Mbit/s${N}   ${D}${T[st_nm_d]}${N}"
+    fi
+
+    # Блокировка немобильных: клиенты вне сетей мобильных операторов не проходят.
+    if [[ "${nb:-0}" == "1" ]]; then
+        echo -e "  🚫  ${T[st_nmb]} ${R}${T[st_g_on]}${N}   ${D}${T[st_nmb_d]}${N}"
     fi
 
     if (( auto_on )); then
@@ -220,6 +239,37 @@ screen_nonmobile() {
     pause
 }
 
+# Блокировка немобильных: включение требует явного подтверждения (по Enter —
+# отмена), потому что под неё попадают не только «чужие» клиенты. Вся логика
+# в `shaperctl.py nonmobile block`.
+screen_nonmobile_block() {
+    local ans
+    echo
+    if nmb_on; then
+        read -rp "  ${T[nmb_off_q]}: " ans
+        [[ "$ans" =~ ^[NnНн] ]] && { echo "  ${T[cancelled]}"; pause; return; }
+        "$CTL" nonmobile block off
+    else
+        if nmb_ports_all; then
+            echo -e "  ${R}${T[nmb_ports0]}${N}"; pause; return
+        fi
+        echo -e "  ${R}${T[nmb_warn0]}${N}"
+        echo -e "  ${Y}${T[nmb_warn1]}${N}"
+        echo -e "  ${Y}${T[nmb_warn2]}${N}"
+        echo -e "  ${Y}${T[nmb_warn3]}${N}"
+        echo -e "  ${D}${T[nmb_warn4]}${N}"
+        read -rp "  ${T[nmb_on_q]}: " ans
+        # Именно case: класс символов с кириллицей в локали C раскладывается
+        # на байты, и «нет» совпадало с «да» по первому байту.
+        case "$ans" in
+            [Yy]*|Д*|д*) ;;
+            *) echo "  ${T[cancelled]}"; pause; return ;;
+        esac
+        "$CTL" nonmobile block on
+    fi
+    pause
+}
+
 screen_limit() {
     local speed port cur_port ans
     cur_port="$(python3 -c "
@@ -243,6 +293,11 @@ print(','.join(map(str, p)))" 2>/dev/null || echo 443)"
         echo -e "  ${B}[6]${N}  ${T[nm_item]} ${D}${T[g_off]}${N} ${D}${T[nm_to_on]}${N}"
     fi
     echo -e "  ${D}${T[nm_h1]}${N}"
+    if nmb_on; then
+        echo -e "  ${B}[7]${N}  ${T[nmb_item]} ${R}${T[st_g_on]}${N} ${D}${T[nmb_to_off]}${N}"
+    else
+        echo -e "  ${B}[7]${N}  ${T[nmb_item]} ${D}${T[g_off]}${N} ${D}${T[nmb_to_on]}${N}"
+    fi
     echo -e "  ${B}[0]${N}  ${T[cancel]}"
     echo
 
@@ -255,6 +310,7 @@ print(','.join(map(str, p)))" 2>/dev/null || echo 443)"
                echo -e "  ${R}${T[need_num]}${N}"; pause; return; } ;;
         5) speed=0 ;;
         6) screen_nonmobile; return ;;
+        7) screen_nonmobile_block; return ;;
         *) return ;;
     esac
 

@@ -44,7 +44,7 @@ static int pull_fail = 0;       /* 1 = хелпер возвращает оши�
 #include "../bpf/shaper.bpf.c"
 
 /* ── карта в памяти ── */
-struct ent { void *map; unsigned char key[32]; unsigned char val[32]; int used; };
+struct ent { void *map; unsigned char key[32]; unsigned char val[64]; int used; };
 static struct ent table[4096];
 static int keysize(void *m) {
     if (m == (void *)&config_map || m == (void *)&port_map) return 4;
@@ -53,6 +53,18 @@ static int keysize(void *m) {
     if (m == (void *)&port_stat_map_down || m == (void *)&port_stat_map_up)
         return sizeof(struct port_stat_key);
     return 16;
+}
+/* Размер значения: user_state (48 байт) больше прежних 32, поэтому копировать
+ * «с запасом» уже нельзя — обрезалась бы хвостовая часть счётчиков. */
+static int valsize(void *m) {
+    if (m == (void *)&config_map) return sizeof(struct config);
+    if (m == (void *)&user_state_map_down || m == (void *)&user_state_map_up)
+        return sizeof(struct user_state);
+    if (m == (void *)&penalty_map) return sizeof(struct penalty);
+    if (m == (void *)&port_stat_map_down || m == (void *)&port_stat_map_up)
+        return sizeof(struct port_stat);
+    if (m == (void *)&pp_conn_map) return sizeof(struct ip_key);
+    return 1;
 }
 /* LPM-дерево: линейный поиск самого длинного префикса. prefixlen считается
  * от начала данных, то есть от слова family — как в ядре. */
@@ -89,12 +101,14 @@ long bpf_map_update_elem(void *map, const void *key, const void *value,
     int ks = keysize(map);
     for (int i = 0; i < 4096; i++)
         if (table[i].used && table[i].map == map && !memcmp(table[i].key, key, ks)) {
-            memcpy(table[i].val, value, 32); return 0;
+            memcpy(table[i].val, value, valsize(map)); return 0;
         }
     for (int i = 0; i < 4096; i++)
         if (!table[i].used) {
             table[i].used = 1; table[i].map = map;
-            memcpy(table[i].key, key, ks); memcpy(table[i].val, value, 32);
+            memcpy(table[i].key, key, ks);
+            memset(table[i].val, 0, sizeof(table[i].val));
+            memcpy(table[i].val, value, valsize(map));
             return 0;
         }
     return -1;
@@ -161,7 +175,12 @@ static int build_v4(unsigned proto, unsigned sport, unsigned dport,
     ip->version = 4; ip->ihl = 5; ip->protocol = proto;
     ip->frag_off = __builtin_bswap16(frag_off);
     ip->daddr = dst; ip->saddr = src;
+    /* tot_len и doff, как у настоящего пакета: по ним программа отличает
+     * сегмент с данными от чистого ACK/SYN. */
+    ip->tot_len = __builtin_bswap16(20 + (proto == IPPROTO_TCP ? 20 : 8) + payload);
     unsigned char *l4 = pkt + 14 + 20;
+    if (proto == IPPROTO_TCP)
+        l4[12] = 5 << 4;
     if (!(frag_off & 0x1FFF)) {
         l4[0] = sport >> 8; l4[1] = sport & 0xFF;
         l4[2] = dport >> 8; l4[3] = dport & 0xFF;
@@ -192,6 +211,8 @@ static int build_v6_ext(int n_ext, unsigned sport, unsigned dport, int payload)
     }
     p[0] = sport >> 8; p[1] = sport & 0xFF;
     p[2] = dport >> 8; p[3] = dport & 0xFF;
+    p[12] = 5 << 4;
+    ip6->payload_len = __builtin_bswap16((int)(p - (pkt + 14 + 40)) + 20 + payload);
     return (int)(p - pkt) + 20 + payload;
 }
 
@@ -209,6 +230,8 @@ static int build_v6_addr(const unsigned char a[16], unsigned sport,
     unsigned char *p = pkt + 14 + 40;
     p[0] = sport >> 8; p[1] = sport & 0xFF;
     p[2] = dport >> 8; p[3] = dport & 0xFF;
+    p[12] = 5 << 4;
+    ip6->payload_len = __builtin_bswap16(20 + payload);
     return 14 + 40 + 20 + payload;
 }
 
@@ -226,7 +249,11 @@ static int build_ipip_v4(unsigned inner_proto, unsigned sport, unsigned dport,
     struct iphdr *in = (struct iphdr *)(pkt + 14 + 20);
     in->version = 4; in->ihl = 5; in->protocol = inner_proto;
     in->daddr = dst; in->saddr = src;
+    in->tot_len = __builtin_bswap16(20 + (inner_proto == IPPROTO_TCP ? 20 : 8) + payload);
+    out->tot_len = __builtin_bswap16(20 + 20 + (inner_proto == IPPROTO_TCP ? 20 : 8) + payload);
     unsigned char *l4 = pkt + 14 + 20 + 20;
+    if (inner_proto == IPPROTO_TCP)
+        l4[12] = 5 << 4;
     l4[0] = sport >> 8; l4[1] = sport & 0xFF;
     l4[2] = dport >> 8; l4[3] = dport & 0xFF;
     return 14 + 20 + 20 + (inner_proto == IPPROTO_TCP ? 20 : 8) + payload;
@@ -247,6 +274,9 @@ static int build_ipip_v6(unsigned sport, unsigned dport, int payload)
     unsigned char *l4 = pkt + 14 + 20 + 40;
     l4[0] = sport >> 8; l4[1] = sport & 0xFF;
     l4[2] = dport >> 8; l4[3] = dport & 0xFF;
+    l4[12] = 5 << 4;
+    in->payload_len = __builtin_bswap16(20 + payload);
+    out->tot_len = __builtin_bswap16(20 + 40 + 20 + payload);
     return 14 + 20 + 40 + 20 + payload;
 }
 
@@ -262,6 +292,7 @@ static int build_tcp_raw(unsigned dst, unsigned src, unsigned sport,
     struct iphdr *ip = (struct iphdr *)(pkt + 14);
     ip->version = 4; ip->ihl = 5; ip->protocol = IPPROTO_TCP;
     ip->daddr = dst; ip->saddr = src;
+    ip->tot_len = __builtin_bswap16(20 + 20 + (payload_len > 0 ? payload_len : 0));
     unsigned char *t = pkt + 14 + 20;
     t[0] = sport >> 8; t[1] = sport & 0xFF;
     t[2] = dport >> 8; t[3] = dport & 0xFF;
@@ -285,6 +316,8 @@ static int build_ipip_tcp_raw(unsigned dst, unsigned src, unsigned sport,
     struct iphdr *in = (struct iphdr *)(pkt + 14 + 20);
     in->version = 4; in->ihl = 5; in->protocol = IPPROTO_TCP;
     in->daddr = dst; in->saddr = src;
+    in->tot_len = __builtin_bswap16(20 + 20 + (payload_len > 0 ? payload_len : 0));
+    out->tot_len = __builtin_bswap16(20 + 20 + 20 + (payload_len > 0 ? payload_len : 0));
     unsigned char *t = pkt + 14 + 20 + 20;
     t[0] = sport >> 8; t[1] = sport & 0xFF;
     t[2] = dport >> 8; t[3] = dport & 0xFF;
@@ -983,6 +1016,312 @@ int main(void)
 
         map_put(&config_map, &zero, &cfg);
         (void)d;
+    }
+
+
+    /* ── Блокировка немобильных ──
+     * nonmobile_block приоритетнее немобильной скорости: клиент вне сетей
+     * мобильных операторов просто не проходит (SHOT в обе стороны). Белый
+     * список, активный штраф/персональная скорость и loopback не блокируются. */
+    printf("\n\033[1m14. Блокировка немобильных\033[0m\n");
+    {
+        struct config blk  = { .bytes_per_sec = 10 * 125000,
+                               .nonmobile_bytes_per_sec = 1 * 125000,
+                               .nonmobile_block = 1 };
+        struct config blk0 = { .nonmobile_block = 1 };   /* больше ничего не задано */
+        struct config nom  = { .bytes_per_sec = 10 * 125000,
+                               .nonmobile_bytes_per_sec = 1 * 125000 };
+        struct mobile_key m4 = { .prefixlen = 32 + 24, .family = 4 };
+        m4.addr[0] = 0x00030201;                        /* 1.2.3.0/24 мобильная */
+        struct mobile_key m6 = { .prefixlen = 32 + 32, .family = 6 };
+        m6.addr[0] = 0xB80D0120;                        /* 2001:0db8::/32 */
+        map_put(&mobile_lpm, &m4, &one);
+        map_put(&mobile_lpm, &m6, &one);
+        unsigned MOB4 = 0x04030201, NON4 = 0x28070605;  /* 1.2.3.4 / 5.6.7.40 */
+        unsigned char mob6[16] = {0x20,0x01,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,0x42};
+        unsigned char non6[16] = {0x2a,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,0x09};
+        unsigned char lo6[16]  = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+        int l, r1, r2;
+
+        map_put(&config_map, &zero, &blk);
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, NON4, SERVER);
+        r1 = run_pkt(l, 0);
+        check("блок: первый пакет немобильного (download) сброшен", r1 == TC_ACT_SHOT);
+        r2 = run_pkt(l, 0);
+        check("блок: следующие пакеты тоже сброшены", r2 == TC_ACT_SHOT);
+        l = build_v4(IPPROTO_TCP, 51000, 443, 0, 1400, SERVER, NON4);
+        check("блок: upload немобильного сброшен", run_pkt(l, 1) == TC_ACT_SHOT);
+        check("блок: upload немобильного сброшен повторно", run_pkt(l, 1) == TC_ACT_SHOT);
+        l = build_v6_addr(non6, 443, 51000, 1400);
+        check("блок: немобильный IPv6 сброшен", run_pkt(l, 0) == TC_ACT_SHOT);
+
+        struct ip_key kb = {0}; kb.addr[0] = NON4;
+        struct user_state *sb = bpf_map_lookup_elem(&user_state_map_down, &kb);
+        check("заблокированный адрес виден: запись создана", sb != NULL);
+        check("заблокированный: отброшено посчитано",
+              sb && sb->dropped_packets == 2 && sb->dropped_bytes == 2ULL * (14 + 20 + 20 + 1400));
+        check("заблокированный: пропущенного нет", sb && sb->total_bytes == 0 && sb->packets == 0);
+        struct port_stat_key pkb = {0}; pkb.addr[0] = NON4; pkb.port = 443;
+        check("заблокированный: статистика по портам не растёт",
+              bpf_map_lookup_elem(&port_stat_map_down, &pkb) == NULL);
+
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, MOB4, SERVER);
+        check("блок: мобильный v4 проходит", run_pkt(l, 0) == TC_ACT_OK && run_pkt(l, 0) == TC_ACT_OK);
+        l = build_v4(IPPROTO_TCP, 51000, 443, 0, 1400, SERVER, MOB4);
+        check("блок: мобильный v4 проходит (upload)", run_pkt(l, 1) == TC_ACT_OK);
+        l = build_v6_addr(mob6, 443, 51000, 1400);
+        check("блок: мобильный v6 проходит", run_pkt(l, 0) == TC_ACT_OK && run_pkt(l, 0) == TC_ACT_OK);
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x0500007F, SERVER);
+        check("блок: loopback v4 проходит", run_pkt(l, 0) == TC_ACT_OK && run_pkt(l, 0) == TC_ACT_OK);
+        l = build_v6_addr(lo6, 443, 51000, 1400);
+        check("блок: loopback v6 проходит", run_pkt(l, 0) == TC_ACT_OK && run_pkt(l, 0) == TC_ACT_OK);
+
+        struct ip_key kwb = {0}; kwb.addr[0] = 0x29070605;
+        map_put(&whitelist_map, &kwb, &one);
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x29070605, SERVER);
+        check("блок: белый список проходит (включая первый пакет)",
+              run_pkt(l, 0) == TC_ACT_OK && run_pkt(l, 0) == TC_ACT_OK && skb.tstamp == 0);
+        bpf_map_delete_elem(&whitelist_map, &kwb);
+
+        struct penalty pn = { .rate_bytes_per_sec = 2 * 125000,
+                              .until_ns = fake_now + 60000000000ULL };
+        struct ip_key kpb = {0}; kpb.addr[0] = 0x2A070605;
+        map_put(&penalty_map, &kpb, &pn);
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x2A070605, SERVER);
+        check("блок: активный штраф/персональная скорость не блокируется",
+              run_pkt(l, 0) == TC_ACT_OK && run_pkt(l, 0) == TC_ACT_OK && skb.tstamp > 0);
+        pn.until_ns = fake_now - 1;
+        map_put(&penalty_map, &kpb, &pn);
+        check("блок: просроченный штраф — снова блок", run_pkt(l, 0) == TC_ACT_SHOT);
+        bpf_map_delete_elem(&penalty_map, &kpb);
+
+        /* блок приоритетнее немобильного лимита, но независим от него */
+        map_put(&config_map, &zero, &nom);
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x2B070605, SERVER);
+        check("блок выключен, лимит задан: немобильный не сбрасывается",
+              run_pkt(l, 0) == TC_ACT_OK && run_pkt(l, 0) == TC_ACT_OK);
+
+        /* блок при нулевых скоростях: ранний выход его не глушит */
+        map_put(&config_map, &zero, &blk0);
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x2C070605, SERVER);
+        check("общий лимит 0 и нет немобильной скорости: блок работает",
+              run_pkt(l, 0) == TC_ACT_SHOT);
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, MOB4 + 0x01000000, SERVER);
+        check("... а мобильный идёт без лимита",
+              run_pkt(l, 0) == TC_ACT_OK && run_pkt(l, 0) == TC_ACT_OK && skb.tstamp == 0);
+
+        /* все три нуля: ранний выход, адрес не учитывается */
+        struct config alloff = {0};
+        map_put(&config_map, &zero, &alloff);
+        struct ip_key kz = {0}; kz.addr[0] = 0x2D070605;
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x2D070605, SERVER);
+        check("все три нуля: пропуск мимо учёта",
+              run_pkt(l, 0) == TC_ACT_OK &&
+              bpf_map_lookup_elem(&user_state_map_down, &kz) == NULL);
+
+        map_put(&config_map, &zero, &cfg);
+    }
+
+    /* ── Учёт: пропущенное и отброшенное раздельно ── */
+    printf("\n\033[1m15. Учёт пропущенного и отброшенного\033[0m\n");
+    {
+        unsigned long long sent_b, sent_p;
+        int l, got_shot;
+        map_put(&config_map, &zero, &cfg);                /* 10 Мбит/с */
+        fake_now = 50000000000ULL;
+
+        /* download: горизонт EDT */
+        unsigned DCL = 0x3A070605;
+        struct ip_key kd = {0}; kd.addr[0] = DCL;
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, DCL, SERVER);
+        run_pkt(l, 0);
+        struct user_state *sd = bpf_map_lookup_elem(&user_state_map_down, &kd);
+        check("первый пакет: пропущен и учтён",
+              sd && sd->total_bytes == (unsigned long long)l && sd->packets == 1 &&
+              sd->dropped_bytes == 0 && sd->dropped_packets == 0);
+        sent_b = l; sent_p = 1; got_shot = 0;
+        for (int i = 0; i < 4000; i++) {
+            if (run_pkt(l, 0) == TC_ACT_SHOT) got_shot = 1;
+            sent_b += l; sent_p++;
+        }
+        sd = bpf_map_lookup_elem(&user_state_map_down, &kd);
+        check("download: горизонт EDT сработал", got_shot);
+        check("download: пропущенное + отброшенное = отправленному (байты)",
+              sd && sd->total_bytes + sd->dropped_bytes == sent_b);
+        check("download: пропущенное + отброшенное = отправленному (пакеты)",
+              sd && sd->packets + sd->dropped_packets == sent_p);
+        check("download: отброшенное посчитано отдельно",
+              sd && sd->dropped_packets > 0 && sd->dropped_bytes == sd->dropped_packets * l);
+        struct port_stat_key pkd = {0}; pkd.addr[0] = DCL; pkd.port = 443;
+        struct port_stat *psd = bpf_map_lookup_elem(&port_stat_map_down, &pkd);
+        check("download: статистика по портам — только пропущенное",
+              psd && sd && psd->bytes == sd->total_bytes && psd->packets == sd->packets);
+        unsigned long long tb = sd->total_bytes, db = sd->dropped_bytes;
+        run_pkt(l, 0);
+        sd = bpf_map_lookup_elem(&user_state_map_down, &kd);
+        check("сброшенный пакет не растит total_bytes, но растит dropped_bytes",
+              sd->total_bytes == tb && sd->dropped_bytes == db + l);
+
+        /* upload: ведро 200 мс */
+        unsigned UCL = 0x3B070605;
+        struct ip_key ku = {0}; ku.addr[0] = UCL;
+        l = build_v4(IPPROTO_TCP, 51000, 443, 0, 1400, SERVER, UCL);
+        sent_b = sent_p = 0; got_shot = 0;
+        for (int i = 0; i < 600; i++) {
+            if (run_pkt(l, 1) == TC_ACT_SHOT) got_shot = 1;
+            sent_b += l; sent_p++;
+        }
+        struct user_state *su = bpf_map_lookup_elem(&user_state_map_up, &ku);
+        check("upload: ведро переполнилось", got_shot);
+        check("upload: пропущенное + отброшенное = отправленному",
+              su && su->total_bytes + su->dropped_bytes == sent_b &&
+              su->packets + su->dropped_packets == sent_p && su->dropped_packets > 0);
+        struct port_stat_key pku = {0}; pku.addr[0] = UCL; pku.port = 443;
+        struct port_stat *psu = bpf_map_lookup_elem(&port_stat_map_up, &pku);
+        check("upload: статистика по портам — только пропущенное",
+              psu && su && psu->bytes == su->total_bytes && psu->packets == su->packets);
+
+        /* белый список и нулевая скорость — это пропущенное */
+        unsigned WCL = 0x3C070605;
+        struct ip_key kw = {0}; kw.addr[0] = WCL;
+        map_put(&whitelist_map, &kw, &one);
+        l = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, WCL, SERVER);
+        for (int i = 0; i < 3000; i++) run_pkt(l, 0);
+        struct user_state *sw = bpf_map_lookup_elem(&user_state_map_down, &kw);
+        check("белый список: всё учтено как пропущенное",
+              sw && sw->total_bytes == 3000ULL * l && sw->packets == 3000 &&
+              sw->dropped_bytes == 0 && sw->dropped_packets == 0);
+        bpf_map_delete_elem(&whitelist_map, &kw);
+        fake_now = 5000000000ULL;
+    }
+
+
+    /* ── Блок и TCP без нагрузки ──
+     * Рукопожатие, чистые ACK, FIN и RST блок не режет: иначе клиент за
+     * релеем PROXY protocol не смог бы прислать заголовок, по которому
+     * определяется его настоящий адрес. Режутся сегменты с данными и весь UDP. */
+    printf("\n\033[1m16. Блок: TCP без нагрузки и PROXY protocol\033[0m\n");
+    {
+        struct config blk = { .bytes_per_sec = 10 * 125000, .nonmobile_block = 1 };
+        map_put(&config_map, &zero, &blk);
+        unsigned char dpay[1500]; memset(dpay, 0x17, sizeof dpay);
+        unsigned NONB = 0x5B070605;                    /* 5.6.7.91, не мобильный */
+        unsigned char non6[16] = {0x2a,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,0x0b};
+        int l;
+
+        /* прямой немобильный клиент: рукопожатие проходит, данные режутся */
+        l = build_tcp_raw(SERVER, NONB, 51000, 443, 0x02, NULL, 0);
+        check("прямой немобильный: SYN проходит (upload)", run_pkt(l, 1) == TC_ACT_OK);
+        l = build_tcp_raw(NONB, SERVER, 443, 51000, 0x12, NULL, 0);
+        check("прямой немобильный: SYN-ACK проходит (download)", run_pkt(l, 0) == TC_ACT_OK);
+        l = build_tcp_raw(SERVER, NONB, 51000, 443, 0x10, NULL, 0);
+        check("прямой немобильный: чистый ACK проходит", run_pkt(l, 1) == TC_ACT_OK);
+        check("... и чистый ACK с паддингом Ethernet (кадр длиннее IP-пакета)",
+              run_pkt(l + 6, 1) == TC_ACT_OK);
+        l = build_tcp_raw(SERVER, NONB, 51000, 443, 0x18, dpay, 300);
+        check("прямой немобильный: первые данные (ClientHello) срезаны", run_pkt(l, 1) == TC_ACT_SHOT);
+        l = build_tcp_raw(NONB, SERVER, 443, 51000, 0x18, dpay, 1400);
+        check("прямой немобильный: данные вниз срезаны", run_pkt(l, 0) == TC_ACT_SHOT);
+        l = build_tcp_raw(SERVER, NONB, 51000, 443, 0x11, NULL, 0);
+        check("прямой немобильный: FIN проходит", run_pkt(l, 1) == TC_ACT_OK);
+        l = build_tcp_raw(SERVER, NONB, 51000, 443, 0x04, NULL, 0);
+        check("прямой немобильный: RST проходит", run_pkt(l, 1) == TC_ACT_OK);
+        struct ip_key kb = {0}; kb.addr[0] = NONB;
+        struct user_state *ub = bpf_map_lookup_elem(&user_state_map_up, &kb);
+        check("рукопожатие учтено как пропущенное, данные — как отброшенное",
+              ub && ub->total_bytes > 0 && ub->dropped_packets == 1);
+
+        /* UDP режется целиком, даже без нагрузки */
+        l = build_v4(IPPROTO_UDP, 51000, 443, 0, 0, SERVER, NONB);
+        check("немобильный UDP срезан", run_pkt(l, 1) == TC_ACT_SHOT);
+        l = build_v4(IPPROTO_UDP, 443, 51000, 0, 1200, NONB, SERVER);
+        check("немобильный UDP срезан (download)", run_pkt(l, 0) == TC_ACT_SHOT);
+
+        /* IPv6, в том числе с цепочкой заголовков, и IPIP */
+        l = build_v6_addr(non6, 443, 51000, 0);
+        check("IPv6 немобильный: пустой TCP проходит", run_pkt(l, 0) == TC_ACT_OK);
+        l = build_v6_addr(non6, 443, 51000, 200);
+        check("IPv6 немобильный: данные срезаны", run_pkt(l, 0) == TC_ACT_SHOT);
+        l = build_ipip_tcp_raw(SERVER, NONB, 51001, 443, 0x02, NULL, 0);
+        check("IPIP: SYN немобильного проходит", run_pkt(l, 1) == TC_ACT_OK);
+        l = build_ipip_tcp_raw(SERVER, NONB, 51001, 443, 0x18, dpay, 200);
+        check("IPIP: данные немобильного срезаны", run_pkt(l, 1) == TC_ACT_SHOT);
+        l = build_ipip_v6(51002, 443, 0);
+        check("IPv6 в IPv4-туннеле: пустой TCP не считается данными", run_pkt(l, 1) != TC_ACT_SHOT);
+
+        /* мобильный клиент не затрагивается */
+        l = build_tcp_raw(SERVER, 0x09030201, 51003, 443, 0x18, dpay, 300);
+        check("мобильный: данные проходят", run_pkt(l, 1) == TC_ACT_OK);
+
+        /* Релей CDN: адрес релея немобильный, клиент приходит в заголовке PROXY */
+        unsigned RLY = 0x5C070605;                     /* 5.6.7.92 */
+        unsigned char pp[64];
+        int ppl = ppv2_tcp4(pp, 0x01020309);           /* клиент 1.2.3.9 — мобильный */
+        l = build_tcp_raw(SERVER, RLY, 60100, 443, 0x02, NULL, 0);
+        check("релей: SYN проходит под ключом релея", run_pkt(l, 1) == TC_ACT_OK);
+        l = build_tcp_raw(SERVER, RLY, 60100, 443, 0x18, pp, ppl);
+        check("релей + PROXY с мобильным клиентом: первый сегмент с данными проходит",
+              run_pkt(l, 1) == TC_ACT_OK);
+        struct pp_key ck = {0}; ck.addr[0] = RLY; ck.port = 60100;
+        check("... запись pp_conn_map заведена", bpf_map_lookup_elem(&pp_conn_map, &ck) != NULL);
+        l = build_tcp_raw(SERVER, RLY, 60100, 443, 0x18, dpay, 400);
+        check("... следующие данные от этого клиента проходят", run_pkt(l, 1) == TC_ACT_OK);
+        l = build_tcp_raw(RLY, SERVER, 443, 60100, 0x18, dpay, 1400);
+        check("... и отдача ему проходит", run_pkt(l, 0) == TC_ACT_OK);
+        struct ip_key kcl = {0}; kcl.addr[0] = __builtin_bswap32(0x01020309);
+        check("учёт идёт по настоящему клиенту, не по релею",
+              bpf_map_lookup_elem(&user_state_map_up, &kcl) != NULL);
+
+        ppl = ppv2_tcp4(pp, 0x05060708);               /* клиент 5.6.7.8 — немобильный */
+        l = build_tcp_raw(SERVER, RLY, 60101, 443, 0x02, NULL, 0);
+        check("релей: SYN нового соединения проходит", run_pkt(l, 1) == TC_ACT_OK);
+        l = build_tcp_raw(SERVER, RLY, 60101, 443, 0x18, pp, ppl);
+        check("релей + PROXY с немобильным клиентом: данные срезаны", run_pkt(l, 1) == TC_ACT_SHOT);
+        struct pp_key ck2 = {0}; ck2.addr[0] = RLY; ck2.port = 60101;
+        check("... запись pp_conn_map всё равно заведена", bpf_map_lookup_elem(&pp_conn_map, &ck2) != NULL);
+        l = build_tcp_raw(RLY, SERVER, 443, 60101, 0x18, dpay, 1400);
+        check("... отдача ему тоже срезана", run_pkt(l, 0) == TC_ACT_SHOT);
+
+        map_put(&config_map, &zero, &cfg);
+    }
+
+    /* ── last_seen: срезанное не делает адрес «активным» ── */
+    printf("\n\033[1m17. Срезанный пакет не обновляет last_seen_ns\033[0m\n");
+    {
+        struct config on = { .bytes_per_sec = 10 * 125000 };
+        struct config blk = { .bytes_per_sec = 10 * 125000, .nonmobile_block = 1 };
+        unsigned char dpay[1500]; memset(dpay, 0x17, sizeof dpay);
+        int l;
+        fake_now = 70000000000ULL;
+        map_put(&config_map, &zero, &blk);
+        unsigned FRESH = 0x5D070605;
+        l = build_tcp_raw(FRESH, SERVER, 443, 51000, 0x18, dpay, 500);
+        check("новый заблокированный: срезан", run_pkt(l, 0) == TC_ACT_SHOT);
+        struct ip_key kf = {0}; kf.addr[0] = FRESH;
+        struct user_state *sf = bpf_map_lookup_elem(&user_state_map_down, &kf);
+        check("его запись создана, last_seen_ns = 0 (не активен)", sf && sf->last_seen_ns == 0);
+        fake_now += 5000000000ULL;
+        run_pkt(l, 0);
+        sf = bpf_map_lookup_elem(&user_state_map_down, &kf);
+        check("повторные сбросы last_seen_ns не трогают", sf && sf->last_seen_ns == 0);
+
+        /* клиент с трафиком до блока: сбросы не продлевают его «активность» */
+        map_put(&config_map, &zero, &on);
+        unsigned OLD = 0x5E070605;
+        struct ip_key ko = {0}; ko.addr[0] = OLD;
+        l = build_tcp_raw(OLD, SERVER, 443, 51000, 0x18, dpay, 500);
+        run_pkt(l, 0); run_pkt(l, 0);
+        struct user_state *so = bpf_map_lookup_elem(&user_state_map_down, &ko);
+        unsigned long long seen0 = so ? so->last_seen_ns : 1;
+        check("пропущенный пакет ставит last_seen_ns", so && seen0 == fake_now);
+        map_put(&config_map, &zero, &blk);
+        fake_now += 9000000000ULL;
+        check("после включения блока клиент срезается", run_pkt(l, 0) == TC_ACT_SHOT);
+        so = bpf_map_lookup_elem(&user_state_map_down, &ko);
+        check("last_seen_ns остался от последнего пропущенного пакета",
+              so && so->last_seen_ns == seen0 && so->dropped_packets == 1);
+        map_put(&config_map, &zero, &cfg);
+        fake_now = 5000000000ULL;
     }
 
     printf("\n\033[1mИтог: %d пройдено, %d провалено\033[0m\n", ok, fail);

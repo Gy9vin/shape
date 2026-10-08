@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.30-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.31-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.30
+# Shape v3.31
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -214,6 +214,24 @@ the kernel; if RIPEstat fails the previous networks are kept.
 foreign operators and roaming. To exempt a client use a personal speed
 (`personal`) or the whitelist (`whitelist`).
 After updating, on HAProxy nodes: `systemctl restart haproxy`.
+
+**Non-mobile block.** Instead of a limit you can cut off clients outside mobile
+networks entirely: `shaper` menu -> [1] Configure limit -> [7] "Non-mobile block"
+(warning and y confirmation) or `shaperctl.py nonmobile block on|off`. Such a
+client gets no data on shaped ports (TCP segments with data and UDP are dropped;
+handshake packets without data pass, so clients behind a CDN/relay with PROXY
+protocol are blocked by their real address). Exceptions: whitelist, personal
+speed, 127.0.0.1/::1. The block takes priority over the non-mobile limit.
+Safeguards: not enabled without a loaded network list; not enabled with a
+"port 0 = all ports" rule (it would cut the node's SSH/DNS/updates), and
+`apply --ports 0` refuses while the block is on. Off by default. **Risk:** it
+blocks home internet and Wi-Fi, mobile Rostelecom, operators outside the list,
+foreign SIMs and roaming.
+
+**Own networks in the mobile list:** `shaperctl.py mobile add AS12345 | 1.2.3.0/24`,
+`mobile del ...`, `mobile list` ("own" label; ASNs come from RIPEstat, subnets
+at once). `monitor` and `status` now count only passed traffic; dropped traffic
+is shown separately (✂ X Mbit/s).
 
 ### Why "now" sometimes exceeds the limit
 

@@ -212,8 +212,10 @@ load() {
     done
     lo_note
 
-    "$APP_DIR/shaperctl.py" restore | sed 's/^/  /'
+    # Белый список — до restore: restore включает блок немобильных, и в окне
+    # между ними адреса из белого списка срезались бы.
     [[ -f "$ETC_DIR/whitelist.txt" ]] && "$APP_DIR/shaperctl.py" whitelist sync | sed 's/^/  /'
+    "$APP_DIR/shaperctl.py" restore | sed 's/^/  /'
 
     echo "IFACE=\"${IFACES[*]}\"" > "$ETC_DIR/.active_iface"
     # Событие в общий журнал: его читает API, а в будущем — центральная система.

@@ -265,5 +265,59 @@ for k in st_nm st_nm_d nm_item nm_to_on nm_to_off nm_h1 nm_h2 nm_ask nm_off_q; d
           '[[ "$(grep -c "^ *\[$k\]=" "$SRC/lang.sh")" == 2 ]]'
 done
 
+echo -e "\n${B}Блокировка немобильных в меню${N}"
+check "пункт [7] на экране лимита ведёт в screen_nonmobile_block" \
+      'sed -n "/^screen_limit()/,/^}/p" "$SRC/menu.sh" | grep -qE "^ *7\) screen_nonmobile_block; return ;;"'
+check "меню включает и выключает блок только через shaperctl" \
+      'grep -q "\"\$CTL\" nonmobile block on" "$SRC/menu.sh" && grep -q "\"\$CTL\" nonmobile block off" "$SRC/menu.sh"'
+check "включение блока требует явного подтверждения (по Enter — отмена)" \
+      'sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh" | grep -q "nmb_on_q" && sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh" | grep -qF "case \"\$ans\" in"'
+check "предупреждение перечисляет, кого заблокирует" \
+      'sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh" | grep -q "nmb_warn1" && sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh" | grep -q "nmb_warn2" && sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh" | grep -q "nmb_warn3"'
+check "подтверждение не опирается на класс символов с кириллицей (в локали C «н» = «Д»)" \
+      '! sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh" | grep -qE "=~ \^\[YyДд\]"'
+# Поведение, а не текст: функция исполняется с заглушками в локали C.
+nmb_run() {
+    local lc="$1" ans="$2"
+    LC_ALL="$lc" ANS="$ans" SRC="$SRC" bash -c '
+        eval "$(sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh")"
+        T=(x)     # индексный массив: все ключи сводятся к одному слоту, текст не важен
+        R= Y= D= N=
+        nmb_on() { return 1; }
+        nmb_ports_all() { return 1; }
+        pause() { :; }
+        CTL=ctl
+        ctl() { echo "CTL:$*"; }
+        screen_nonmobile_block <<< "$ANS"' 2>&1
+}
+check "ответ «нет» в локали C не включает блок" \
+      '[[ "$(nmb_run C "нет")" != *"CTL:"* ]]'
+check "ответ «н» в локали C не включает блок" \
+      '[[ "$(nmb_run C "н")" != *"CTL:"* ]]'
+check "ответ «да» включает блок в локали C" \
+      '[[ "$(nmb_run C "да")" == *"CTL:nonmobile block on"* ]]'
+check "ответ «Д» включает блок в локали C" \
+      '[[ "$(nmb_run C "Д")" == *"CTL:nonmobile block on"* ]]'
+check "ответ «y» включает блок" \
+      '[[ "$(nmb_run C "y")" == *"CTL:nonmobile block on"* ]]'
+check "пустой ответ (Enter) не включает блок" \
+      '[[ "$(nmb_run C "")" != *"CTL:"* ]]'
+check "ответ «нет» в UTF-8 не включает блок" \
+      '[[ "$(nmb_run en_US.UTF-8 "нет")" != *"CTL:"* ]]'
+check "при портах с 0 меню отказывает тем же сообщением и не спрашивает" \
+      'sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh" | grep -q "nmb_ports_all" && sed -n "/^screen_nonmobile_block()/,/^}/p" "$SRC/menu.sh" | grep -q "nmb_ports0"'
+check "блок не вынесен в Сервис" \
+      '! sed -n "/^screen_service()/,/^}/p" "$SRC/menu.sh" | grep -q "nonmobile block"'
+check "шапка меню показывает включённую блокировку" \
+      'sed -n "/^status_line()/,/^}/p" "$SRC/menu.sh" | grep -q "st_nmb"'
+check "блок читается из конфига только как настоящий true" \
+      'grep -q "c.get(.nonmobile_block.) is True" "$SRC/menu.sh"'
+check "engine.sh: whitelist sync стоит раньше restore (блок не режет белый список)" \
+      '[[ $(grep -n "shaperctl.py\" whitelist sync" "$SRC/engine.sh" | head -1 | cut -d: -f1) -lt $(grep -n "shaperctl.py\" restore" "$SRC/engine.sh" | head -1 | cut -d: -f1) ]]'
+for k in nmb_ports0 st_nmb st_nmb_d nmb_item nmb_to_on nmb_to_off nmb_warn0 nmb_warn1 nmb_warn2 nmb_warn3 nmb_warn4 nmb_on_q nmb_off_q; do
+    check "ключ lang.sh $k есть в обоих языках" \
+          '[[ "$(grep -c "^ *\[$k\]=" "$SRC/lang.sh")" == 2 ]]'
+done
+
 echo -e "\n${B}Итог: $ok пройдено, $fail провалено${N}"
 [[ $fail -eq 0 ]]

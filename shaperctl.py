@@ -107,12 +107,15 @@ BYTES_PER_MBPS = 125_000
 MAX_MBPS = 100_000          # 100 Гбит/с — заведомо выше любого разумного канала
 MAX_PORTS = 64              # должно совпадать с max_entries port_map в shaper.bpf.c
 
-CONFIG_FMT = "<2Q"          # struct config, 16 байт: общий и немобильный лимит, байт/с
+CONFIG_FMT = "<3Q"          # struct config, 24 байта: общий и немобильный лимит (байт/с), блок 0/1
 MOBILE_LPM_MAX = 16384      # должно совпадать с max_entries mobile_lpm в shaper.bpf.c
 CONFIG_MAP_LOCK = os.path.join(VAR_DIR, "config_map.lock")
 MOBILE_KEY_SIZE = 24        # struct mobile_key: prefixlen, family, addr[4]
 PEN_FMT = "<2Q"             # struct penalty: rate_bytes_per_sec, until_ns
-USER_FMT, USER_SIZE = "<4Q", 32   # struct user_state
+# struct user_state, 48 байт: last_departure_ns, total_bytes, last_seen_ns, packets,
+# dropped_bytes, dropped_packets. total_*/packets — только пропущенное.
+USER_FMT, USER_SIZE = "<6Q", 48
+USER_SIZE_OLD = 32          # до v3.31: без счётчиков отброшенного
 # struct port_stat_key: адрес (16 байт) + порт; struct port_stat — счётчики
 PSTAT_KEY_FMT, PSTAT_KEY_SIZE = "<4I I", 20
 PSTAT_VAL_FMT, PSTAT_VAL_SIZE = "<2Q", 16
@@ -417,14 +420,35 @@ MSG = {
         "own_set": "{ip}: сведения сохранены",
         "own_removed": "{ip}: сведения удалены",
         "own_bad_tg": "telegram_id — это число",
-        "h_mobile": "сети мобильных операторов: update | status | lookup IP",
+        "h_mobile": "сети мобильных операторов: update | status | lookup IP | add ASxxx|СЕТЬ | del ASxxx|СЕТЬ | list",
+        "mob_custom": "свои",
+        "mob_extra_title": "Свои сети в списке мобильных",
+        "mob_extra_none": "пусто: shaperctl.py mobile add AS12345 | 10.0.0.0/8",
+        "mob_extra_asn": "ASN (сети запрашиваются у RIPEstat)", "mob_extra_net": "сеть",
+        "mob_extra_bad": "не ASN (AS1..AS4294967295) и не сеть IPv4/IPv6: {v}",
+        "mob_extra_have": "{v}: уже в списке",
+        "mob_extra_missing": "{v}: в списке своих сетей нет",
+        "mob_extra_added": "{v}: добавлено в список мобильных",
+        "mob_extra_removed": "{v}: убрано из списка мобильных",
+        "mob_extra_removed_partial": "{v}: убрано из списка; его сети уйдут при следующем полном обновлении (часть ASN не ответила)",
+        "mob_extra_hint": "сети ASN подтянутся при следующем обновлении: shaperctl.py mobile update",
         "mob_none": "RIPEstat не ответил ни по одной сети — старый список оставлен",
         "mob_updated": "сети операторов обновлены: {n}, без ответа ASN: {bad}",
         "mob_failed": "нет ответа",
         "mob_not": "не из сети мобильного оператора",
         "mob_nocache": "список сетей операторов не загружен: shaperctl.py mobile update",
         "mob_updated_at": "обновлено", "mob_total": "сетей",
-        "h_nonmobile": "лимит для клиентов вне мобильных сетей: on --speed МБИТ | off | status",
+        "h_nonmobile": "лимит для клиентов вне мобильных сетей: on --speed МБИТ | off | status | block on|off",
+        "h_nm_block_arg": "для block: on или off",
+        "nm_block_need_arg": "нужно on или off: nonmobile block on|off",
+        "nm_block_ports0": "блокировка несовместима с правилом «все порты» (порт 0): она срезала бы и саму ноду (SSH, DNS, обновления). Укажи конкретные порты: apply --ports 443",
+        "nm_block_saved_on": "блокировка немобильных включена",
+        "nm_block_saved_off": "блокировка немобильных выключена",
+        "nm_block_line": "Блокир.", "nm_block_title": "Блокировка",
+        "nm_block_on": "включена", "nm_block_active": "активна",
+        "nm_block_inactive": "не активна",
+        "nm_block_mon": "ЗАБЛОКИРОВАНЫ (кроме мобильных, белого списка, персональных)",
+        "mon_leg_cut": "срезано шейпером, Мбит/с", "mon_leg_blocked": "заблокирован",
         "h_nm_speed": "скорость немобильного лимита, Мбит/с",
         "nm_title": "Немобильный лимит",
         "nm_need_speed": "при первом включении нужна скорость: nonmobile on --speed <Мбит/с>",
@@ -778,14 +802,35 @@ MSG = {
         "own_set": "{ip}: details saved",
         "own_removed": "{ip}: details removed",
         "own_bad_tg": "telegram_id must be a number",
-        "h_mobile": "mobile operator networks: update | status | lookup IP",
+        "h_mobile": "mobile operator networks: update | status | lookup IP | add ASxxx|NET | del ASxxx|NET | list",
+        "mob_custom": "custom",
+        "mob_extra_title": "Custom networks in the mobile list",
+        "mob_extra_none": "empty: shaperctl.py mobile add AS12345 | 10.0.0.0/8",
+        "mob_extra_asn": "ASN (networks fetched from RIPEstat)", "mob_extra_net": "network",
+        "mob_extra_bad": "neither an ASN (AS1..AS4294967295) nor an IPv4/IPv6 network: {v}",
+        "mob_extra_have": "{v}: already in the list",
+        "mob_extra_missing": "{v}: not in the custom network list",
+        "mob_extra_added": "{v}: added to the mobile list",
+        "mob_extra_removed": "{v}: removed from the mobile list",
+        "mob_extra_removed_partial": "{v}: removed from the list; its networks go away on the next full update (some ASNs did not answer)",
+        "mob_extra_hint": "ASN networks will load on the next update: shaperctl.py mobile update",
         "mob_none": "RIPEstat answered for no network - the old list is kept",
         "mob_updated": "operator networks updated: {n}, ASNs without answer: {bad}",
         "mob_failed": "no answer",
         "mob_not": "not a mobile operator network",
         "mob_nocache": "operator network list not loaded: shaperctl.py mobile update",
         "mob_updated_at": "updated", "mob_total": "networks",
-        "h_nonmobile": "limit for clients outside mobile networks: on --speed MBIT | off | status",
+        "h_nonmobile": "limit for clients outside mobile networks: on --speed MBIT | off | status | block on|off",
+        "h_nm_block_arg": "for block: on or off",
+        "nm_block_need_arg": "on or off required: nonmobile block on|off",
+        "nm_block_ports0": "the block cannot be combined with the \"all ports\" rule (port 0): it would cut the node itself (SSH, DNS, updates). Use specific ports: apply --ports 443",
+        "nm_block_saved_on": "non-mobile block is on",
+        "nm_block_saved_off": "non-mobile block is off",
+        "nm_block_line": "Block", "nm_block_title": "Block",
+        "nm_block_on": "on", "nm_block_active": "active",
+        "nm_block_inactive": "not active",
+        "nm_block_mon": "BLOCKED (except mobile, whitelist, personal speeds)",
+        "mon_leg_cut": "cut by the shaper, Mbit/s", "mon_leg_blocked": "blocked",
         "h_nm_speed": "non-mobile limit speed, Mbit/s",
         "nm_title": "Non-mobile limit",
         "nm_need_speed": "a speed is required the first time: nonmobile on --speed <Mbit/s>",
@@ -988,13 +1033,19 @@ def parse_ip_key(k):
 def parse_user_state(v):
     b = _raw(v)
     if b is not None and len(b) >= USER_SIZE:
-        _dep, total, seen, pkts = struct.unpack(USER_FMT, b[:USER_SIZE])
-        return {"total": total, "seen": seen, "pkts": pkts}
+        _dep, total, seen, pkts, dbytes, dpkts = struct.unpack(USER_FMT, b[:USER_SIZE])
+        return {"total": total, "seen": seen, "pkts": pkts,
+                "dropped": dbytes, "dpkts": dpkts}
+    if b is not None and len(b) >= USER_SIZE_OLD:
+        _dep, total, seen, pkts = struct.unpack("<4Q", b[:USER_SIZE_OLD])
+        return {"total": total, "seen": seen, "pkts": pkts, "dropped": 0, "dpkts": 0}
     if isinstance(v, dict):
         return {"total": _int(v.get("total_bytes", 0)),
                 "seen":  _int(v.get("last_seen_ns", 0)),
-                "pkts":  _int(v.get("packets", 0))}
-    return {"total": 0, "seen": 0, "pkts": 0}
+                "pkts":  _int(v.get("packets", 0)),
+                "dropped": _int(v.get("dropped_bytes", 0)),
+                "dpkts":   _int(v.get("dropped_packets", 0))}
+    return {"total": 0, "seen": 0, "pkts": 0, "dropped": 0, "dpkts": 0}
 
 
 def parse_port_stat_key(k):
@@ -1200,9 +1251,19 @@ def load_config():
     if isinstance(cfg.get("nonmobile_mbps"), bool) or nm is None \
             or not 0 <= nm <= MAX_MBPS:
         nm = 0.0
+    # Блок — только настоящий true: «yes», 1 или строка не включают его молча.
+    block = cfg.get("nonmobile_block") is True
+    extra = []
+    raw_extra = cfg.get("mobile_extra")
+    for item in (raw_extra if isinstance(raw_extra, list) else []):
+        norm = mobile_extra_parse(item)
+        if norm and norm not in extra:
+            extra.append(norm)
     return {"ports": cfg.get("ports", [443]),
             "speed_mbps": float(cfg.get("speed_mbps", 0)),
             "nonmobile_mbps": float(nm),
+            "nonmobile_block": block,
+            "mobile_extra": extra,
             "guard": guard, "telegram": tg, "panel": panel}
 
 
@@ -1266,9 +1327,10 @@ def parse_ports(s):
 
 def write_config_map(cfg, reread=False):
     """
-    Записывает struct config: общий лимит и немобильный. Немобильный уходит в
-    ядро только при заполненной карте mobile_lpm: пустая карта сделала бы
-    «немобильными» всех, и весь трафик ушёл бы под низкий лимит. Желаемое
+    Записывает struct config: общий лимит, немобильный и блокировку немобильных.
+    Немобильный лимит и блок уходят в ядро только при заполненной карте
+    mobile_lpm: пустая карта сделала бы «немобильными» всех, и весь трафик ушёл
+    бы под низкий лимит или под блок. Желаемое
     значение остаётся в конфиге и включится при следующей успешной
     синхронизации. Если синхронизация не удалась, но карта уже заполнена
     прежними сетями, режим остаётся включённым: устаревший список лучше, чем
@@ -1279,20 +1341,31 @@ def write_config_map(cfg, reread=False):
     конфиг могли поменять, поэтому перед записью он читается заново.
     """
     synced, err = False, None
-    if cfg.get("nonmobile_mbps", 0) > 0:
+    if cfg.get("nonmobile_mbps", 0) > 0 or cfg.get("nonmobile_block"):
+        # Сколько префиксов было в карте ДО синхронизации. После сбоя batch
+        # карта может оказаться заполненной лишь частично, и «не пуста» уже
+        # ничего не значит: режим держим только если полный список был раньше.
+        try:
+            had = len(map_dump("mobile_lpm"))
+        except Exception:
+            had = 0
         try:
             synced = mobile_sync() > 0
         except Exception as e:
             err = str(e)
-            synced = len(map_dump("mobile_lpm")) > 0
+            synced = had > 0
     with file_lock(CONFIG_MAP_LOCK):
         if reread:
             cfg = load_config()
         bps = int(cfg["speed_mbps"] * BYTES_PER_MBPS)
         nm_bps = int(cfg["nonmobile_mbps"] * BYTES_PER_MBPS) \
             if synced and cfg.get("nonmobile_mbps", 0) > 0 else 0
+        # Блок с правилом «все порты» срезал бы и саму ноду: SSH, DNS, apt,
+        # Telegram. Поэтому при портах с 0 он в ядро не уходит.
+        blk = 1 if synced and cfg.get("nonmobile_block") \
+            and 0 not in cfg.get("ports", []) else 0
         map_update("config_map", struct.pack("<I", 0),
-                   struct.pack(CONFIG_FMT, bps, nm_bps))
+                   struct.pack(CONFIG_FMT, bps, nm_bps, blk))
     return err
 
 
@@ -1316,6 +1389,8 @@ def cmd_apply(a):
         ports = parse_ports(a.ports)
         if not ports:
             die(t("no_ports"))
+        if 0 in ports and cfg["nonmobile_block"]:
+            die(t("nm_block_ports0"))
         cfg["ports"] = ports
     if a.speed is not None:
         # nan и inf проходят любые сравнения: nan < 0 ложь, nan > MAX ложь.
@@ -1351,6 +1426,12 @@ def cmd_show(a):
               + ("" if live else f" {C['yel']}({t('nm_not_active')}){C['r']}"))
     else:
         print(f"  {t('nm_line'):<9}: {C['gry']}{t('nm_off')}{C['r']}")
+    if cfg["nonmobile_block"]:
+        live = os.path.exists(map_path("config_map")) and nonmobile_kernel_block() > 0
+        print(f"  {t('nm_block_line'):<9}: {C['bred']}{t('nm_block_on')}{C['r']}"
+              + ("" if live else f" {C['yel']}({t('nm_block_inactive')}){C['r']}"))
+    else:
+        print(f"  {t('nm_block_line'):<9}: {C['gry']}{t('nm_off')}{C['r']}")
     # Предупреждение стоит здесь, на самом ходовом экране: нода без fq
     # выглядит здоровой во всём остальном, и заметить это больше негде.
     ready, bad = edt_ready()
@@ -1500,8 +1581,12 @@ def cmd_haproxy(a):
 def cmd_restore(a):
     """Вызывается сервисом при старте: заливает config.json в свежие карты."""
     cfg = load_config()
-    write_to_kernel(cfg)
+    # Штрафы и персональные скорости — до записи config_map: пока config не
+    # записан, ядро ничего не ограничивает, а блок немобильных включается
+    # именно записью config. Иначе в окне между ними резались бы адреса с
+    # персональной скоростью. Белый список engine.sh заливает до restore.
     n = restore_penalties()
+    write_to_kernel(cfg)
     print(t("restored", s=cfg["speed_mbps"], p=",".join(map(str, cfg["ports"]))))
     if n:
         print(t("restored_pen", n=n))
@@ -1510,7 +1595,13 @@ def cmd_restore(a):
 # ───────────────────────────── статистика ─────────────────────────────
 
 def read_users():
-    """{ip: {"down": байт, "up": байт, "up_pkts": шт, "seen": нс}}"""
+    """
+    {ip: {"down": байт, "up": байт, "up_pkts": шт, "seen": нс,
+          "down_drop": байт, "up_drop": байт}}
+
+    down/up/up_pkts — только пропущенное; отброшенное (горизонт EDT, ведро
+    upload, блокировка) лежит отдельно в down_drop/up_drop.
+    """
     users = {}
     for map_name, direction in (("user_state_map_down", "down"),
                                 ("user_state_map_up", "up")):
@@ -1519,8 +1610,10 @@ def read_users():
             if ip is None:
                 continue
             st = parse_user_state(v)
-            e = users.setdefault(ip, {"down": 0, "up": 0, "up_pkts": 0, "seen": 0})
+            e = users.setdefault(ip, {"down": 0, "up": 0, "up_pkts": 0, "seen": 0,
+                                      "down_drop": 0, "up_drop": 0})
             e[direction] = st["total"]
+            e[direction + "_drop"] = st["dropped"]
             if direction == "up":
                 e["up_pkts"] = st["pkts"]
             e["seen"] = max(e["seen"], st["seen"])
@@ -1562,7 +1655,12 @@ def cmd_status(a):
         # байты за интервал -> Мбит/с
         dl = max(0, cur["down"] - prev["down"]) * 8 / 1e6 / a.interval if a.live else None
         ul = max(0, cur["up"] - prev["up"]) * 8 / 1e6 / a.interval if a.live else None
-        idle = (now - cur["seen"]) / NS if cur["seen"] else 0
+        if cur["seen"]:
+            idle = (now - cur["seen"]) / NS
+        else:
+            # seen = 0 бывает только у записи, заведённой срезанным пакетом
+            # (блок): трафика не было, значит и активным адрес не считается.
+            idle = 0 if cur["down"] + cur["up"] else 10 ** 6
         rows.append((ip, cur, dl, ul, idle))
 
     if a.json:
@@ -1651,6 +1749,16 @@ def rates(prev, cur, dt):
     return out
 
 
+def drop_rates(prev, cur, dt):
+    """{ip: (отброшено вниз, вверх)} в Мбит/с за интервал — то, что шейпер срезал."""
+    out = {}
+    for ip, c in cur.items():
+        p = prev.get(ip, {})
+        out[ip] = (max(0, c.get("down_drop", 0) - p.get("down_drop", 0)) * 8 / 1e6 / dt,
+                   max(0, c.get("up_drop", 0) - p.get("up_drop", 0)) * 8 / 1e6 / dt)
+    return out
+
+
 def fmt_hold(sec):
     """Сколько времени подряд IP держит нагрузку."""
     if sec < 1:
@@ -1735,6 +1843,7 @@ def cmd_monitor(a):
     pens, pens_at = load_penalties(), 0.0
     wl = whitelist_ips()
     nm_mbps = nonmobile_kernel_bps() / BYTES_PER_MBPS
+    nm_block = nonmobile_kernel_block() > 0
     width = 78
 
     print("\033[?25l", end="", flush=True)   # спрятать курсор
@@ -1746,6 +1855,7 @@ def cmd_monitor(a):
             now_t = time.monotonic()
             dt = max(0.1, now_t - prev_t)
             rt = rates(prev, cur, dt)
+            drops = drop_rates(prev, cur, dt)
             prev, prev_t = cur, now_t
 
             # Скорости по парам «адрес × порт» за прошедший интервал.
@@ -1771,8 +1881,13 @@ def cmd_monitor(a):
                 pens, pens_at = load_penalties(), now_t
                 wl = whitelist_ips()
                 nm_mbps = nonmobile_kernel_bps() / BYTES_PER_MBPS
+                nm_block = nonmobile_kernel_block() > 0
 
-            rows = []
+            # Скорости, доли и сводки — по пропущенному трафику. Адрес, у
+            # которого пропущено ноль байт, а срезано есть (заблокированный),
+            # в сводки не попадает, но в списке остаётся: иначе блокировка
+            # выглядела бы как исчезновение клиента.
+            rows, cut_only = [], []
             for ip, (dl, ul, up_pkt) in rt.items():
                 h = history.setdefault(ip, [])
                 h.append(dl)
@@ -1781,11 +1896,19 @@ def cmd_monitor(a):
                     since.setdefault(ip, now_t)
                 else:
                     since.pop(ip, None)
-                rows.append((ip, dl, ul, sum(h) / len(h),
-                             now_t - since[ip] if ip in since else 0, up_pkt))
+                row = (ip, dl, ul, sum(h) / len(h),
+                       now_t - since[ip] if ip in since else 0, up_pkt)
+                if dl + ul <= 0.05 and sum(drops.get(ip, (0.0, 0.0))) > 0.05:
+                    cut_only.append(row)
+                else:
+                    rows.append(row)
 
-            active = [r for r in rows if r[1] + r[2] > 0.05]
-            active.sort(key=lambda r: r[1] + r[2], reverse=True)
+            def cut_of(ip):
+                return sum(drops.get(ip, (0.0, 0.0)))
+
+            loaded = [r for r in rows if r[1] + r[2] > 0.05]
+            active = loaded + cut_only
+            active.sort(key=lambda r: (r[1] + r[2], cut_of(r[0])), reverse=True)
             total_dl = sum(r[1] for r in rows)
             total_ul = sum(r[2] for r in rows)
             chan.append(total_dl)
@@ -1805,13 +1928,15 @@ def cmd_monitor(a):
             if limit > 0:
                 out.append(f"   {t('mon_limit_row'):<16}{C['b']}{limit:g} Mbit/s{C['r']}"
                            f"   {C['gry']}{t('mon_per_ip')}{C['r']}"
-                           f"      {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
+                           f"      {t('mon_loading')} {C['b']}{len(loaded)}{C['r']}"
                            f" {t('mon_of')} {len(rows)}")
             else:
                 out.append(f"   {t('mon_limit_row'):<16}{C['yel']}{t('mon_nolimit')}{C['r']}"
-                           f"          {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
+                           f"          {t('mon_loading')} {C['b']}{len(loaded)}{C['r']}"
                            f" {t('mon_of')} {len(rows)}")
-            if nm_mbps > 0:
+            if nm_block:
+                out.append(f"   {t('nm_mon_row'):<16}{C['bred']}{t('nm_block_mon')}{C['r']}")
+            elif nm_mbps > 0:
                 out.append(f"   {t('nm_mon_row'):<16}{C['b']}{nm_mbps:g} Mbit/s{C['r']}"
                            f"   {C['gry']}{t('mon_per_ip')}{C['r']}")
             mob, mob_total, mob_ops = mobile_summary([r[0] for r in rows])
@@ -1850,6 +1975,11 @@ def cmd_monitor(a):
                 col = load_color(share)
                 # Значок слева вместо колонки «держит»: в спокойный час она
                 # была сплошь из прочерков и занимала девять знаков впустую.
+                # Заблокированный (блок немобильных): не штраф, не белый список,
+                # не loopback и не из мобильных сетей — ядро его сбрасывает.
+                blocked = (nm_block and ip not in pens and ip not in wl
+                           and not _is_loopback(ip) and not mobile_of(ip))
+                cut = cut_of(ip)
                 if ip in pens:
                     mark = f"{C['bred']}⊘{C['r']}"
                 elif ip in wl:
@@ -1857,6 +1987,8 @@ def cmd_monitor(a):
                     # Видеть его нагрузку важнее всего — именно он может
                     # незаметно съесть канал, оставаясь вне лимита.
                     mark = f"{C['cyan']}✓{C['r']}"
+                elif blocked:
+                    mark = f"{C['bred']}✗{C['r']}"
                 elif hold >= 30:
                     mark = f"{C['byel']}▪{C['r']}"
                 else:
@@ -1888,6 +2020,9 @@ def cmd_monitor(a):
                            f"{C['gry']}{avg:>8.1f}{C['r']}"
                            f"{hold_col}{hold_txt:>7}{C['r']}"
                            f"  {col}{bar(dl, row_scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}"
+                           # Срезанное шейпером (Мбит/с): сколько клиент пытался
+                           # сверх того, что мы пропустили.
+                           f"{(' ' + C['bred'] + '✂' + format(cut, '.1f') + C['r']) if cut > 0.05 else ''}"
                            f"{(' ' + C['cyan'] + op + C['r']) if op else ''}")
                 # Разбивка по портам под адресом: показываем, когда адрес
                 # реально работает больше чем по одному порту.
@@ -1922,6 +2057,8 @@ def cmd_monitor(a):
                        f"   ▪ {t('mon_leg_hold')}   ✓ {t('mon_leg_wl')}"
                        f"   ⊘ {t('mon_leg_limited')}{C['r']}")
             out.append(f"   {C['gry']}{t('mon_leg_pkt', n=PKT_DATA_HINT)}{C['r']}")
+            if any(cut_of(r[0]) > 0.05 for r in active[:a.top]):
+                out.append(f"   {C['gry']}✂ {t('mon_leg_cut')}   ✗ {t('mon_leg_blocked')}{C['r']}")
             print("\n".join(out), flush=True)
     except KeyboardInterrupt:
         pass
@@ -2187,6 +2324,64 @@ def mobile_read():
     return None
 
 
+MOBILE_ASN_RE = re.compile(r"AS([0-9]{1,10})", re.IGNORECASE)
+MOBILE_ASN_MAX = 4294967295
+
+
+def mobile_extra_parse(value):
+    """
+    Ввод «своей сети» -> нормализованная строка или None. Строго: либо «AS» и
+    число 1..4294967295, либо сеть IPv4/IPv6 (биты хоста обнуляются, адрес без
+    маски — /32 или /128). Сеть с нулевой маской отвергается: она сделала бы
+    мобильным весь интернет.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if "%" in value:                      # IPv6 с зоной (fe80::1%eth0)
+        return None
+    m = MOBILE_ASN_RE.fullmatch(value)
+    if m:
+        n = int(m.group(1))
+        return f"AS{n}" if 1 <= n <= MOBILE_ASN_MAX else None
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return None
+    if net.prefixlen == 0:
+        return None
+    # ::ffff:a.b.c.d — IPv4 в обёртке IPv6: ядро кладёт такой адрес в ключ
+    # как v6, а клиентский IPv4 ищет как v4, поэтому сеть не сработала бы.
+    if net.version == 6 and net.network_address.ipv4_mapped is not None:
+        return None
+    return str(net)
+
+
+def mobile_extra_split(extra):
+    """Список «своих» -> ([номера ASN], [сети строкой])."""
+    asns = [int(e[2:]) for e in extra if e.startswith("AS")]
+    return asns, [e for e in extra if not e.startswith("AS")]
+
+
+def mobile_extra_nets():
+    """Свои сети (CIDR) из конфига. Не бросает."""
+    try:
+        return mobile_extra_split(load_config()["mobile_extra"])[1]
+    except Exception:
+        return []
+
+
+def mobile_data():
+    """Кеш сетей операторов плюс свои CIDR из конфига (в кеш они не пишутся)."""
+    data = mobile_read()
+    nets = mobile_extra_nets()
+    if not nets:
+        return data
+    return {"updated": (data or {}).get("updated", 0),
+            "nets": list((data or {}).get("nets", []))
+                    + [[n, t("mob_custom")] for n in nets]}
+
+
 def _mobile_build(data):
     """
     Диапазоны целых по версиям, по возрастанию начала. Вложенные в более
@@ -2220,7 +2415,7 @@ def mobile_of(ip):
     global _MOBILE_IDX
     try:
         if _MOBILE_IDX is None:
-            _MOBILE_IDX = _mobile_build(mobile_read())
+            _MOBILE_IDX = _mobile_build(mobile_data())
         addr = ipaddress.ip_address(str(ip).strip())
         if addr.version == 6 and addr.ipv4_mapped:
             addr = addr.ipv4_mapped
@@ -2317,7 +2512,10 @@ def mobile_sync():
     """
     want = mobile_lpm_keys(mobile_read())
     if not want:
+        # Только свои сети кеш операторов не заменяют: карта из них одних сделала
+        # бы «немобильными» всех остальных, включая обычных мобильных клиентов.
         raise RuntimeError(t("nm_no_cache"))
+    want |= mobile_lpm_keys({"nets": [[n, ""] for n in mobile_extra_nets()]})
     if len(want) > MOBILE_LPM_MAX:
         raise RuntimeError(t("nm_too_many", n=len(want), m=MOBILE_LPM_MAX))
     path = map_path("mobile_lpm")
@@ -2348,7 +2546,8 @@ def nonmobile_refresh():
     """
     try:
         cfg = load_config()
-        if cfg["nonmobile_mbps"] <= 0 or not os.path.exists(map_path("config_map")):
+        if (cfg["nonmobile_mbps"] <= 0 and not cfg["nonmobile_block"]) \
+                or not os.path.exists(map_path("config_map")):
             return None
         return write_config_map(cfg, reread=True)
     except (Exception, SystemExit) as e:
@@ -2362,7 +2561,13 @@ def mobile_update():
     """
     global _MOBILE_IDX
     nets, failed, fails = [], [], 0
-    for op, asns in MOBILE_ASNS.items():
+    builtin = {a for asns in MOBILE_ASNS.values() for a in asns}
+    own = [a for a in mobile_extra_split(load_config()["mobile_extra"])[0]
+           if a not in builtin]
+    sources = list(MOBILE_ASNS.items())
+    if own:
+        sources.append((t("mob_custom"), own))
+    for op, asns in sources:
         for asn in asns:
             if fails >= MOBILE_MAX_FAILS:     # сети нет — не ждём остальных
                 failed.append(asn)
@@ -4976,6 +5181,57 @@ def cmd_owners(a):
     print(f"{C['grn']}✓ {t('own_set', ip=ip)}{C['r']}")
 
 
+def mobile_extra_change(action, value):
+    """
+    mobile add / del. Сети (CIDR) попадают в карту сразу, ASN запрашиваются у
+    RIPEstat: если сети нет, правка сохраняется, а `mobile update` повторяется
+    сторожем и вручную.
+    """
+    global _MOBILE_IDX
+    norm = mobile_extra_parse(value)
+    if norm is None:
+        die(t("mob_extra_bad", v=str(value)[:60]))
+    cfg = load_config()
+    extra = list(cfg["mobile_extra"])
+    if action == "add":
+        if norm in extra:
+            print(f"{C['gry']}{t('mob_extra_have', v=norm)}{C['r']}")
+            return
+        extra.append(norm)
+    else:
+        if norm not in extra:
+            die(t("mob_extra_missing", v=norm))
+        extra.remove(norm)
+    cfg["mobile_extra"] = extra
+    save_config(cfg)
+    log_event("config_changed", source="cli", message=f"mobile_{action}={norm}")
+    _MOBILE_IDX = None
+
+    done = f"{C['grn']}✓ {t('mob_extra_added' if action == 'add' else 'mob_extra_removed', v=norm)}{C['r']}"
+    if norm.startswith("AS"):
+        # Сети ASN приходят только из RIPEstat; без ответа ничего не теряем:
+        # прежний кеш остаётся, а `mobile update` можно повторить. При частичном
+        # отказе сети старого кеша сливаются с новыми, поэтому сети удалённого
+        # ASN остаются до следующего полного обновления — и говорим об этом.
+        try:
+            n, failed = mobile_update()
+            if failed and action == "del":
+                done = f"{C['yel']}✓ {t('mob_extra_removed_partial', v=norm)}{C['r']}"
+            print(done)
+            print(f"{C['grn']}✓ {t('mob_updated', n=n, bad=len(failed))}{C['r']}")
+        except Exception as e:
+            if action == "del":
+                done = f"{C['yel']}✓ {t('mob_extra_removed_partial', v=norm)}{C['r']}"
+            print(done)
+            print(f"{C['yel']}⚠ {e}{C['r']}")
+            print(f"{C['gry']}  {t('mob_extra_hint')}{C['r']}")
+    else:
+        print(done)
+    err = nonmobile_refresh()
+    if err:
+        print(f"{C['yel']}⚠ {t('nm_inactive', e=err)}{C['r']}")
+
+
 def cmd_mobile(a):
     """Кеш сетей мобильных операторов: update / status / lookup."""
     if a.action == "update":
@@ -4990,6 +5246,21 @@ def cmd_mobile(a):
         err = nonmobile_refresh()
         if err:
             print(f"{C['yel']}⚠ {t('nm_inactive', e=err)}{C['r']}")
+        return
+
+    if a.action in ("add", "del"):
+        mobile_extra_change(a.action, a.ip)
+        return
+
+    if a.action == "list":
+        extra = load_config()["mobile_extra"]
+        print(f"\n  {C['b']}{t('mob_extra_title')}{C['r']}")
+        if not extra:
+            print(f"  {C['gry']}{t('mob_extra_none')}{C['r']}")
+        for e in extra:
+            kind = t("mob_extra_asn") if e.startswith("AS") else t("mob_extra_net")
+            print(f"  {e:<42}{C['gry']}{kind}{C['r']}")
+        print()
         return
 
     if a.action == "lookup":
@@ -5019,21 +5290,49 @@ def cmd_mobile(a):
     print()
 
 
-def nonmobile_kernel_bps():
-    """Немобильная скорость, которая реально лежит в config_map, байт/с."""
+def _kernel_cfg_field(idx, name):
+    """Поле struct config (idx-е слово u64) из config_map в ядре."""
     for _k, v in map_dump("config_map"):
         b = _raw(v)
-        if b is not None and len(b) >= 16:
-            return struct.unpack("<2Q", b[:16])[1]
+        if b is not None and len(b) >= 8 * (idx + 1):
+            return struct.unpack_from("<Q", b, 8 * idx)[0]
         if isinstance(v, dict):
-            return _int(v.get("nonmobile_bytes_per_sec", 0))
+            return _int(v.get(name, 0))
     return 0
+
+
+def nonmobile_kernel_bps():
+    """Немобильная скорость, которая реально лежит в config_map, байт/с."""
+    return _kernel_cfg_field(1, "nonmobile_bytes_per_sec")
+
+
+def nonmobile_kernel_block():
+    """Блокировка немобильных, как она лежит в config_map: 0 или 1."""
+    return _kernel_cfg_field(2, "nonmobile_block")
 
 
 def cmd_nonmobile(a):
     """Немобильный лимит: on --speed N | off | status."""
     cfg = load_config()
     engine = os.path.exists(map_path("config_map"))
+
+    if a.action == "block":
+        mode = getattr(a, "arg", None)
+        if mode not in ("on", "off"):
+            die(t("nm_block_need_arg"))
+        if mode == "on" and 0 in cfg["ports"]:
+            die(t("nm_block_ports0"))
+        cfg["nonmobile_block"] = mode == "on"
+        save_config(cfg)
+        log_event("config_changed", source="cli",
+                  message=f"nonmobile_block={'on' if cfg['nonmobile_block'] else 'off'}")
+        err = write_config_map(cfg) if engine else None
+        print(f"{C['grn']}✓ {t('nm_block_saved_on' if cfg['nonmobile_block'] else 'nm_block_saved_off')}{C['r']}")
+        if not engine:
+            print(f"{C['gry']}  {t('nm_offline')}{C['r']}")
+        if err:
+            print(f"{C['yel']}⚠ {t('nm_inactive', e=err)}{C['r']}")
+        return
 
     if a.action in ("on", "off"):
         if a.action == "off":
@@ -5078,6 +5377,13 @@ def cmd_nonmobile(a):
     else:
         print(f"  {t('nm_kernel'):<18}: {C['yel']}{t('nm_not_active')}{C['r']}")
     print(f"  {t('nm_prefixes'):<18}: {n_map}")
+    if cfg["nonmobile_block"]:
+        blk = nonmobile_kernel_block() if engine else 0
+        print(f"  {t('nm_block_title'):<18}: {C['bred']}{t('nm_block_on')}{C['r']}"
+              + (f" · {C['grn']}{t('nm_block_active')}{C['r']}" if blk > 0
+                 else f" · {C['yel']}{t('nm_block_inactive')}{C['r']}"))
+    else:
+        print(f"  {t('nm_block_title'):<18}: {C['gry']}{t('nm_off')}{C['r']}")
     if data is None:
         print(f"  {t('nm_cache'):<18}: {C['gry']}{t('mob_nocache')}{C['r']}")
     else:
@@ -5750,12 +6056,13 @@ def build_parser():
     ow.set_defaults(func=cmd_owners)
 
     mo = sub.add_parser("mobile", help=t("h_mobile"))
-    mo.add_argument("action", choices=["update", "status", "lookup"])
+    mo.add_argument("action", choices=["update", "status", "lookup", "add", "del", "list"])
     mo.add_argument("ip", nargs="?", default="")
     mo.set_defaults(func=cmd_mobile)
 
     nmp = sub.add_parser("nonmobile", help=t("h_nonmobile"))
-    nmp.add_argument("action", choices=["on", "off", "status"])
+    nmp.add_argument("action", choices=["on", "off", "status", "block"])
+    nmp.add_argument("arg", nargs="?", default=None, help=t("h_nm_block_arg"))
     nmp.add_argument("--speed", type=float, default=None, help=t("h_nm_speed"))
     nmp.set_defaults(func=cmd_nonmobile)
 

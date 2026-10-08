@@ -13,6 +13,56 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.31
+
+**Non-mobile clients could only be limited, not cut off; the monitor showed 1000-6000% for them.**
+
+### Non-mobile block
+
+`shaper` menu -> [1] Configure limit -> [7] "Non-mobile block: on/off" (warning
+and y confirmation); `shaperctl.py nonmobile block on|off`; shown in `nonmobile
+status`, `show`, the menu header (🚫) and the monitor (✗). A client outside
+mobile networks gets no data on shaped ports: TCP segments with data and UDP are
+dropped, handshake packets without data pass - so clients behind a CDN/relay
+with PROXY protocol are blocked by their real address, not the relay's.
+Exceptions: whitelist, personal speed, 127.0.0.1/::1. The block takes priority
+over the non-mobile limit.
+
+Safeguards: not enabled without a loaded mobile network list; not enabled with a
+"port 0 = all ports" rule (it would cut the node's own SSH/DNS/updates), and
+`apply --ports 0` refuses while the block is on; at engine start the whitelist
+and personal speeds are applied before the block. It hits home internet and
+Wi-Fi, mobile Rostelecom, operators outside the list, foreign SIMs and roaming.
+
+### Accounting counts passed traffic only
+
+"Downloaded / now / avg / share" in `monitor` and `status`, metrics and the
+watchdog count only passed traffic (previously dropped packets too - for
+non-mobile clients the monitor showed 1000-6000% at a real 1 Mbit/s). Dropped
+traffic is shown separately, in the monitor as ✂ X Mbit/s. Blocked clients and
+scanners are not counted as "active".
+
+### Own networks in the mobile list
+
+`shaperctl.py mobile add AS12345 | 1.2.3.0/24`, `mobile del ...`, `mobile list`;
+"own" label; ASNs come from RIPEstat, subnets at once.
+
+BPF map value sizes changed (`config` 24 bytes, `user_state` 48): update the
+regular way (menu "Update" or `install.sh`), they restart the engine. On HAProxy
+nodes run `systemctl restart haproxy` after updating. `nonmobile_*` and
+`mobile_extra` are not carried by export/import and not editable via the API.
+
+### Checks
+
+BPF harness - 160 checks, program loaded by the kernel verifier in docker;
+`tests/nonmobile_tests.py` - 231; `tests/mobile_tests.py` - 83; `audit_shell` +
+menu [7] checks.
+
+Settings are kept on update: limit, ports, whitelist, penalties and the
+non-mobile limit stay as they were; the block is off by default.
+
+---
+
 ## 3.30
 
 **There was no way to restrict clients that are not on a mobile network.**

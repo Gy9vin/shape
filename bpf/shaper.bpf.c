@@ -15,7 +15,9 @@
  * Карты:
  *   config_map     : 0 -> struct config     (bytes_per_sec, 0 = выключено;
  *                                            nonmobile_bytes_per_sec, 0 = режим
- *                                            «немобильный лимит» выключен)
+ *                                            «немобильный лимит» выключен;
+ *                                            nonmobile_block, 1 = клиентов вне
+ *                                            мобильных сетей сбрасываем)
  *   mobile_lpm     : family+ip -> u8        (сети мобильных операторов; клиент
  *                                            вне них получает немобильную скорость)
  *   port_map       : port (u32) -> u8       (порт 0 = все порты)
@@ -78,11 +80,15 @@
 /* Допустимый всплеск на upload: 200 мс «в долг». */
 #define UL_BUCKET_NS   200000000ULL
 
-/* 16 байт: bytes_per_sec — общий лимит, nonmobile_bytes_per_sec — скорость
- * для клиентов вне сетей мобильных операторов (0 = режим выключен). */
+/* 24 байта: bytes_per_sec — общий лимит, nonmobile_bytes_per_sec — скорость
+ * для клиентов вне сетей мобильных операторов (0 = режим выключен),
+ * nonmobile_block — 0/1: такие клиенты не пропускаются вовсе. Блок приоритетнее
+ * немобильной скорости; белый список и штраф/персональная скорость сильнее
+ * обоих. */
 struct config {
     __u64 bytes_per_sec;
     __u64 nonmobile_bytes_per_sec;
+    __u64 nonmobile_block;
 };
 
 /* Ключ LPM-дерева сетей мобильных операторов. prefixlen считается от начала
@@ -109,7 +115,11 @@ struct penalty {
     __u64 until_ns;
 };
 
-/* 32 байта: last_departure_ns, total_bytes, last_seen_ns, packets
+/* 48 байт: last_departure_ns, total_bytes, last_seen_ns, packets,
+ * dropped_bytes, dropped_packets.
+ * total_bytes и packets — только то, что ПРОПУЩЕНО: монитор должен показывать
+ * реальную скорость клиента, а не попытки, которые мы срезали. Отброшенное
+ * (горизонт EDT, ведро upload, блокировка) считается отдельно.
  * packets нужен, чтобы посчитать средний размер пакета. В карте отдачи
  * это отделяет раздачу (полные пакеты 1200-1400 байт) от просмотра видео,
  * где вверх уходят только ACK по 60-80 байт. */
@@ -118,6 +128,8 @@ struct user_state {
     __u64 total_bytes;
     __u64 last_seen_ns;
     __u64 packets;
+    __u64 dropped_bytes;
+    __u64 dropped_packets;
 };
 
 struct {
@@ -309,6 +321,69 @@ static __always_inline int is_nonmobile(const struct ip_key *key)
     return bpf_map_lookup_elem(&mobile_lpm, &mk) == NULL;
 }
 
+/* Пакет пропущен: считаем его в статистику «клиент × порт» и в счётчики
+ * клиента. Ведётся и для белого списка: монитор должен показать, какой порт
+ * какую долю съедает, независимо от лимита. Отдельная карта портов нужна,
+ * чтобы ключ клиента в user_state остался общим на все порты — лимит
+ * по-прежнему один на адрес. st == NULL — первый пакет адреса: запись
+ * заводится здесь. */
+static __always_inline void count_pass(void *user_map, void *stat_map,
+                                       const struct port_stat_key *pk,
+                                       struct user_state *st,
+                                       const struct ip_key *key,
+                                       __u32 len, __u64 now)
+{
+    struct port_stat *ps = bpf_map_lookup_elem(stat_map, pk);
+    if (ps) {
+        __sync_fetch_and_add(&ps->bytes, len);
+        __sync_fetch_and_add(&ps->packets, 1);
+    } else {
+        struct port_stat fresh = {
+            .bytes   = len,
+            .packets = 1,
+        };
+        bpf_map_update_elem(stat_map, pk, &fresh, BPF_ANY);
+    }
+
+    if (st) {
+        __sync_fetch_and_add(&st->total_bytes, len);
+        __sync_fetch_and_add(&st->packets, 1);
+        st->last_seen_ns = now;
+    } else {
+        struct user_state fresh = {
+            .last_departure_ns = now,
+            .last_seen_ns      = now,
+            .total_bytes       = len,
+            .packets           = 1,
+        };
+        bpf_map_update_elem(user_map, key, &fresh, BPF_ANY);
+    }
+}
+
+/* Пакет сбрасывается: в total_bytes/packets и в статистику портов он не
+ * попадает, только в dropped_*. Запись клиента заводится и здесь — иначе
+ * заблокированный адрес не был бы виден в мониторе.
+ *
+ * last_seen_ns срезанным пакетом не обновляется (у новой записи он 0):
+ * «активный» адрес — тот, чей трафик проходит. Иначе заблокированные и
+ * сканеры попадали бы в «активных» в статусе, API и метриках. */
+static __always_inline void count_drop(void *user_map, struct user_state *st,
+                                       const struct ip_key *key,
+                                       __u32 len, __u64 now)
+{
+    if (st) {
+        __sync_fetch_and_add(&st->dropped_bytes, len);
+        __sync_fetch_and_add(&st->dropped_packets, 1);
+    } else {
+        struct user_state fresh = {
+            .last_departure_ns = now,
+            .dropped_bytes     = len,
+            .dropped_packets   = 1,
+        };
+        bpf_map_update_elem(user_map, key, &fresh, BPF_ANY);
+    }
+}
+
 /*
  * direction: 0 = download (egress, пакет ИДЁТ к пользователю  → ключ по daddr)
  *            1 = upload   (ingress, пакет ИДЁТ от пользователя → ключ по saddr)
@@ -348,6 +423,11 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     }
 
     struct ip_key key = {0};
+    /* Конец IP-пакета как смещение от начала кадра — по полю длины в самом
+     * IP-заголовке, а не по skb->len: на ingress кадр может быть длиннее
+     * пакета (паддинг Ethernet до 60 байт), и чистый ACK выглядел бы как
+     * сегмент с данными. */
+    __u32 ip_end = 0;
     __u16 sport = 0, dport = 0;
     __u8  proto = 0;
     void *l4 = 0;
@@ -355,6 +435,9 @@ static __always_inline int process_packet(struct __sk_buff *skb,
      * Такой пакет всё равно принадлежит клиенту, поэтому шейпим его, если
      * включено правило «все порты», и пропускаем, если правило по портам. */
     __u32 no_ports = 0;
+    /* TCP-сегмент без полезной нагрузки (SYN, SYN-ACK, чистый ACK, FIN, RST).
+     * 1 — есть данные или это не TCP; блок режет только такие пакеты. */
+    __u32 has_data = 1;
 
     if (eth_type == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = l3;
@@ -364,6 +447,7 @@ static __always_inline int process_packet(struct __sk_buff *skb,
             return TC_ACT_OK;
 
         key.addr[0] = (direction == 0) ? ip->daddr : ip->saddr;
+        ip_end = (__u32)((__u8 *)ip - (__u8 *)data) + bpf_ntohs(ip->tot_len);
         proto = ip->protocol;
         l4 = (void *)ip + (ip->ihl * 4);
 
@@ -384,6 +468,7 @@ static __always_inline int process_packet(struct __sk_buff *skb,
         else
             __builtin_memcpy(key.addr, ip6->saddr.in6_u.u6_addr32, 16);
 
+        ip_end = (__u32)((__u8 *)(ip6 + 1) - (__u8 *)data) + bpf_ntohs(ip6->payload_len);
         proto = ip6->nexthdr;
         l4 = (void *)(ip6 + 1);
 
@@ -432,7 +517,8 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     /* ── Скорость. Ноль = ограничение выключено ── */
     __u32 zero = 0;
     struct config *conf = bpf_map_lookup_elem(&config_map, &zero);
-    if (!conf || (conf->bytes_per_sec == 0 && conf->nonmobile_bytes_per_sec == 0))
+    if (!conf || (conf->bytes_per_sec == 0 && conf->nonmobile_bytes_per_sec == 0 &&
+                  conf->nonmobile_block == 0))
         return TC_ACT_OK;
 
     /* ── Порты ── */
@@ -444,6 +530,10 @@ static __always_inline int process_packet(struct __sk_buff *skb,
             return TC_ACT_OK;
         sport = bpf_ntohs(tcp->source);
         dport = bpf_ntohs(tcp->dest);
+        __u32 hdr_end = (__u32)((__u8 *)l4 - (__u8 *)data) +
+                        ((__u32)(((__u8 *)tcp)[12] >> 4) << 2);
+        if (ip_end <= hdr_end)
+            has_data = 0;
     } else if (proto == IPPROTO_UDP) {
         struct udphdr *udp = l4;
         if ((void *)(udp + 1) > data_end)
@@ -562,69 +652,76 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     __u64 now = bpf_ktime_get_ns();
     __u32 len = skb->len;
 
-    /* Статистика «клиент × порт». Ведётся и для белого списка: монитор
-     * должен показать, какой порт какую долю съедает, независимо от
-     * лимита. Отдельная карта, чтобы ключ клиента в user_state остался
-     * общим на все порты — лимит по-прежнему один на адрес. */
+    /* Ключ статистики «клиент × порт». Счётчики обновляются ниже, когда
+     * решение по пакету уже принято: срезанный пакет в них не попадает. */
     struct port_stat_key pk = {0};
     __builtin_memcpy(pk.addr, key.addr, sizeof(pk.addr));
     pk.port = key_port;
-    struct port_stat *ps = bpf_map_lookup_elem(stat_map, &pk);
-    if (ps) {
-        __sync_fetch_and_add(&ps->bytes, len);
-        __sync_fetch_and_add(&ps->packets, 1);
-    } else {
-        struct port_stat fresh = {
-            .bytes   = len,
-            .packets = 1,
-        };
-        bpf_map_update_elem(stat_map, &pk, &fresh, BPF_ANY);
-    }
 
     struct user_state *st = bpf_map_lookup_elem(user_map, &key);
-    if (!st) {
-        struct user_state fresh = {
-            .last_departure_ns = now,
-            .last_seen_ns      = now,
-            .total_bytes       = len,
-            .packets           = 1,
-        };
-        bpf_map_update_elem(user_map, &key, &fresh, BPF_ANY);
-        return TC_ACT_OK;   /* первый пакет пропускаем без задержки */
-    }
-
-    __sync_fetch_and_add(&st->total_bytes, len);
-    __sync_fetch_and_add(&st->packets, 1);
-    st->last_seen_ns = now;
 
     /* ── Белый список ──
-     * Проверяется здесь, а не в начале: счётчики адреса должны вестись в
-     * любом случае. Раньше проверка стояла до учёта, и адрес из белого
-     * списка исчезал отовсюду — из монитора, статистики и метрик. Понять,
+     * Проверяется после поиска записи, а не в начале: счётчики адреса должны
+     * вестись в любом случае. Раньше проверка стояла до учёта, и адрес из
+     * белого списка исчезал отовсюду — из монитора, статистики и метрик. Понять,
      * сколько канала он съедает, было нельзя вообще никак, хотя съедать он
      * может сколько угодно: лимит к нему не применяется.
      *
      * Теперь считаем всех, а ограничиваем не всех.
      */
-    if (bpf_map_lookup_elem(&whitelist_map, &key))
-        return TC_ACT_OK;
+    int wl = bpf_map_lookup_elem(&whitelist_map, &key) != NULL;
 
-    /* Порядок выбора скорости: белый список (выше) → штраф или персональная
-     * скорость → немобильный лимит → общий лимит. Просроченные записи
-     * штрафов вычищает сторож; здесь просто игнорируем их по времени. */
+    /* Порядок выбора: белый список → штраф или персональная скорость →
+     * вне мобильных сетей (блок, иначе немобильная скорость) → общий лимит.
+     * Просроченные записи штрафов вычищает сторож; здесь просто игнорируем
+     * их по времени. is_nonmobile вызывается не больше одного раза. */
     __u64 rate = conf->bytes_per_sec;
-    struct penalty *pen = bpf_map_lookup_elem(&penalty_map, &key);
-    if (pen && pen->rate_bytes_per_sec > 0 && now < pen->until_ns)
-        rate = pen->rate_bytes_per_sec;
-    else if (conf->nonmobile_bytes_per_sec > 0 && is_nonmobile(&key))
-        rate = conf->nonmobile_bytes_per_sec;
+    int block = 0;
+    if (!wl) {
+        struct penalty *pen = bpf_map_lookup_elem(&penalty_map, &key);
+        if (pen && pen->rate_bytes_per_sec > 0 && now < pen->until_ns) {
+            rate = pen->rate_bytes_per_sec;
+        } else if ((conf->nonmobile_block || conf->nonmobile_bytes_per_sec > 0) &&
+                   is_nonmobile(&key)) {
+            if (conf->nonmobile_block)
+                block = 1;
+            else
+                rate = conf->nonmobile_bytes_per_sec;
+        }
+    }
+
+    /* Рукопожатие и служебные сегменты блок не режет: за релеем CDN адрес
+     * клиента известен только из заголовка PROXY protocol, который приходит
+     * в первом сегменте с данными. Срежь мы SYN релея (его адрес не мобильный),
+     * заголовок не пришёл бы никогда и блокировался бы каждый клиент за CDN.
+     * Разбор PROXY выше уже подменил ключ на настоящий адрес клиента. Прямой
+     * немобильный клиент рукопожатие проходит, а первые данные (ClientHello)
+     * срезаются — блок работает. */
+    if (block && proto == IPPROTO_TCP && !has_data)
+        block = 0;
+
+    if (block) {
+        /* Блокируется и первый пакет адреса: запись заводится с dropped_*,
+         * чтобы адрес был виден в мониторе как заблокированный. */
+        count_drop(user_map, st, &key, len, now);
+        return TC_ACT_SHOT;
+    }
 
     /* Значение перечитано из карты, а не то, что проверяли в начале: между
      * проверкой и этой строкой лимит могли снять из userspace. Деление на
      * ноль в BPF даёт ноль, а не панику, но пакет тогда уехал бы с нулевой
-     * задержкой мимо всякого учёта — лучше честно пропустить. */
-    if (rate == 0)
+     * задержкой мимо всякого учёта — лучше честно пропустить.
+     * Первый пакет нового адреса тоже пропускаем без задержки. */
+    if (wl)
+        rate = 0;           /* белый список: считаем, но не ограничиваем */
+    if (rate == 0) {
+        count_pass(user_map, stat_map, &pk, st, &key, len, now);
         return TC_ACT_OK;
+    }
+    if (!st) {
+        count_pass(user_map, stat_map, &pk, st, &key, len, now);
+        return TC_ACT_OK;
+    }
 
     __u64 delay_ns  = ((__u64)len * 1000000000ULL) / rate;
     __u64 departure = st->last_departure_ns;
@@ -634,17 +731,22 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     if (direction == 0) {
         /* Download: сдвигаем время отправки, fq придержит пакет. */
         departure += delay_ns;
-        if (departure - now > EDT_HORIZON_NS)
+        if (departure - now > EDT_HORIZON_NS) {
+            count_drop(user_map, st, &key, len, now);
             return TC_ACT_SHOT;
+        }
         st->last_departure_ns = departure;
         skb->tstamp = departure;
     } else {
         /* Upload: ведро на 200 мс, переполнилось — дроп. */
-        if (departure - now > UL_BUCKET_NS)
+        if (departure - now > UL_BUCKET_NS) {
+            count_drop(user_map, st, &key, len, now);
             return TC_ACT_SHOT;
+        }
         st->last_departure_ns = departure + delay_ns;
     }
 
+    count_pass(user_map, stat_map, &pk, st, &key, len, now);
     return TC_ACT_OK;
 }
 
