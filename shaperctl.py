@@ -440,9 +440,7 @@ MSG = {
         "mob_count": "мобильных: {k} из {n} ({p:.0f}%)",
         "mob_speed_m": "мобильные", "mob_speed_o": "остальные",
         "mob_speed_lo": "без адреса (127.0.0.1)",
-        "mob_lo_hint": "↳ трафик на 127.0.0.1 — соединения HAProxy, открытые до запуска шейпера: "
-                       "настоящих адресов шейпер не видит, режет одним лимитом. "
-                       "Перезапусти HAProxy: systemctl restart haproxy",
+        "mob_lo_hint": "↳ 127.0.0.1 — соединения HAProxy старше шейпера: systemctl restart haproxy",
         "no_traffic": "трафика через шейпер ещё не было",
         "downloaded": "скачал", "uploaded": "отдал", "now": "сейчас",
         "more_ips": "… ещё {n} IP, полный список: shaperctl status --full",
@@ -784,9 +782,7 @@ MSG = {
         "mob_count": "mobile: {k} of {n} ({p:.0f}%)",
         "mob_speed_m": "mobile", "mob_speed_o": "other",
         "mob_speed_lo": "unattributed (127.0.0.1)",
-        "mob_lo_hint": "↳ traffic on 127.0.0.1 — HAProxy connections opened before the shaper started: "
-                       "the shaper cannot see their real addresses and limits them as one. "
-                       "Restart HAProxy: systemctl restart haproxy",
+        "mob_lo_hint": "↳ 127.0.0.1: HAProxy links predate the shaper — systemctl restart haproxy",
         "no_traffic": "no traffic through the shaper yet",
         "downloaded": "down", "uploaded": "up", "now": "now",
         "more_ips": "… {n} more IPs, full list: shaperctl status --full",
