@@ -1705,7 +1705,7 @@ def cmd_monitor(a):
                 out.append(f"   {t('mon_limit_row'):<16}{C['yel']}{t('mon_nolimit')}{C['r']}"
                            f"          {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
                            f" {t('mon_of')} {len(rows)}")
-            mob, mob_total, mob_ops = mobile_summary([r[0] for r in active])
+            mob, mob_total, mob_ops = mobile_summary([r[0] for r in rows])
             if mob_total and (mob or mobile_read() is not None):
                 out.append(f"   {C['b']}"
                            f"{t('mob_count', k=mob, n=mob_total, p=mob * 100 / mob_total)}"

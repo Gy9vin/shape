@@ -13,6 +13,15 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.27
+
+**In `monitor` the "mobile: K of N" summary counted only the addresses currently
+loading the channel.** With 15 active out of 519 it showed "9 of 14", which was
+easy to read as a share of all connections.
+
+The summary and the per-operator breakdown in `monitor` now count all addresses,
+as in `status`. Loopback is still excluded.
+
 ## 3.26
 
 **It was not visible what share of clients come from mobile operator networks.**
