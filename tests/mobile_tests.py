@@ -358,6 +358,15 @@ check("сводка: loopback не считается ни в K, ни в N", (mo
 check("сводка: разбивка по операторам", dict(ops) == {"МТС": 2, "Билайн": 1}, ops)
 check("сводка: пустой список", S.mobile_summary([]) [:2] == (0, 0))
 
+rows_sp = [("185.1.0.7", 10.0, 1.0, 0, 0, 0), ("185.2.0.1", 5.5, 0.5, 0, 0, 0),
+           ("8.8.4.4", 3.0, 0.25, 0, 0, 0), ("1.1.1.1", 0.0, 0.0, 0, 0, 0),
+           ("127.0.0.1", 99.0, 99.0, 0, 0, 0), ("::1", 99.0, 99.0, 0, 0, 0)]
+(m_dl, m_ul), (o_dl, o_ul) = S.mobile_speed(rows_sp)
+check("скорость: сумма по мобильным", (m_dl, m_ul) == (15.5, 1.5), (m_dl, m_ul))
+check("скорость: сумма по остальным, loopback не в счёт",
+      (o_dl, o_ul) == (3.0, 0.25), (o_dl, o_ul))
+check("скорость: пустой список — нули", S.mobile_speed([]) == ((0.0, 0.0), (0.0, 0.0)))
+
 plain_st = ANSI.sub("", run(S.cmd_status, st_args())[1])
 head = plain_st.splitlines()[1]
 check("status: в шапке «мобильных: 1 из 2 (50%)»",
@@ -384,6 +393,9 @@ check("monitor: «мобильных: 1 из 2 (50%)» в шапке",
 check("monitor: разбивка по операторам одной строкой",
       any("МТС 1" in l and "мобильных" not in l and "185.1.0.7" not in l
           for l in plain.splitlines()), plain)
+sp_ln = [l for l in plain.splitlines() if "мобильные ↓" in l]
+check("monitor: строка скорости мобильных и остальных",
+      bool(sp_ln) and "остальные ↓" in sp_ln[0] and "Mbit/s" in sp_ln[0], plain)
 drop_cache()
 plain = ANSI.sub("", mon_out())
 check("monitor без кеша: строк про мобильных нет", "мобильных" not in plain, plain)

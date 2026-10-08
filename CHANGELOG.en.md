@@ -13,6 +13,23 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.28
+
+**`monitor` did not show how much of the channel mobile clients take.** The
+"mobile K of N" summary counts addresses, not speed.
+
+Under the summary and the per-operator line there is now a line with the total
+current speed: `mobile ↓ 120.4 ↑ 8.1 · other ↓ 310.2 ↑ 22.0 Mbit/s`. All
+addresses are counted, not only the active ones; loopback (HAProxy on the node)
+is excluded. The line is shown wherever the summary is, i.e. when the network
+cache exists.
+
+`tests/mobile_tests.py` - 77 checks (+4): sums for mobile and other, loopback,
+empty input, the `monitor` line.
+
+An update does not touch settings: the limit, ports, whitelist and penalties
+stay as they were.
+
 ## 3.27
 
 **In `monitor` the "mobile: K of N" summary counted only the addresses currently

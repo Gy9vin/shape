@@ -438,6 +438,7 @@ MSG = {
         "limit": "Лимит", "no_limit": "не ограничено",
         "total_ips": "всего IP", "active_min": "активных за минуту",
         "mob_count": "мобильных: {k} из {n} ({p:.0f}%)",
+        "mob_speed_m": "мобильные", "mob_speed_o": "остальные",
         "no_traffic": "трафика через шейпер ещё не было",
         "downloaded": "скачал", "uploaded": "отдал", "now": "сейчас",
         "more_ips": "… ещё {n} IP, полный список: shaperctl status --full",
@@ -777,6 +778,7 @@ MSG = {
         "limit": "Limit", "no_limit": "unlimited",
         "total_ips": "total IPs", "active_min": "active in the last minute",
         "mob_count": "mobile: {k} of {n} ({p:.0f}%)",
+        "mob_speed_m": "mobile", "mob_speed_o": "other",
         "no_traffic": "no traffic through the shaper yet",
         "downloaded": "down", "uploaded": "up", "now": "now",
         "more_ips": "… {n} more IPs, full list: shaperctl status --full",
@@ -1714,6 +1716,9 @@ def cmd_monitor(a):
                     out.append(f"   {C['cyan']}"
                                + " · ".join(f"{o} {n}" for o, n in mob_ops.most_common(5))
                                + C['r'])
+                (m_dl, m_ul), (o_dl, o_ul) = mobile_speed(rows)
+                out.append(f"   {t('mob_speed_m')} ↓ {m_dl:.1f} ↑ {m_ul:.1f}"
+                           f" · {t('mob_speed_o')} ↓ {o_dl:.1f} ↑ {o_ul:.1f} Mbit/s")
             out.append(f"  {C['gry']}{'─' * width}{C['r']}")
             out.append(f"{C['gry']}   {'IP':<21}{t('now'):>8}{t('mon_up'):>8}"
                        f"{t('mon_pkt'):>7}{t('mon_avg'):>8}{t('mon_hold'):>7}"
@@ -2126,6 +2131,21 @@ def mobile_summary(ips):
             mob += 1
             ops[op] += 1
     return mob, total, ops
+
+
+def mobile_speed(rows):
+    """((мобильные ↓, ↑), (остальные ↓, ↑)) в Mbit/s по строкам monitor; loopback пропускается."""
+    mob, oth = [0.0, 0.0], [0.0, 0.0]
+    for r in rows:
+        try:
+            if ipaddress.ip_address(str(r[0]).strip()).is_loopback:
+                continue
+        except ValueError:
+            pass
+        acc = mob if mobile_of(r[0]) else oth
+        acc[0] += r[1]
+        acc[1] += r[2]
+    return tuple(mob), tuple(oth)
 
 
 def mobile_fetch_asn(asn):
