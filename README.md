@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.25-8ECA43?style=flat-square" alt="версия"></a>
+  <a href="#установка"><img src="https://img.shields.io/badge/версия-3.26-8ECA43?style=flat-square" alt="версия"></a>
   <img src="https://img.shields.io/badge/ядро-Linux%205.4+-8ECA43?style=flat-square" alt="ядро">
   <img src="https://img.shields.io/badge/язык-ru%20%7C%20en-8ECA43?style=flat-square" alt="языки">
   <img src="https://img.shields.io/badge/лицензия-GPL--2.0-8ECA43?style=flat-square" alt="лицензия">
@@ -13,7 +13,7 @@
   <b>Русский</b> · <a href="README.en.md">English</a>
 </p>
 
-# Shape v3.25
+# Shape v3.26
 
 Ограничитель скорости по IP-адресу для VPN-нод. eBPF + EDT.
 
@@ -203,7 +203,9 @@ shaperctl.py mobile lookup 85.26.0.1
 ```
 
 Нет файла или он битый — метки просто не показываются. В `status --json`
-поле `mobile` — название оператора или `null`.
+поле `mobile` — название оператора или `null`. В шапке `status` и `monitor`
+есть сводка «мобильных: K из N (P%)» и разбивка по операторам; считаются
+IP-адреса, а не люди (за CGNAT их может быть много), loopback не в счёт.
 
 ### Почему «сейчас» бывает выше лимита
 

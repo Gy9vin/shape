@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.25-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.26-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.25
+# Shape v3.26
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -194,7 +194,9 @@ shaperctl.py mobile lookup 85.26.0.1
 ```
 
 No file or a broken one — the tags are simply not shown. In `status --json`
-the `mobile` field is the operator name or `null`.
+the `mobile` field is the operator name or `null`. The `status` and `monitor`
+headers show a "mobile: K of N (P%)" summary and a per-operator breakdown; IP
+addresses are counted, not people (many can sit behind CGNAT), loopback is skipped.
 
 ### Why "now" sometimes exceeds the limit
 

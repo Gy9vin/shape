@@ -10,6 +10,7 @@ import argparse
 import base64
 import bisect
 import calendar
+import collections
 import contextlib
 import fcntl
 import hashlib
@@ -436,6 +437,7 @@ MSG = {
         "restored": "лимит {s:g} Мбит/с на портах {p}",
         "limit": "Лимит", "no_limit": "не ограничено",
         "total_ips": "всего IP", "active_min": "активных за минуту",
+        "mob_count": "мобильных: {k} из {n} ({p:.0f}%)",
         "no_traffic": "трафика через шейпер ещё не было",
         "downloaded": "скачал", "uploaded": "отдал", "now": "сейчас",
         "more_ips": "… ещё {n} IP, полный список: shaperctl status --full",
@@ -774,6 +776,7 @@ MSG = {
         "restored": "limit {s:g} Mbit/s on ports {p}",
         "limit": "Limit", "no_limit": "unlimited",
         "total_ips": "total IPs", "active_min": "active in the last minute",
+        "mob_count": "mobile: {k} of {n} ({p:.0f}%)",
         "no_traffic": "no traffic through the shaper yet",
         "downloaded": "down", "uploaded": "up", "now": "now",
         "more_ips": "… {n} more IPs, full list: shaperctl status --full",
@@ -1480,8 +1483,11 @@ def cmd_status(a):
     limit = (f"{cfg['speed_mbps']:g} Mbit/s" if cfg["speed_mbps"] > 0
              else t("no_limit"))
     ports = ", ".join(map(str, cfg["ports"])) if cfg["ports"] != [0] else t("all_ports")
+    mob, mob_total, _ = mobile_summary([x[0] for x in rows])
+    mob_part = (f" · {t('mob_count', k=mob, n=mob_total, p=mob * 100 / mob_total)}"
+                if mob_total and (mob or mobile_read() is not None) else "")
     print(f"\n  {t('limit')} {C['b']}{limit}{C['r']} · {t('ports').lower()} {ports} · "
-          f"{t('total_ips')}: {len(rows)} · {t('active_min')}: {len(active)}")
+          f"{t('total_ips')}: {len(rows)} · {t('active_min')}: {len(active)}{mob_part}")
     print("  " + "─" * 70)
 
     if not rows:
@@ -1699,6 +1705,15 @@ def cmd_monitor(a):
                 out.append(f"   {t('mon_limit_row'):<16}{C['yel']}{t('mon_nolimit')}{C['r']}"
                            f"          {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
                            f" {t('mon_of')} {len(rows)}")
+            mob, mob_total, mob_ops = mobile_summary([r[0] for r in active])
+            if mob_total and (mob or mobile_read() is not None):
+                out.append(f"   {C['b']}"
+                           f"{t('mob_count', k=mob, n=mob_total, p=mob * 100 / mob_total)}"
+                           f"{C['r']}")
+                if mob_ops:
+                    out.append(f"   {C['cyan']}"
+                               + " · ".join(f"{o} {n}" for o, n in mob_ops.most_common(5))
+                               + C['r'])
             out.append(f"  {C['gry']}{'─' * width}{C['r']}")
             out.append(f"{C['gry']}   {'IP':<21}{t('now'):>8}{t('mon_up'):>8}"
                        f"{t('mon_pkt'):>7}{t('mon_avg'):>8}{t('mon_hold'):>7}"
@@ -2094,6 +2109,23 @@ def mobile_of(ip):
     except Exception:
         pass
     return None
+
+
+def mobile_summary(ips):
+    """(из мобильных сетей, всего, Counter по операторам); loopback — это HAProxy на ноде."""
+    mob, total, ops = 0, 0, collections.Counter()
+    for ip in ips:
+        try:
+            if ipaddress.ip_address(str(ip).strip()).is_loopback:
+                continue
+        except ValueError:
+            pass
+        total += 1
+        op = mobile_of(ip)
+        if op:
+            mob += 1
+            ops[op] += 1
+    return mob, total, ops
 
 
 def mobile_fetch_asn(asn):

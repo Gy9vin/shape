@@ -13,6 +13,27 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.26
+
+**It was not visible what share of clients come from mobile operator networks.**
+
+### "Mobile K of N" summary
+
+The `shaperctl.py status` header gains " · mobile: K of N (P%)", and `monitor`
+shows the same summary under the limit line plus a per-operator breakdown line
+(up to five, descending). Loopback (127.0.0.0/8, `::1` - HAProxy on the node)
+is not counted; without the network cache the lines are not shown. IP
+addresses are counted, not people: many subscribers can sit behind one CGNAT
+address. `status --json` is unchanged.
+
+### Checks
+
+`tests/mobile_tests.py` - 73 checks (+13): the summary, operator order and
+cap, loopback, missing cache.
+
+An update does not touch settings: the limit, ports, whitelist and penalties
+stay as they were.
+
 ## 3.25
 
 **The monitor did not show which ports a client uses, or whether the client

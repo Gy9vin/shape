@@ -350,5 +350,60 @@ m2 = [l for l in plain.splitlines() if "8.8.4.4" in l]
 check("monitor: метка у мобильного адреса", m1 and "МТС" in m1[0], plain)
 check("monitor: у обычного метки нет", m2 and "МТС" not in m2[0])
 
+print("\n\033[1m10. Сводка «мобильных: K из N»\033[0m")
+write_cache([["185.1.0.0/24", "МТС"], ["185.2.0.0/24", "Билайн"]])
+mob, tot, ops = S.mobile_summary(["185.1.0.7", "185.1.0.8", "185.2.0.1", "8.8.4.4",
+                                  "127.0.0.1", "::1", "127.9.9.9"])
+check("сводка: loopback не считается ни в K, ни в N", (mob, tot) == (3, 4), (mob, tot))
+check("сводка: разбивка по операторам", dict(ops) == {"МТС": 2, "Билайн": 1}, ops)
+check("сводка: пустой список", S.mobile_summary([]) [:2] == (0, 0))
+
+plain_st = ANSI.sub("", run(S.cmd_status, st_args())[1])
+head = plain_st.splitlines()[1]
+check("status: в шапке «мобильных: 1 из 2 (50%)»",
+      "всего IP: 2" in head and "мобильных: 1 из 2 (50%)" in head, head)
+check("status: счётчик идёт после «активных за минуту»",
+      head.index("активных за минуту") < head.index("мобильных"), head)
+check("JSON status: по-прежнему список без сводки",
+      isinstance(json.loads(run(S.cmd_status, st_args(json=True))[1]), list))
+
+USERS["127.0.0.1"] = {"down": 9_000_000, "up": 9_000_000, "up_pkts": 9, "seen": 0}
+head = ANSI.sub("", run(S.cmd_status, st_args())[1]).splitlines()[1]
+check("status: loopback не попадает в мобильных/N, но есть в «всего IP»",
+      "всего IP: 3" in head and "мобильных: 1 из 2 (50%)" in head, head)
+del USERS["127.0.0.1"]
+
+drop_cache()
+head = ANSI.sub("", run(S.cmd_status, st_args())[1]).splitlines()[1]
+check("status без кеша: части про мобильных нет", "мобильных" not in head, head)
+write_cache([["185.1.0.0/24", "МТС"]])
+
+plain = ANSI.sub("", mon_out())
+check("monitor: «мобильных: 1 из 2 (50%)» в шапке",
+      any("мобильных: 1 из 2 (50%)" in l for l in plain.splitlines()), plain)
+check("monitor: разбивка по операторам одной строкой",
+      any("МТС 1" in l and "мобильных" not in l and "185.1.0.7" not in l
+          for l in plain.splitlines()), plain)
+drop_cache()
+plain = ANSI.sub("", mon_out())
+check("monitor без кеша: строк про мобильных нет", "мобильных" not in plain, plain)
+write_cache([["185.1.0.0/24", "МТС"]])
+
+saved_users = dict(USERS)
+USERS.clear()
+for i in range(1, 8):
+    for k in range(8 - i):          # Оп1 — 7 адресов, Оп2 — 6, ... Оп7 — 1
+        USERS[f"10.{i}.0.{k + 1}"] = {"down": 1_000_000, "up": 1_000, "up_pkts": 1, "seen": 0}
+USERS["8.8.4.4"] = {"down": 1_000_000, "up": 1_000, "up_pkts": 1, "seen": 0}
+write_cache([[f"10.{i}.0.0/16", f"Оп{i}"] for i in range(1, 8)])
+plain = ANSI.sub("", mon_out())
+ops_ln = [l.strip() for l in plain.splitlines() if "Оп1 7" in l and "10.1.0" not in l]
+check("разбивка: не больше 5 операторов, по убыванию",
+      bool(ops_ln) and ops_ln[0] == "Оп1 7 · Оп2 6 · Оп3 5 · Оп4 4 · Оп5 3", ops_ln)
+check("разбивка: счётчик учитывает всех, а не только показанных",
+      any("мобильных: 28 из 29" in l for l in plain.splitlines()), plain)
+USERS.clear()
+USERS.update(saved_users)
+
 print(f"\n\033[1mИтог: {ok} пройдено, {fail} провалено\033[0m")
 sys.exit(1 if fail else 0)
