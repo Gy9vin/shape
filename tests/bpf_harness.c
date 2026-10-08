@@ -36,6 +36,7 @@ static int pull_fail = 0;       /* 1 = хелпер возвращает оши�
 #define bpf_htons(x) __builtin_bswap16(x)
 #define bpf_ntohs(x) __builtin_bswap16(x)
 #define bpf_htonl(x) __builtin_bswap32(x)
+#define bpf_ntohl(x) __builtin_bswap32(x)
 #ifndef __always_inline
 #define __always_inline inline __attribute__((always_inline))
 #endif
@@ -48,12 +49,35 @@ static struct ent table[4096];
 static int keysize(void *m) {
     if (m == (void *)&config_map || m == (void *)&port_map) return 4;
     if (m == (void *)&pp_conn_map) return sizeof(struct pp_key);
+    if (m == (void *)&mobile_lpm) return sizeof(struct mobile_key);
     if (m == (void *)&port_stat_map_down || m == (void *)&port_stat_map_up)
         return sizeof(struct port_stat_key);
     return 16;
 }
+/* LPM-дерево: линейный поиск самого длинного префикса. prefixlen считается
+ * от начала данных, то есть от слова family — как в ядре. */
+static int lpm_bits_match(const unsigned char *a, const unsigned char *b, unsigned bits) {
+    unsigned full = bits / 8, rem = bits % 8;
+    if (memcmp(a, b, full)) return 0;
+    if (rem && ((a[full] ^ b[full]) & (0xFF << (8 - rem)) & 0xFF)) return 0;
+    return 1;
+}
 void *bpf_map_lookup_elem(void *map, const void *key) {
     int ks = keysize(map);
+    if (map == (void *)&mobile_lpm) {
+        const struct mobile_key *q = key;
+        void *best = NULL; long best_pl = -1;
+        for (int i = 0; i < 4096; i++) {
+            if (!table[i].used || table[i].map != map) continue;
+            const struct mobile_key *e = (const struct mobile_key *)table[i].key;
+            if (e->prefixlen > q->prefixlen || (long)e->prefixlen <= best_pl) continue;
+            if (lpm_bits_match((const unsigned char *)&e->family,
+                               (const unsigned char *)&q->family, e->prefixlen)) {
+                best = table[i].val; best_pl = e->prefixlen;
+            }
+        }
+        return best;
+    }
     for (int i = 0; i < 4096; i++)
         if (table[i].used && table[i].map == map && !memcmp(table[i].key, key, ks))
             return table[i].val;
@@ -169,6 +193,23 @@ static int build_v6_ext(int n_ext, unsigned sport, unsigned dport, int payload)
     p[0] = sport >> 8; p[1] = sport & 0xFF;
     p[2] = dport >> 8; p[3] = dport & 0xFF;
     return (int)(p - pkt) + 20 + payload;
+}
+
+/* IPv6 с произвольным адресом клиента (daddr) */
+static int build_v6_addr(const unsigned char a[16], unsigned sport,
+                         unsigned dport, int payload)
+{
+    memset(pkt, 0, 2048);
+    pkt[12] = 0x86; pkt[13] = 0xDD;
+    struct ipv6hdr *ip6 = (struct ipv6hdr *)(pkt + 14);
+    ip6->version = 6;
+    memcpy(&ip6->daddr, a, 16);
+    memcpy(&ip6->saddr, a, 16);
+    ip6->nexthdr = IPPROTO_TCP;
+    unsigned char *p = pkt + 14 + 40;
+    p[0] = sport >> 8; p[1] = sport & 0xFF;
+    p[2] = dport >> 8; p[3] = dport & 0xFF;
+    return 14 + 40 + 20 + payload;
 }
 
 /* IPIP: наружный IPv4 с protocol 4, внутри обычный IPv4+L4.
@@ -826,6 +867,123 @@ int main(void)
     check("белый список: по портам считается, но не тормозится",
           bpf_map_lookup_elem(&port_stat_map_down, &pw11) != NULL && skb.tstamp == 0);
     bpf_map_delete_elem(&whitelist_map, &kw11);
+
+
+    /* ── Немобильный лимит ──
+     * Клиенты вне сетей мобильных операторов получают отдельную скорость.
+     * Сети лежат в LPM-дереве mobile_lpm; v4 и v6 различаются словом family. */
+    printf("\n\033[1m13. Немобильный лимит\033[0m\n");
+    {
+        struct config on  = { .bytes_per_sec = 10 * 125000,
+                              .nonmobile_bytes_per_sec = 1 * 125000 };
+        struct config on0 = { .bytes_per_sec = 0,
+                              .nonmobile_bytes_per_sec = 1 * 125000 };
+        /* 1.2.3.0/24 мобильная, v6 2001:db8::/32 мобильная */
+        struct mobile_key m4 = { .prefixlen = 32 + 24, .family = 4 };
+        m4.addr[0] = 0x00030201;                        /* 1.2.3.0 */
+        struct mobile_key m6 = { .prefixlen = 32 + 32, .family = 6 };
+        m6.addr[0] = 0xB80D0120;                        /* 2001:0db8:: */
+        map_put(&mobile_lpm, &m4, &one);
+        map_put(&mobile_lpm, &m6, &one);
+
+        unsigned MOB4 = 0x04030201, NON4 = 0x08070605;  /* 1.2.3.4 / 5.6.7.8 */
+        unsigned char mob6[16] = {0x20,0x01,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,0x42};
+        unsigned char non6[16] = {0x2a,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,0x07};
+        unsigned char lo6[16]  = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+        /* первые 32 бита как у v4-клиента 1.2.3.4, но это IPv6 */
+        unsigned char clash6[16] = {0x01,0x02,0x03,0x04,0,0,0,0,0,0,0,0,0,0,0,1};
+        unsigned long long d;
+
+        /* Шаг задержки между вторым и третьим пакетом клиента. */
+        #define STEP4(ADDR) ({ int l_ = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, (ADDR), SERVER); \
+                               run_pkt(l_, 0); run_pkt(l_, 0); unsigned long long a_ = skb.tstamp; \
+                               run_pkt(l_, 0); skb.tstamp - a_; })
+        #define STEP6(A16) ({ int l_ = build_v6_addr((A16), 443, 51000, 1400); \
+                              run_pkt(l_, 0); run_pkt(l_, 0); unsigned long long a_ = skb.tstamp; \
+                              run_pkt(l_, 0); skb.tstamp - a_; })
+        #define IS_GENERAL(d) ((d) > 1000000 && (d) < 1400000)   /* ~1.16 мс на 10 Мбит/с */
+        #define IS_NONMOB(d)  ((d) > 11000000 && (d) < 12300000) /* ~11.6 мс на 1 Мбит/с */
+
+        map_put(&config_map, &zero, &cfg);               /* режим выключен */
+        d = STEP4(NON4);
+        check("режим выключен: чужой адрес идёт по общему лимиту", IS_GENERAL(d));
+
+        map_put(&config_map, &zero, &on);
+        d = STEP4(MOB4);
+        check("режим включён: адрес из мобильной сети v4 — общий лимит", IS_GENERAL(d));
+        d = STEP4(NON4 + 0x100);
+        check("режим включён: промах в mobile_lpm v4 — немобильный лимит", IS_NONMOB(d));
+        d = STEP6(mob6);
+        check("режим включён: адрес из мобильной сети v6 — общий лимит", IS_GENERAL(d));
+        d = STEP6(non6);
+        check("режим включён: промах в mobile_lpm v6 — немобильный лимит", IS_NONMOB(d));
+
+        d = STEP4(0x0500007F);                           /* 127.0.0.5 */
+        check("loopback v4 не считается немобильным", IS_GENERAL(d));
+        d = STEP6(lo6);
+        check("loopback v6 (::1) не считается немобильным", IS_GENERAL(d));
+
+        d = STEP6(clash6);
+        check("v6 с теми же первыми 32 битами, что у мобильного v4, — не мобильный",
+              IS_NONMOB(d));
+        /* и наоборот: в дереве только v6-сеть 0102:0300::/24, v4 1.2.3.4 в неё не попадает */
+        bpf_map_delete_elem(&mobile_lpm, &m4);
+        struct mobile_key m6b = { .prefixlen = 32 + 24, .family = 6 };
+        m6b.addr[0] = 0x00030201;
+        map_put(&mobile_lpm, &m6b, &one);
+        d = STEP4(0x04030202);
+        check("v4 1.2.3.x не попадает в v6-сеть с теми же байтами", IS_NONMOB(d));
+        d = STEP6(clash6);
+        check("а v6-адрес в этой v6-сети — мобильный", IS_GENERAL(d));
+        bpf_map_delete_elem(&mobile_lpm, &m6b);
+        map_put(&mobile_lpm, &m4, &one);
+
+        /* белый список важнее всего */
+        struct ip_key kwm = {0}; kwm.addr[0] = 0x0A090807;
+        map_put(&whitelist_map, &kwm, &one);
+        int lw = build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x0A090807, SERVER);
+        run_pkt(lw, 0); run_pkt(lw, 0);
+        check("белый список: немобильный лимит не применяется", skb.tstamp == 0);
+        bpf_map_delete_elem(&whitelist_map, &kwm);
+
+        /* штраф и персональная скорость приоритетнее немобильного лимита */
+        struct penalty pn = { .rate_bytes_per_sec = 2 * 125000,
+                              .until_ns = fake_now + 60000000000ULL };
+        struct ip_key kpn = {0}; kpn.addr[0] = 0x0B090807;
+        map_put(&penalty_map, &kpn, &pn);
+        d = STEP4(0x0B090807);
+        check("штраф приоритетнее немобильного лимита (~5.8 мс на 2 Мбит/с)",
+              d > 5300000 && d < 6300000);
+        bpf_map_delete_elem(&penalty_map, &kpn);
+
+        /* просроченный штраф на немобильном адресе — снова немобильный лимит */
+        pn.until_ns = fake_now - 1;
+        struct ip_key kpe = {0}; kpe.addr[0] = 0x0C090807;
+        map_put(&penalty_map, &kpe, &pn);
+        d = STEP4(0x0C090807);
+        check("просроченный штраф: действует немобильный лимит", IS_NONMOB(d));
+        bpf_map_delete_elem(&penalty_map, &kpe);
+
+        /* общий лимит 0 + режим включён: немобильный работает */
+        map_put(&config_map, &zero, &on0);
+        d = STEP4(0x0D090807);
+        check("общий лимит 0, режим включён: немобильный лимит работает", IS_NONMOB(d));
+        d = STEP4(MOB4 + 0x01000000);
+        check("общий лимит 0: мобильный адрес идёт без лимита", skb.tstamp == 0);
+        d = STEP4(0x0600007F);
+        check("общий лимит 0: loopback идёт без лимита", skb.tstamp == 0);
+
+        /* всё выключено: ранний выход как раньше, адрес даже не учитывается */
+        struct config alloff = {0};
+        map_put(&config_map, &zero, &alloff);
+        struct ip_key kao = {0}; kao.addr[0] = 0x0E090807;
+        run_pkt(build_v4(IPPROTO_TCP, 443, 51000, 0, 1400, 0x0E090807, SERVER), 0);
+        check("оба лимита выключены: пакет мимо учёта",
+              bpf_map_lookup_elem(&user_state_map_down, &kao) == NULL);
+
+        map_put(&config_map, &zero, &cfg);
+        (void)d;
+    }
 
     printf("\n\033[1mИтог: %d пройдено, %d провалено\033[0m\n", ok, fail);
     return fail ? 1 : 0;

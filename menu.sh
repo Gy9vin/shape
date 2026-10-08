@@ -90,7 +90,7 @@ screen_lang() {
 # Все значения читаются одним вызовом python: экран перерисовывается часто,
 # плодить по семь процессов на кадр незачем. Разделитель — вертикальная черта.
 read_state() {
-    python3 - <<'PY' 2>/dev/null || echo "0|?|0|50|15|10|1|60|3|50|0"
+    python3 - <<'PY' 2>/dev/null || echo "0|?|0|50|15|10|1|60|3|50|0|0"
 import json
 try:
     c = json.load(open("/etc/shaper/config.json"))
@@ -110,12 +110,16 @@ print("|".join([
     f"{g['both_ways_min']:g}",
     f"{g['penalty_mbps']:g}", f"{g['penalty_min']:g}", f"{g['score_needed']:g}",
     f"{g['download_gb_per_day']:g}", f"{g['download_gb_per_hour']:g}",
+    f"{float(c.get('nonmobile_mbps', 0) or 0):g}",
 ]))
 PY
 }
 
+# Включён ли немобильный лимит (скорость в конфиге больше нуля).
+nm_on() { awk -v v="$(cfg nonmobile_mbps 0)" 'BEGIN { exit !(v + 0 > 0) }'; }
+
 status_line() {
-    local ifc speed ports g_on bdl bul bmin pen dur score dgb dgbh dlv ulv vol
+    local ifc speed ports g_on bdl bul bmin pen dur score dgb dgbh nm dlv ulv vol
     local auto_on=0 run_on=0
 
     "$ENGINE" state >/dev/null 2>&1 && run_on=1
@@ -125,7 +129,7 @@ status_line() {
     [[ -z "$ifc" ]] && ifc="$(ip route get 1.1.1.1 2>/dev/null |
                               sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
 
-    IFS='|' read -r speed ports g_on bdl bul bmin pen dur score dgb dgbh \
+    IFS='|' read -r speed ports g_on bdl bul bmin pen dur score dgb dgbh nm \
         <<< "$(read_state)"
     [[ "$ports" == "*" ]] && ports="${T[st_all]}"
 
@@ -138,6 +142,11 @@ status_line() {
     # Шейпер на lo — значит включён режим HAProxy на этой же ноде.
     if (( run_on )) && [[ " $ifc " == *" lo "* ]]; then
         echo -e "  🔀  ${T[st_haproxy]} ${G}${T[st_g_on]}${N}   ${D}${T[st_haproxy_d]}${N}"
+    fi
+
+    # Немобильный лимит: скорость для клиентов вне сетей мобильных операторов.
+    if awk -v v="${nm:-0}" 'BEGIN { exit !(v + 0 > 0) }'; then
+        echo -e "  🐢  ${T[st_nm]} ${G}${nm} Mbit/s${N}   ${D}${T[st_nm_d]}${N}"
     fi
 
     if (( auto_on )); then
@@ -188,6 +197,29 @@ show_listening() {
     ' | sort -n | head -12
 }
 
+# Немобильный лимит: включить со скоростью или выключить. Вся логика — в
+# `shaperctl.py nonmobile`, меню только спрашивает.
+screen_nonmobile() {
+    local nmspeed ans
+    echo
+    if nm_on; then
+        read -rp "  ${T[nm_off_q]}: " ans
+        [[ "$ans" =~ ^[NnНн] ]] && { echo "  ${T[cancelled]}"; pause; return; }
+        "$CTL" nonmobile off
+    else
+        echo -e "  ${D}${T[nm_h1]}${N}"
+        echo -e "  ${D}${T[nm_h2]}${N}"
+        nmspeed="$(ask "${T[nm_ask]}" 1)"
+        if ! [[ "$nmspeed" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v v="$nmspeed" 'BEGIN { exit !(v + 0 > 0) }'; then
+            echo -e "  ${R}${T[need_num]}${N}"; pause; return
+        fi
+        read -rp "  ${T[apply_q]}: " ans
+        [[ "$ans" =~ ^[NnНн] ]] && { echo "  ${T[cancelled]}"; pause; return; }
+        "$CTL" nonmobile on --speed "$nmspeed"
+    fi
+    pause
+}
+
 screen_limit() {
     local speed port cur_port ans
     cur_port="$(python3 -c "
@@ -205,6 +237,12 @@ print(','.join(map(str, p)))" 2>/dev/null || echo 443)"
     echo -e "  ${B}[3]${N}  20 Mbit/s   ${D}${T[lim_d20]}${N}"
     echo -e "  ${B}[4]${N}  ${T[lim_own]}"
     echo -e "  ${B}[5]${N}  ${T[lim_off]}"
+    if nm_on; then
+        echo -e "  ${B}[6]${N}  ${T[nm_item]} ${G}$(awk -v v="$(cfg nonmobile_mbps 0)" 'BEGIN { printf "%g", v + 0 }') Mbit/s${N} ${D}${T[nm_to_off]}${N}"
+    else
+        echo -e "  ${B}[6]${N}  ${T[nm_item]} ${D}${T[g_off]}${N} ${D}${T[nm_to_on]}${N}"
+    fi
+    echo -e "  ${D}${T[nm_h1]}${N}"
     echo -e "  ${B}[0]${N}  ${T[cancel]}"
     echo
 
@@ -216,6 +254,7 @@ print(','.join(map(str, p)))" 2>/dev/null || echo 443)"
            [[ "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
                echo -e "  ${R}${T[need_num]}${N}"; pause; return; } ;;
         5) speed=0 ;;
+        6) screen_nonmobile; return ;;
         *) return ;;
     esac
 

@@ -249,5 +249,21 @@ check "в меню есть экран режима HAProxy в Сервисе" \
 check "меню делает всё через shaperctl, а не правит IFACE само" \
       'grep -q "\"\$CTL\" haproxy on" "$SRC/menu.sh" && ! grep -q "conf_set IFACE" "$SRC/menu.sh"'
 
+echo -e "\n${B}Немобильный лимит в меню${N}"
+check "пункт [6] на экране лимита ведёт в screen_nonmobile" \
+      'sed -n "/^screen_limit()/,/^}/p" "$SRC/menu.sh" | grep -qE "^ *6\) screen_nonmobile; return ;;"'
+check "меню включает и выключает режим только через shaperctl" \
+      'grep -q "\"\$CTL\" nonmobile on --speed" "$SRC/menu.sh" && grep -q "\"\$CTL\" nonmobile off" "$SRC/menu.sh"'
+check "скорость по умолчанию при включении — 1" \
+      'grep -q "ask \"\${T\[nm_ask\]}\" 1" "$SRC/menu.sh"'
+check "режим не вынесен в Сервис и не добавлен отдельным экраном главного меню" \
+      '! sed -n "/^screen_service()/,/^}/p" "$SRC/menu.sh" | grep -q nonmobile'
+check "скорость немобильного лимита на экране выводится через %g, а не сырым числом" \
+      '! grep -q "\$(cfg nonmobile_mbps 0) Mbit/s" "$SRC/menu.sh"'
+for k in st_nm st_nm_d nm_item nm_to_on nm_to_off nm_h1 nm_h2 nm_ask nm_off_q; do
+    check "ключ lang.sh $k есть в обоих языках" \
+          '[[ "$(grep -c "^ *\[$k\]=" "$SRC/lang.sh")" == 2 ]]'
+done
+
 echo -e "\n${B}Итог: $ok пройдено, $fail провалено${N}"
 [[ $fail -eq 0 ]]

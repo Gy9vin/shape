@@ -13,6 +13,47 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.30
+
+**There was no way to restrict clients that are not on a mobile network.**
+Home-network and Wi-Fi clients were indistinguishable from mobile ones.
+
+### Non-mobile limit
+
+Clients whose IP is not in a mobile operator network (`MOBILE_ASNS`, prefixes
+from RIPEstat in `/var/lib/shape/mobile_nets.json`) get a separate speed, e.g.
+1 Mbit/s, both ways, on shaped ports only and from the first packet (in BPF:
+the `mobile_lpm` LPM map and a second `struct config` field). Priority:
+whitelist -> no limit; personal speed/penalty -> those; non-mobile -> the
+non-mobile speed; otherwise the general limit. 127.0.0.1/::1 (HAProxy on the
+node) are not treated as non-mobile. Works with a general limit of 0 too.
+
+Safeguard: without a loaded network list the mode is not enabled in the kernel;
+on partial RIPEstat failure the previous operator networks are kept; on a sync
+failure an already filled map and the mode stay; the map is updated by diff,
+with no empty moment.
+
+Control: `shaper` menu -> [1] Configure limit -> [6] "Non-mobile limit", a line
+in the menu header; `shaperctl.py nonmobile on --speed 1 | off | status`; a
+line in `show`; in `monitor` the limit share of non-mobile clients is computed
+against their speed, and a "Non-mobile X Mbit/s" line is shown. It hits home
+internet and Wi-Fi, mobile Rostelecom (not in the list), foreign operators and
+roaming; exemptions are a personal speed or the whitelist.
+
+`struct config` is now 16 bytes: update the supported way (the "Update" menu or
+`install.sh`), which rebuilds BPF and restarts the engine. On HAProxy nodes run
+`systemctl restart haproxy` afterwards. `nonmobile_mbps` is not carried by
+export/import and not editable via the API.
+
+### Checks
+
+BPF harness - 95 checks (new section 13, 17 checks), program loaded by the 6.12
+kernel verifier; `tests/nonmobile_tests.py` - 91 (new suite),
+`tests/mobile_tests.py` - 83, `audit_shell` +14 menu checks.
+
+An update does not touch settings: the mode is off by default; the limit,
+ports, whitelist and penalties stay as they were.
+
 ## 3.29
 
 **In HAProxy-on-this-node mode `monitor` showed almost the whole channel under

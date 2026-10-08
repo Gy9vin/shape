@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-3.29-8ECA43?style=flat-square" alt="version"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-3.30-8ECA43?style=flat-square" alt="version"></a>
   <img src="https://img.shields.io/badge/kernel-Linux%205.4+-8ECA43?style=flat-square" alt="kernel">
   <img src="https://img.shields.io/badge/language-ru%20%7C%20en-8ECA43?style=flat-square" alt="languages">
   <img src="https://img.shields.io/badge/license-GPL--2.0-8ECA43?style=flat-square" alt="license">
@@ -13,7 +13,7 @@
   <a href="README.md">Русский</a> · <b>English</b>
 </p>
 
-# Shape v3.29
+# Shape v3.30
 
 Per-IP speed limiter for VPN nodes. eBPF + EDT.
 
@@ -198,6 +198,22 @@ the `mobile` field is the operator name or `null`. The `status` and `monitor`
 headers show a "mobile: K of N (P%)" summary and a per-operator breakdown, and
 `monitor` also shows the total speed of mobile vs other clients; IP
 addresses are counted, not people (many can sit behind CGNAT), loopback is skipped.
+
+**Non-mobile limit.** Clients whose address is not in a mobile operator network
+(the `MOBILE_ASNS` list) get a separate speed, e.g. 1 Mbit/s, both ways, on
+shaped ports only and from the first packet. Enable: `shaper` menu -> [1]
+Configure limit -> [6] "Non-mobile limit" (asks for the speed, default 1) or
+`shaperctl.py nonmobile on --speed 1` (`off`, `status`). Off by default.
+Priority: whitelist -> no limit; personal speed or penalty -> those; non-mobile
+-> the non-mobile speed; otherwise the general limit. 127.0.0.1 and `::1`
+(HAProxy on the node) are not treated as non-mobile. Works with a general limit
+of 0 too. Safeguard: until the network list is loaded the mode is not enabled in
+the kernel; if RIPEstat fails the previous networks are kept.
+
+**Who it hits:** home internet and Wi-Fi, mobile Rostelecom (not in the list),
+foreign operators and roaming. To exempt a client use a personal speed
+(`personal`) or the whitelist (`whitelist`).
+After updating, on HAProxy nodes: `systemctl restart haproxy`.
 
 ### Why "now" sometimes exceeds the limit
 

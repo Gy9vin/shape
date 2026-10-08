@@ -13,7 +13,11 @@
  * Пересчёт делает shaperctl.py.
  *
  * Карты:
- *   config_map     : 0 -> struct config     (bytes_per_sec, 0 = выключено)
+ *   config_map     : 0 -> struct config     (bytes_per_sec, 0 = выключено;
+ *                                            nonmobile_bytes_per_sec, 0 = режим
+ *                                            «немобильный лимит» выключен)
+ *   mobile_lpm     : family+ip -> u8        (сети мобильных операторов; клиент
+ *                                            вне них получает немобильную скорость)
  *   port_map       : port (u32) -> u8       (порт 0 = все порты)
  *   whitelist_map  : ip (4x u32) -> u8      (к этим IP лимит не применяется,
  *                                            но их трафик всё равно считается)
@@ -74,9 +78,22 @@
 /* Допустимый всплеск на upload: 200 мс «в долг». */
 #define UL_BUCKET_NS   200000000ULL
 
-/* 8 байт: bytes_per_sec */
+/* 16 байт: bytes_per_sec — общий лимит, nonmobile_bytes_per_sec — скорость
+ * для клиентов вне сетей мобильных операторов (0 = режим выключен). */
 struct config {
     __u64 bytes_per_sec;
+    __u64 nonmobile_bytes_per_sec;
+};
+
+/* Ключ LPM-дерева сетей мобильных операторов. prefixlen считается от начала
+ * данных, то есть от слова family: prefixlen = 32 + длина префикса. Семейство
+ * стоит первым словом, чтобы IPv4 и IPv6 с одинаковыми первыми 32 битами не
+ * пересекались. IPv4: family = 4, адрес в addr[0] в сетевом порядке байт, как
+ * ключ клиента; IPv6: family = 6, адрес целиком. */
+struct mobile_key {
+    __u32 prefixlen;
+    __u32 family;
+    __u32 addr[4];
 };
 
 /* 16 байт: IPv4 в addr[0], IPv6 целиком */
@@ -116,6 +133,14 @@ struct {
     __type(key,   __u32);
     __type(value, __u8);
 } port_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __uint(max_entries, 16384);
+    __type(key,   struct mobile_key);
+    __type(value, __u8);
+} mobile_lpm SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -257,6 +282,33 @@ static __always_inline int parse_pp(__u8 *p, void *data_end, struct ip_key *out)
 }
 
 
+/* Адрес клиента вне сетей мобильных операторов? Loopback (127.0.0.0/8, ::1) —
+ * это HAProxy на самой ноде, а не клиент: он немобильным не считается.
+ * Семейство берётся по самому ключу: у IPv4 слова 1..3 нулевые. */
+static __always_inline int is_nonmobile(const struct ip_key *key)
+{
+    struct mobile_key mk = {0};
+
+    if ((key->addr[1] | key->addr[2] | key->addr[3]) == 0) {
+        if ((bpf_ntohl(key->addr[0]) >> 24) == 127)
+            return 0;
+        mk.prefixlen = 32 + 32;
+        mk.family = 4;
+        mk.addr[0] = key->addr[0];
+    } else {
+        if (key->addr[0] == 0 && key->addr[1] == 0 && key->addr[2] == 0 &&
+            key->addr[3] == bpf_htonl(1))
+            return 0;
+        mk.prefixlen = 32 + 128;
+        mk.family = 6;
+        mk.addr[0] = key->addr[0];
+        mk.addr[1] = key->addr[1];
+        mk.addr[2] = key->addr[2];
+        mk.addr[3] = key->addr[3];
+    }
+    return bpf_map_lookup_elem(&mobile_lpm, &mk) == NULL;
+}
+
 /*
  * direction: 0 = download (egress, пакет ИДЁТ к пользователю  → ключ по daddr)
  *            1 = upload   (ingress, пакет ИДЁТ от пользователя → ключ по saddr)
@@ -380,7 +432,7 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     /* ── Скорость. Ноль = ограничение выключено ── */
     __u32 zero = 0;
     struct config *conf = bpf_map_lookup_elem(&config_map, &zero);
-    if (!conf || conf->bytes_per_sec == 0)
+    if (!conf || (conf->bytes_per_sec == 0 && conf->nonmobile_bytes_per_sec == 0))
         return TC_ACT_OK;
 
     /* ── Порты ── */
@@ -557,12 +609,15 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     if (bpf_map_lookup_elem(&whitelist_map, &key))
         return TC_ACT_OK;
 
-    /* Персональный штраф важнее общего лимита. Просроченные записи вычищает
-     * сторож; здесь просто игнорируем их по времени. */
+    /* Порядок выбора скорости: белый список (выше) → штраф или персональная
+     * скорость → немобильный лимит → общий лимит. Просроченные записи
+     * штрафов вычищает сторож; здесь просто игнорируем их по времени. */
     __u64 rate = conf->bytes_per_sec;
     struct penalty *pen = bpf_map_lookup_elem(&penalty_map, &key);
     if (pen && pen->rate_bytes_per_sec > 0 && now < pen->until_ns)
         rate = pen->rate_bytes_per_sec;
+    else if (conf->nonmobile_bytes_per_sec > 0 && is_nonmobile(&key))
+        rate = conf->nonmobile_bytes_per_sec;
 
     /* Значение перечитано из карты, а не то, что проверяли в начале: между
      * проверкой и этой строкой лимит могли снять из userspace. Деление на

@@ -29,6 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import sys
+import tempfile
 import threading
 import time
 
@@ -106,7 +107,10 @@ BYTES_PER_MBPS = 125_000
 MAX_MBPS = 100_000          # 100 Гбит/с — заведомо выше любого разумного канала
 MAX_PORTS = 64              # должно совпадать с max_entries port_map в shaper.bpf.c
 
-CONFIG_FMT = "<Q"           # struct config, 8 байт
+CONFIG_FMT = "<2Q"          # struct config, 16 байт: общий и немобильный лимит, байт/с
+MOBILE_LPM_MAX = 16384      # должно совпадать с max_entries mobile_lpm в shaper.bpf.c
+CONFIG_MAP_LOCK = os.path.join(VAR_DIR, "config_map.lock")
+MOBILE_KEY_SIZE = 24        # struct mobile_key: prefixlen, family, addr[4]
 PEN_FMT = "<2Q"             # struct penalty: rate_bytes_per_sec, until_ns
 USER_FMT, USER_SIZE = "<4Q", 32   # struct user_state
 # struct port_stat_key: адрес (16 байт) + порт; struct port_stat — счётчики
@@ -420,6 +424,25 @@ MSG = {
         "mob_not": "не из сети мобильного оператора",
         "mob_nocache": "список сетей операторов не загружен: shaperctl.py mobile update",
         "mob_updated_at": "обновлено", "mob_total": "сетей",
+        "h_nonmobile": "лимит для клиентов вне мобильных сетей: on --speed МБИТ | off | status",
+        "h_nm_speed": "скорость немобильного лимита, Мбит/с",
+        "nm_title": "Немобильный лимит",
+        "nm_need_speed": "при первом включении нужна скорость: nonmobile on --speed <Мбит/с>",
+        "nm_bad_speed": "скорость немобильного лимита — число больше нуля",
+        "nm_saved_on": "немобильный лимит {s:g} Мбит/с",
+        "nm_saved_off": "немобильный лимит выключен",
+        "nm_offline": "движок не запущен — значение применится при старте",
+        "nm_inactive": "немобильный лимит: сети операторов не обновлены в ядре: {e}",
+        "nm_no_cache": "нет списка сетей мобильных операторов — выполни: shaperctl.py mobile update",
+        "nm_no_map": "в ядре нет карты mobile_lpm — перезапусти шейпер (systemctl restart shaper)",
+        "nm_too_many": "сетей {n} — больше размера карты ({m})",
+        "nm_sync_fail": "не удалось обновить карту сетей (bpftool, код {rc})",
+        "nm_line": "Немобильн.",
+        "nm_off": "выкл",
+        "nm_want": "Задано", "nm_kernel": "В ядре",
+        "nm_active": "активен", "nm_not_active": "не активен",
+        "nm_prefixes": "Префиксов в карте", "nm_cache": "Кеш обновлён",
+        "nm_mon_row": "Немобильные",
         "hist_none": "история пока пуста, первая запись появится в полночь",
         "hist_day": "Дата", "hist_limited": "ограничений",
         "hist_total": "всего за {n} сут",
@@ -762,6 +785,25 @@ MSG = {
         "mob_not": "not a mobile operator network",
         "mob_nocache": "operator network list not loaded: shaperctl.py mobile update",
         "mob_updated_at": "updated", "mob_total": "networks",
+        "h_nonmobile": "limit for clients outside mobile networks: on --speed MBIT | off | status",
+        "h_nm_speed": "non-mobile limit speed, Mbit/s",
+        "nm_title": "Non-mobile limit",
+        "nm_need_speed": "a speed is required the first time: nonmobile on --speed <Mbit/s>",
+        "nm_bad_speed": "the non-mobile limit speed must be a number above zero",
+        "nm_saved_on": "non-mobile limit {s:g} Mbit/s",
+        "nm_saved_off": "non-mobile limit is off",
+        "nm_offline": "the engine is not running - the value applies at start",
+        "nm_inactive": "non-mobile limit: operator networks not updated in the kernel: {e}",
+        "nm_no_cache": "no mobile operator network list - run: shaperctl.py mobile update",
+        "nm_no_map": "the kernel has no mobile_lpm map - restart the shaper (systemctl restart shaper)",
+        "nm_too_many": "{n} networks - more than the map holds ({m})",
+        "nm_sync_fail": "could not update the network map (bpftool, code {rc})",
+        "nm_line": "Non-mobile",
+        "nm_off": "off",
+        "nm_want": "Set", "nm_kernel": "In kernel",
+        "nm_active": "active", "nm_not_active": "not active",
+        "nm_prefixes": "Prefixes in map", "nm_cache": "Cache updated",
+        "nm_mon_row": "Non-mobile",
         "hist_none": "history is empty, the first row appears at midnight",
         "hist_day": "Date", "hist_limited": "limits",
         "hist_total": "total over {n} days",
@@ -1149,8 +1191,18 @@ def load_config():
     # число или строку.
     panel["exempt"] = [str(x).strip() for x in (panel.get("exempt") or [])
                        if str(x).strip()]
+    # Мусор в немобильной скорости (inf, 1e30, текст) не должен ронять restore:
+    # такое значение считается выключенным режимом.
+    try:
+        nm = _finite(float(cfg.get("nonmobile_mbps", 0) or 0))
+    except (TypeError, ValueError):
+        nm = None
+    if isinstance(cfg.get("nonmobile_mbps"), bool) or nm is None \
+            or not 0 <= nm <= MAX_MBPS:
+        nm = 0.0
     return {"ports": cfg.get("ports", [443]),
             "speed_mbps": float(cfg.get("speed_mbps", 0)),
+            "nonmobile_mbps": float(nm),
             "guard": guard, "telegram": tg, "panel": panel}
 
 
@@ -1212,11 +1264,44 @@ def parse_ports(s):
     return out
 
 
+def write_config_map(cfg, reread=False):
+    """
+    Записывает struct config: общий лимит и немобильный. Немобильный уходит в
+    ядро только при заполненной карте mobile_lpm: пустая карта сделала бы
+    «немобильными» всех, и весь трафик ушёл бы под низкий лимит. Желаемое
+    значение остаётся в конфиге и включится при следующей успешной
+    синхронизации. Если синхронизация не удалась, но карта уже заполнена
+    прежними сетями, режим остаётся включённым: устаревший список лучше, чем
+    внезапно вернувшийся общий лимит. -> текст причины, если синхронизация не
+    удалась, иначе None.
+
+    reread=True — для фонового вызова: синхронизация долгая, и пока она шла,
+    конфиг могли поменять, поэтому перед записью он читается заново.
+    """
+    synced, err = False, None
+    if cfg.get("nonmobile_mbps", 0) > 0:
+        try:
+            synced = mobile_sync() > 0
+        except Exception as e:
+            err = str(e)
+            synced = len(map_dump("mobile_lpm")) > 0
+    with file_lock(CONFIG_MAP_LOCK):
+        if reread:
+            cfg = load_config()
+        bps = int(cfg["speed_mbps"] * BYTES_PER_MBPS)
+        nm_bps = int(cfg["nonmobile_mbps"] * BYTES_PER_MBPS) \
+            if synced and cfg.get("nonmobile_mbps", 0) > 0 else 0
+        map_update("config_map", struct.pack("<I", 0),
+                   struct.pack(CONFIG_FMT, bps, nm_bps))
+    return err
+
+
 def write_to_kernel(cfg):
     """Заливает скорость и список портов в BPF-карты."""
     require_engine()
-    bps = int(cfg["speed_mbps"] * BYTES_PER_MBPS)
-    map_update("config_map", struct.pack("<I", 0), struct.pack(CONFIG_FMT, bps))
+    err = write_config_map(cfg)
+    if err:
+        print(f"{C['yel']}⚠ {t('nm_inactive', e=err)}{C['r']}", file=sys.stderr)
 
     live = {parse_u32(k) for k, _ in map_dump("port_map")}
     for p in live - set(cfg["ports"]):
@@ -1260,6 +1345,12 @@ def cmd_show(a):
     else:
         print(f"  {t('speed'):<9}: {C['yel']}{t('unlimited')}{C['r']}")
     print(f"  {t('ports'):<9}: {ports}")
+    if cfg["nonmobile_mbps"] > 0:
+        live = os.path.exists(map_path("config_map")) and nonmobile_kernel_bps() > 0
+        print(f"  {t('nm_line'):<9}: {C['b']}{cfg['nonmobile_mbps']:g} Mbit/s{C['r']}"
+              + ("" if live else f" {C['yel']}({t('nm_not_active')}){C['r']}"))
+    else:
+        print(f"  {t('nm_line'):<9}: {C['gry']}{t('nm_off')}{C['r']}")
     # Предупреждение стоит здесь, на самом ходовом экране: нода без fq
     # выглядит здоровой во всём остальном, и заметить это больше негде.
     ready, bad = edt_ready()
@@ -1622,6 +1713,13 @@ def load_color(share):
     return C["gry"]
 
 
+def _is_loopback(ip):
+    try:
+        return ipaddress.ip_address(str(ip).strip()).is_loopback
+    except ValueError:
+        return False
+
+
 def cmd_monitor(a):
     require_engine()
     cfg = load_config()
@@ -1636,6 +1734,7 @@ def cmd_monitor(a):
     prev_ports = read_port_stats()
     pens, pens_at = load_penalties(), 0.0
     wl = whitelist_ips()
+    nm_mbps = nonmobile_kernel_bps() / BYTES_PER_MBPS
     width = 78
 
     print("\033[?25l", end="", flush=True)   # спрятать курсор
@@ -1671,6 +1770,7 @@ def cmd_monitor(a):
             if now_t - pens_at > 5:
                 pens, pens_at = load_penalties(), now_t
                 wl = whitelist_ips()
+                nm_mbps = nonmobile_kernel_bps() / BYTES_PER_MBPS
 
             rows = []
             for ip, (dl, ul, up_pkt) in rt.items():
@@ -1711,6 +1811,9 @@ def cmd_monitor(a):
                 out.append(f"   {t('mon_limit_row'):<16}{C['yel']}{t('mon_nolimit')}{C['r']}"
                            f"          {t('mon_loading')} {C['b']}{len(active)}{C['r']}"
                            f" {t('mon_of')} {len(rows)}")
+            if nm_mbps > 0:
+                out.append(f"   {t('nm_mon_row'):<16}{C['b']}{nm_mbps:g} Mbit/s{C['r']}"
+                           f"   {C['gry']}{t('mon_per_ip')}{C['r']}")
             mob, mob_total, mob_ops = mobile_summary([r[0] for r in rows])
             if mob_total and (mob or mobile_read() is not None):
                 out.append(f"   {C['b']}"
@@ -1736,7 +1839,14 @@ def cmd_monitor(a):
                 out.append(f"\n   {C['gry']}{t('mon_idle')}{C['r']}")
 
             for ip, dl, ul, avg, hold, up_pkt in active[:a.top]:
-                share = dl / scale if scale > 0 else 0
+                # Лимит адреса: штраф и белый список приоритетнее немобильного
+                # лимита, loopback — это HAProxy, а не клиент.
+                row_limit = limit
+                if nm_mbps > 0 and ip not in pens and ip not in wl \
+                        and not _is_loopback(ip) and not mobile_of(ip):
+                    row_limit = nm_mbps
+                row_scale = row_limit if row_limit > 0 else scale
+                share = dl / row_scale if row_scale > 0 else 0
                 col = load_color(share)
                 # Значок слева вместо колонки «держит»: в спокойный час она
                 # была сплошь из прочерков и занимала девять знаков впустую.
@@ -1751,13 +1861,13 @@ def cmd_monitor(a):
                     mark = f"{C['byel']}▪{C['r']}"
                 else:
                     mark = " "
-                pct = f"{share * 100:>3.0f}%" if limit > 0 else "   "
+                pct = f"{share * 100:>3.0f}%" if row_limit > 0 else "   "
                 op = mobile_of(ip)
                 # Отдачу красим по своей шкале: у мобильных операторов канал
                 # вверх узкий, и заметная отдача — первый признак раздачи.
                 ul_col = C["gry"]
-                if limit > 0 and ul >= limit * 0.15:
-                    ul_col = C["bred"] if ul >= limit * 0.4 else C["byel"]
+                if row_limit > 0 and ul >= row_limit * 0.15:
+                    ul_col = C["bred"] if ul >= row_limit * 0.4 else C["byel"]
                 # Время удержания вернулось отдельной колонкой: по нему
                 # видно разницу между всплеском и постоянной нагрузкой,
                 # а значок слева этого не показывает.
@@ -1777,7 +1887,7 @@ def cmd_monitor(a):
                            f"{pkt_col}{pkt_txt:>7}{C['r']}"
                            f"{C['gry']}{avg:>8.1f}{C['r']}"
                            f"{hold_col}{hold_txt:>7}{C['r']}"
-                           f"  {col}{bar(dl, scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}"
+                           f"  {col}{bar(dl, row_scale, 12)}{C['r']} {C['gry']}{pct}{C['r']}"
                            f"{(' ' + C['cyan'] + op + C['r']) if op else ''}")
                 # Разбивка по портам под адресом: показываем, когда адрес
                 # реально работает больше чем по одному порту.
@@ -2170,6 +2280,81 @@ def mobile_fetch_asn(asn):
     return out
 
 
+def mobile_lpm_keys(data):
+    """Кеш сетей -> множество ключей mobile_lpm (24 байта: prefixlen, family, addr)."""
+    keys = set()
+    for rec in (data or {}).get("nets", []):
+        try:
+            net = ipaddress.ip_network(rec[0], strict=False)
+        except Exception:
+            continue
+        keys.add(struct.pack("<II", 32 + net.prefixlen, net.version)
+                 + net.network_address.packed.ljust(16, b"\0"))
+    return keys
+
+
+def _lpm_key_bytes(k):
+    """Ключ из дампа bpftool (байты или структура) -> 24 байта или None."""
+    b = _raw(k)
+    if b is not None and len(b) >= MOBILE_KEY_SIZE:
+        return b[:MOBILE_KEY_SIZE]
+    if isinstance(k, dict):
+        try:
+            addr = (list(map(_int, k.get("addr", []))) + [0, 0, 0, 0])[:4]
+            return struct.pack("<II4I", _int(k.get("prefixlen", 0)),
+                               _int(k.get("family", 0)), *addr)
+        except (TypeError, ValueError, struct.error):
+            return None
+    return None
+
+
+def mobile_sync():
+    """
+    Приводит карту mobile_lpm в соответствие с кешем сетей: добавляет новые
+    префиксы, потом удаляет ушедшие — карта ни на миг не пустеет. Всё одной
+    пачкой `bpftool batch`, а не вызовом на запись. -> число префиксов в карте.
+    Бросает RuntimeError, если карта не заполнена.
+    """
+    want = mobile_lpm_keys(mobile_read())
+    if not want:
+        raise RuntimeError(t("nm_no_cache"))
+    if len(want) > MOBILE_LPM_MAX:
+        raise RuntimeError(t("nm_too_many", n=len(want), m=MOBILE_LPM_MAX))
+    path = map_path("mobile_lpm")
+    if not os.path.exists(path):
+        raise RuntimeError(t("nm_no_map"))
+    have = {kb for kb in (_lpm_key_bytes(k) for k, _ in map_dump("mobile_lpm")) if kb}
+    lines = [f"map update pinned {path} key hex {' '.join(hexs(k))} value hex 01"
+             for k in sorted(want - have)]
+    lines += [f"map delete pinned {path} key hex {' '.join(hexs(k))}"
+              for k in sorted(have - want)]
+    if lines:
+        fd, tmp = tempfile.mkstemp(prefix="mobile-lpm-", suffix=".batch")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            _out, rc = run(["bpftool", "batch", "file", tmp], check=False)
+        finally:
+            os.unlink(tmp)
+        if rc != 0:
+            raise RuntimeError(t("nm_sync_fail", rc=rc))
+    return len(want)
+
+
+def nonmobile_refresh():
+    """
+    После обновления кеша сетей: досинхронизировать карту и включить режим в
+    ядре, если он задан. Не бросает. -> текст причины, если не вышло, иначе None.
+    """
+    try:
+        cfg = load_config()
+        if cfg["nonmobile_mbps"] <= 0 or not os.path.exists(map_path("config_map")):
+            return None
+        return write_config_map(cfg, reread=True)
+    except (Exception, SystemExit) as e:
+        return str(e) or "error"
+
+
 def mobile_update():
     """
     Обновить кеш. -> (число сетей, список ASN без ответа).
@@ -2192,6 +2377,17 @@ def mobile_update():
             nets.extend([p, op] for p in prefixes)
     if not nets:
         raise RuntimeError(t("mob_none"))
+    if failed:
+        # Часть AS не ответила: их сети остаются из прежнего кеша. Иначе
+        # абоненты этих операторов потеряли бы метку и сутки сидели бы на
+        # немобильной скорости. Заменять список целиком можно только при
+        # полностью успешном обновлении.
+        seen = {(str(p), str(o)) for p, o in nets}
+        for rec in (mobile_read() or {}).get("nets", []):
+            if isinstance(rec, list) and len(rec) == 2 \
+                    and (str(rec[0]), str(rec[1])) not in seen:
+                seen.add((str(rec[0]), str(rec[1])))
+                nets.append([str(rec[0]), str(rec[1])])
     os.makedirs(VAR_DIR, exist_ok=True)
     tmp = MOBILE_FILE + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -2229,6 +2425,9 @@ def mobile_due(now=None):
             try:
                 n, failed = mobile_update()
                 print(t("mob_updated", n=n, bad=len(failed)), flush=True)
+                err = nonmobile_refresh()
+                if err:
+                    print(f"nonmobile: {t('nm_inactive', e=err)}", flush=True)
             except Exception as e:
                 print(f"mobile: {e}", flush=True)
 
@@ -4788,6 +4987,9 @@ def cmd_mobile(a):
         if failed:
             print(f"{C['yel']}  {t('mob_failed')}: "
                   f"{', '.join('AS' + str(x) for x in failed)}{C['r']}")
+        err = nonmobile_refresh()
+        if err:
+            print(f"{C['yel']}⚠ {t('nm_inactive', e=err)}{C['r']}")
         return
 
     if a.action == "lookup":
@@ -4814,6 +5016,72 @@ def cmd_mobile(a):
           f"{t('mob_total')}: {sum(count.values())}")
     for op in sorted(count, key=lambda k: -count[k]):
         print(f"  {op:<14}{count[op]:>6}")
+    print()
+
+
+def nonmobile_kernel_bps():
+    """Немобильная скорость, которая реально лежит в config_map, байт/с."""
+    for _k, v in map_dump("config_map"):
+        b = _raw(v)
+        if b is not None and len(b) >= 16:
+            return struct.unpack("<2Q", b[:16])[1]
+        if isinstance(v, dict):
+            return _int(v.get("nonmobile_bytes_per_sec", 0))
+    return 0
+
+
+def cmd_nonmobile(a):
+    """Немобильный лимит: on --speed N | off | status."""
+    cfg = load_config()
+    engine = os.path.exists(map_path("config_map"))
+
+    if a.action in ("on", "off"):
+        if a.action == "off":
+            cfg["nonmobile_mbps"] = 0.0
+        else:
+            speed = a.speed if a.speed is not None else cfg["nonmobile_mbps"]
+            if a.speed is None and speed <= 0:
+                die(t("nm_need_speed"))
+            if speed != speed or not 0 < speed < float("inf"):
+                die(t("nm_bad_speed"))
+            if speed > MAX_MBPS:
+                die(t("too_fast", v=speed))
+            cfg["nonmobile_mbps"] = float(speed)
+        save_config(cfg)
+        log_event("config_changed", source="cli",
+                  message=f"nonmobile_mbps={cfg['nonmobile_mbps']:g}")
+        err = write_config_map(cfg) if engine else None
+        if a.action == "off":
+            print(f"{C['grn']}✓ {t('nm_saved_off')}{C['r']}")
+        else:
+            print(f"{C['grn']}✓ {t('nm_saved_on', s=cfg['nonmobile_mbps'])}{C['r']}")
+        if not engine:
+            print(f"{C['gry']}  {t('nm_offline')}{C['r']}")
+        if err:
+            print(f"{C['yel']}⚠ {t('nm_inactive', e=err)}{C['r']}")
+        return
+
+    want = cfg["nonmobile_mbps"]
+    kern = nonmobile_kernel_bps() if engine else 0
+    n_map = len(map_dump("mobile_lpm")) if engine else 0
+    data = mobile_read()
+    try:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(data["updated"])))
+    except (TypeError, KeyError, ValueError, OverflowError, OSError):
+        when = "—"
+    print(f"\n  {C['b']}{t('nm_title')}{C['r']}")
+    print(f"  {t('nm_want'):<18}: " + (f"{C['b']}{want:g} Mbit/s{C['r']}" if want > 0
+                                      else f"{C['gry']}{t('nm_off')}{C['r']}"))
+    if kern > 0:
+        print(f"  {t('nm_kernel'):<18}: {C['grn']}{t('nm_active')}{C['r']}"
+              f" {kern / BYTES_PER_MBPS:g} Mbit/s")
+    else:
+        print(f"  {t('nm_kernel'):<18}: {C['yel']}{t('nm_not_active')}{C['r']}")
+    print(f"  {t('nm_prefixes'):<18}: {n_map}")
+    if data is None:
+        print(f"  {t('nm_cache'):<18}: {C['gry']}{t('mob_nocache')}{C['r']}")
+    else:
+        print(f"  {t('nm_cache'):<18}: {when}")
     print()
 
 
@@ -5485,6 +5753,11 @@ def build_parser():
     mo.add_argument("action", choices=["update", "status", "lookup"])
     mo.add_argument("ip", nargs="?", default="")
     mo.set_defaults(func=cmd_mobile)
+
+    nmp = sub.add_parser("nonmobile", help=t("h_nonmobile"))
+    nmp.add_argument("action", choices=["on", "off", "status"])
+    nmp.add_argument("--speed", type=float, default=None, help=t("h_nm_speed"))
+    nmp.set_defaults(func=cmd_nonmobile)
 
     mt = sub.add_parser("metrics", help=t("h_metrics"))
     mt.add_argument("--out", default=None, help=t("h_met_out"))
