@@ -438,6 +438,13 @@ static __always_inline int process_packet(struct __sk_buff *skb,
     /* TCP-сегмент без полезной нагрузки (SYN, SYN-ACK, чистый ACK, FIN, RST).
      * 1 — есть данные или это не TCP; блок режет только такие пакеты. */
     __u32 has_data = 1;
+    /* Флаги TCP и длина заголовка (doff * 4), прочитанные там, где граница
+     * пакета доказана проверкой (tcp + 1) > data_end. Дальше используются
+     * как числа: clang 18 вычитывает указатель l4 со стека с доказанными
+     * 8 байтами (как у UDP), и повторное чтение флагов из пакета верификатор
+     * отклоняет («invalid access to packet»). */
+    __u8  tcp_flags = 0;
+    __u32 tcp_hlen = 0;
 
     if (eth_type == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = l3;
@@ -530,8 +537,9 @@ static __always_inline int process_packet(struct __sk_buff *skb,
             return TC_ACT_OK;
         sport = bpf_ntohs(tcp->source);
         dport = bpf_ntohs(tcp->dest);
-        __u32 hdr_end = (__u32)((__u8 *)l4 - (__u8 *)data) +
-                        ((__u32)(((__u8 *)tcp)[12] >> 4) << 2);
+        tcp_flags = ((__u8 *)tcp)[13];
+        tcp_hlen = (__u32)(((__u8 *)tcp)[12] >> 4) << 2;
+        __u32 hdr_end = (__u32)((__u8 *)l4 - (__u8 *)data) + tcp_hlen;
         if (ip_end <= hdr_end)
             has_data = 0;
     } else if (proto == IPPROTO_UDP) {
@@ -580,9 +588,9 @@ static __always_inline int process_packet(struct __sk_buff *skb,
         struct pp_key ck = {0};
         __builtin_memcpy(ck.addr, key.addr, sizeof(ck.addr));
         ck.port = (direction == 0) ? dport : sport;
-        /* Флаги читаем сразу: ниже bpf_skb_pull_data может сделать указатель
-         * l4 недействительным, а FIN/RST нужны уже после разбора. */
-        __u8 tcp_flags = ((__u8 *)l4)[13];
+        /* Флаги (tcp_flags) прочитаны при разборе портов: ниже
+         * bpf_skb_pull_data может сделать указатель l4 недействительным,
+         * а FIN/RST нужны уже после разбора. */
 
         if (direction == 1) {
             /* Upload: если записи нет, сегмент мог принести заголовок. */
@@ -590,9 +598,7 @@ static __always_inline int process_packet(struct __sk_buff *skb,
             if (client) {
                 __builtin_memcpy(key.addr, client->addr, sizeof(key.addr));
             } else {
-                struct tcphdr *tcp = l4;
-                __u8 doff = ((__u8 *)tcp)[12] >> 4;
-                __u8 *pl = (__u8 *)tcp + ((__u32)doff << 2);
+                __u8 *pl = (__u8 *)l4 + tcp_hlen;
                 struct ip_key real = {0};
 
                 /* Полезная нагрузка не всегда лежит в линейной части skb:

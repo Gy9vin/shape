@@ -13,6 +13,17 @@ The Russian version in [CHANGELOG.md](CHANGELOG.md) is the primary one.
 
 ---
 
+## 3.32
+
+**Fixed a verifier rejection on Ubuntu 24.04 (clang 18): TCP flags were read from the packet without a proven bound.**
+
+On Ubuntu 24.04 (kernel 6.8, clang 18) loading `shaper_down` failed with
+`invalid access to packet`. The TCP flags and header length are now saved while
+parsing ports, where the packet bound is already checked, and used as plain
+numbers afterwards. Shaper logic is unchanged.
+
+---
+
 ## 3.31
 
 **Non-mobile clients could only be limited, not cut off; the monitor showed 1000-6000% for them.**
